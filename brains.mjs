@@ -12,6 +12,7 @@ const BRAIN_SECTION = `## The shared brain
 Long-term memory lives in the \`memory\` MCP server (\`brain/memory.jsonl\` in this folder).
 - **Search first.** Before answering about the user's work, plans, preferences or past decisions, call \`mcp__memory__search_nodes\` or \`mcp__memory__open_nodes\`. Prefer what you find over guessing; say so if it looks out of date.
 - **Save after.** When the user makes a decision, states a preference ("from now on…", "always…", "never…") or a fact worth keeping comes up, save it right away: \`mcp__memory__add_observations\` on the matching entity, or \`mcp__memory__create_entities\` for a new one. One short, dated fact per observation. Confirm in one line.
+- **Only this brain.** Save memories only here, never in Claude Code's own memory files (\`MEMORY.md\` and the \`memory/\` folder under \`~/.claude/projects\`), even when the user says "remember". Other agents and new chats can't see those.
 - Never save passwords, API keys, tokens or private details about other people.
 `;
 
@@ -62,10 +63,18 @@ function ensureHooks(s, command) {
   return changed;
 }
 
+// Claude Code's own auto-memory keeps notes only that one tool can see; a brain keeps everything in
+// its shared memory instead. Set once: if the user turns it back on, it stays on.
+function ensureBrainMemoryOnly(s) {
+  if ('autoMemoryEnabled' in s) return false;
+  s.autoMemoryEnabled = false;
+  return true;
+}
+
 export function repairHooks(dir, command, memoryServer) {
   const file = path.join(dir, '.claude', 'settings.json');
   const s = readJsonFile(file);
-  if (s && ensureHooks(s, command)) writeJsonFile(file, s);
+  if (s && (ensureHooks(s, command) | ensureBrainMemoryOnly(s))) writeJsonFile(file, s);
   // a brain set up by ClaudeOS.exe runs the exe's memory server: follow the exe if it moved
   const mcpFile = path.join(dir, '.mcp.json');
   const mcp = readJsonFile(mcpFile);
@@ -120,6 +129,7 @@ export function setupBrain(dir, { name, hookCommand: command, memoryServer, temp
     s.enabledMcpjsonServers ||= [];
     if (!s.enabledMcpjsonServers.includes('memory')) { s.enabledMcpjsonServers.push('memory'); changed = true; }
     if (ensureHooks(s, command)) changed = true;
+    if (ensureBrainMemoryOnly(s)) changed = true;
     if (changed) { writeJsonFile(settingsFile, s); done.push(settings ? 'added ClaudeOS settings to .claude/settings.json' : '.claude/settings.json'); }
   }
 

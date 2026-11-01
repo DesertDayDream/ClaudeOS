@@ -91,7 +91,8 @@ export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, m
 
     const proc = spawn('claude', args, {
       cwd,
-      env: { ...process.env, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000) },
+      // memories go to the brain, never Claude Code's own auto-memory (also off in each brain's settings)
+      env: { ...process.env, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
       windowsHide: true,
     });
     run = { proc, reply, streamed: new Set(), current: null, stopped: false, wrap, first: null, last: null, result: null };
@@ -190,7 +191,8 @@ export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, m
   // What this reply cost and how big the conversation is now, from the usage Claude Code reports.
   function measure() {
     const { first, last, result } = run;
-    if (!last) return null;
+    // an error that never reached the model (usage limit, no login) has an all-zero usage
+    if (!last || !sum(last.input_tokens, last.cache_creation_input_tokens, last.cache_read_input_tokens)) return null;
     const ttlOf = u => u?.cache_creation?.ephemeral_1h_input_tokens > 0 ? 3600e3 : u?.cache_creation?.ephemeral_5m_input_tokens > 0 ? 300e3 : 0;
     const models = Object.values(result?.modelUsage || {});
     const main = models.sort((a, b) => sum(b.cacheReadInputTokens, b.cacheCreationInputTokens, b.inputTokens) - sum(a.cacheReadInputTokens, a.cacheCreationInputTokens, a.inputTokens))[0];

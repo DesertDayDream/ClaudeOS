@@ -6,6 +6,7 @@ This folder is a ClaudeOS brain: one Claude with a shared brain and a team of sk
 Long-term memory lives in the `memory` MCP server (`brain/memory.jsonl`). Other agents (Codex, Claude Desktop) may read and write the same file.
 - **Search first.** Before answering about the user's work, plans, preferences or past decisions, call `mcp__memory__search_nodes` or `mcp__memory__open_nodes`. Prefer what you find over guessing; say so if it looks out of date.
 - **Save after.** When the user makes a decision, states a preference ("from now on…", "always…", "never…") or a fact worth keeping comes up, save it right away: `mcp__memory__add_observations` on the matching entity, or `mcp__memory__create_entities` for a new one. One short, dated fact per observation. Confirm in one line.
+- **Only this brain.** Save memories only here, never in Claude Code's own memory files (`MEMORY.md` and the `memory/` folder under `~/.claude/projects`), even when the user says "remember". Other agents and new chats can't see those.
 - Main entities: **"Brand rules"** (style, voice, channel), **"Lessons"** (what worked, from pulse), **"Ideas"** (from radar), **"Decisions"** (anything else the user decides).
 - Never save passwords, API keys, tokens or private details about other people.
 

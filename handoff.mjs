@@ -6,7 +6,7 @@ import { spawn, execFile } from 'node:child_process';
 export function runHandoff({ brain, task, mcpServers, onExit }) {
   const args = ['-p', task, '--output-format', 'json',
     '--mcp-config', JSON.stringify({ mcpServers }), '--permission-prompt-tool', 'mcp__claudeos__approve', '--allowedTools', 'mcp__memory'];
-  const proc = spawn('claude', args, { cwd: brain.path, env: { ...process.env, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000) }, windowsHide: true });
+  const proc = spawn('claude', args, { cwd: brain.path, env: { ...process.env, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' }, windowsHide: true });
   let out = '', err = '', killed = false;
   const done = new Promise(resolve => {
     proc.stdout.on('data', d => { out += d; });
