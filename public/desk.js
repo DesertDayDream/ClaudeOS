@@ -28,7 +28,7 @@ function drawTabs() {
   tabsEl.innerHTML = tabs.map(t => `<button type="button" data-id="${t.id}" class="${t.id === shown ? 'on' : ''}" title="${esc(`${t.cwd}${t.command ? `\n${t.command}` : ''}${t.by === 'Claude' ? '\nStarted by Claude' : ''}`)}">
     <i class="${t.running ? 'run' : ''}"></i>${esc(t.title)}<em data-close="${t.id}" title="Close">×</em></button>`).join('') || '<span class="hint" style="color:var(--dim);font-size:12px">No terminals yet. Type a command below, or Claude opens one for a dev server or a build.</span>';
   const t = tabs.find(x => x.id === shown);
-  inputEl.placeholder = t ? (t.running ? `Running: ${t.command}` : `Run a command in ${t.cwd}…`) : 'Run a command in this chat\'s folder…';
+  inputEl.placeholder = t ? (t.running ? `Running: ${t.command} · type to answer it, Ctrl+C stops it` : `PS ${t.cwd}>  (the shell keeps cd and variables)`) : 'Run a command in this chat\'s folder…';
   document.getElementById('termStop').disabled = !t?.running;
   drawOut();
 }
@@ -59,16 +59,33 @@ document.getElementById('termNew').addEventListener('click', async () => {
 document.getElementById('termStop').addEventListener('click', () => shown && api('/api/terminal/stop', { tab: shown }));
 document.getElementById('termForm').addEventListener('submit', async e => {
   e.preventDefault();
+  const t = tabs.find(x => x.id === shown);
+  // while a command runs, what you type is its input (Enter alone answers a prompt with nothing)
+  if (t?.running) {
+    const r = await api('/api/terminal/input', { tab: t.id, text: inputEl.value });
+    if (r.error) return alert(r.error);
+    inputEl.value = '';
+    return;
+  }
   const command = inputEl.value.trim();
   if (!command) return;
-  const t = tabs.find(x => x.id === shown);
-  const r = await api('/api/terminal/run', { command, tab: t && !t.running ? t.id : undefined });
+  const r = await api('/api/terminal/run', { command, tab: t?.id });
   if (r.error) return alert(r.error);
+  if (history.at(-1) !== command) history.push(command);
+  back = history.length;
   inputEl.value = '';
   shown = r.tab.id;
 });
+// Up and Down walk back through the commands you ran
+const history = [];
+let back = 0;
 inputEl.addEventListener('keydown', e => {
   if (e.key === 'c' && e.ctrlKey && !inputEl.selectionEnd && shown) { e.preventDefault(); api('/api/terminal/stop', { tab: shown }); }
+  if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && history.length && !tabs.find(x => x.id === shown)?.running) {
+    e.preventDefault();
+    back = Math.max(0, Math.min(history.length, back + (e.key === 'ArrowUp' ? -1 : 1)));
+    inputEl.value = history[back] || '';
+  }
 });
 events.addEventListener('terminal', e => {
   const ev = JSON.parse(e.data);

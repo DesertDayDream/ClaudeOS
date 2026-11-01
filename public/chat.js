@@ -1,4 +1,5 @@
 import { events } from '/events.js';
+import { markdown } from '/markdown.js';
 // ClaudeOS chat panel: send requests to Claude in the active brain's folder, stream replies,
 // and answer tool approvals with Allow/Deny.
 const TOKEN = window.CLAUDEOS_TOKEN;
@@ -13,6 +14,7 @@ const meter = document.getElementById('meter');
 const nudge = document.getElementById('nudge');
 const modelSel = document.getElementById('chatModel');
 const effortSel = document.getElementById('chatEffort');
+const modeSel = document.getElementById('chatMode');
 
 // Every message resends the whole conversation. Past BIG tokens, or once the cache has expired on a
 // chat of STALE tokens or more, wrapping up and starting fresh is cheaper than carrying on.
@@ -23,27 +25,6 @@ let context = null;        // { tokens, base, window, ttl, at } from the server
 const dismissed = new Set(); // nudges closed for this chat ("big" / "stale" + when)
 
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-
-// Small markdown: code fences, inline code, bold, italics, links, lists, paragraphs.
-function markdown(src) {
-  const parts = String(src).split(/```[^\n]*\n?/);
-  return parts.map((part, i) => {
-    if (i % 2) return `<pre><code>${esc(part.replace(/\n$/, ''))}</code></pre>`;
-    const inline = s => esc(s)
-      .replace(/`([^`]+)`/g, '<code>$1</code>')
-      .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
-      .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>')
-      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-    return part.split(/\n{2,}/).map(block => {
-      const lines = block.split('\n').filter(l => l.trim());
-      if (!lines.length) return '';
-      if (lines.every(l => /^\s*[-*]\s+/.test(l))) return `<ul>${lines.map(l => `<li>${inline(l.replace(/^\s*[-*]\s+/, ''))}</li>`).join('')}</ul>`;
-      if (lines.every(l => /^\s*\d+[.)]\s+/.test(l))) return `<ol>${lines.map(l => `<li>${inline(l.replace(/^\s*\d+[.)]\s+/, ''))}</li>`).join('')}</ol>`;
-      if (/^#{1,6}\s/.test(lines[0])) return `<p><b>${inline(lines[0].replace(/^#+\s*/, ''))}</b>${lines.length > 1 ? '<br>' + lines.slice(1).map(inline).join('<br>') : ''}</p>`;
-      return `<p>${lines.map(inline).join('<br>')}</p>`;
-    }).join('');
-  }).join('');
-}
 
 const kTok = n => n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : String(n);
 const mins = ms => ms >= 3600e3 ? `${Math.round(ms / 3600e3)} h` : `${Math.max(1, Math.round(ms / 60e3))} min`;
@@ -102,7 +83,7 @@ function render(msg) {
   } else {
     entry.el.innerHTML =
       (msg.carry ? '<div class="head">Fresh start · handover from your last chat (the details are saved in the brain\'s memory)</div>' : '') +
-      (msg.tools?.length ? `<div class="tools">${msg.tools.map(t => `<div title="${esc(t)}">${esc(t)}</div>`).join('')}</div>` : '') +
+      (msg.tools?.length ? `<div class="tools">${msg.tools.map(toolRow).join('')}</div>` : '') +
       `<div class="body">${markdown(msg.text)}</div>` +
       (msg.streaming && !msg.text ? '<span class="typing"></span>' : '') +
       (msg.error ? `<div class="err">${esc(msg.error)}</div>` : '') +
@@ -111,6 +92,72 @@ function render(msg) {
   }
   scrollDown(stick);
 }
+
+// ---------- what Claude did: tool lines, and file edits as diffs ----------
+// Line diff by longest common subsequence; big inputs just show old as removed and new as added.
+function diffLines(a, b) {
+  // a file's final newline isn't a line of its own
+  const x = a ? a.replace(/\n$/, '').split('\n') : [], y = b ? b.replace(/\n$/, '').split('\n') : [];
+  if (x.length * y.length > 250000) return [...x.map(t => ['d', t]), ...y.map(t => ['a', t])];
+  const L = Array.from({ length: x.length + 1 }, () => new Uint32Array(y.length + 1));
+  for (let i = x.length - 1; i >= 0; i--) for (let j = y.length - 1; j >= 0; j--) L[i][j] = x[i] === y[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out = [];
+  let i = 0, j = 0;
+  while (i < x.length && j < y.length) {
+    if (x[i] === y[j]) { out.push([' ', x[i]]); i++; j++; }
+    else if (L[i + 1][j] >= L[i][j + 1]) out.push(['d', x[i++]]);
+    else out.push(['a', y[j++]]);
+  }
+  while (i < x.length) out.push(['d', x[i++]]);
+  while (j < y.length) out.push(['a', y[j++]]);
+  return out;
+}
+// unchanged runs longer than 6 lines fold to 3 either side
+function diffHtml(rows) {
+  let html = '';
+  for (let k = 0; k < rows.length; k++) {
+    if (rows[k][0] === ' ') {
+      let e = k;
+      while (e < rows.length && rows[e][0] === ' ') e++;
+      const run = e - k, head = k === 0 ? 0 : 3, tail = e === rows.length ? 0 : 3;
+      if (run > head + tail + 1) {
+        for (let q = k; q < k + head; q++) html += `<div class="l">${esc(rows[q][1])}</div>`;
+        html += `<div class="gap">… ${run - head - tail} unchanged line${run - head - tail === 1 ? '' : 's'}</div>`;
+        for (let q = e - tail; q < e; q++) html += `<div class="l">${esc(rows[q][1])}</div>`;
+        k = e - 1;
+        continue;
+      }
+    }
+    html += `<div class="l${rows[k][0] === ' ' ? '' : ' ' + rows[k][0]}">${esc(rows[k][1])}</div>`;
+  }
+  return html;
+}
+function toolRow(t) {
+  if (typeof t === 'string') return `<div title="${esc(t)}">${esc(t)}</div>`;
+  const rows = t.write != null ? diffLines('', t.write) : t.edits.flatMap((e, n) => [...(n ? [['gap', '']] : []), ...diffLines(e.old, e.new)]);
+  const add = rows.filter(r => r[0] === 'a').length, del = rows.filter(r => r[0] === 'd').length;
+  const body = rows.reduce((parts, r) => { if (r[0] === 'gap') parts.push([]); else parts.at(-1).push(r); return parts; }, [[]])
+    .map(diffHtml).join('<div class="gap">⋯</div>');
+  const name = t.file.split(/[\\/]/).pop();
+  return `<details><summary title="${esc(t.text)}">${esc(t.text.replace(t.file, name))}<span class="n"><span class="a">+${add}</span> <span class="d">-${del}</span></span></summary>
+    <div class="diff"><div class="hd"><span>${esc(t.file)}</span><a class="file" href="#" data-file="${esc(t.file)}">Open</a></div>${body}</div></details>`;
+}
+// Copy on code blocks; file links and diff headers open the file in the editor
+log.addEventListener('click', async e => {
+  const copy = e.target.closest('.code .copy');
+  if (copy) {
+    await navigator.clipboard.writeText(copy.parentElement.querySelector('code').textContent).catch(() => {});
+    copy.textContent = 'Copied'; copy.classList.add('done');
+    setTimeout(() => { copy.textContent = 'Copy'; copy.classList.remove('done'); }, 1200);
+    return;
+  }
+  const file = e.target.closest('a[data-file]');
+  if (file) {
+    e.preventDefault();
+    const r = await api('/api/open-file', { path: file.dataset.file });
+    if (r.error) alert(r.error);
+  }
+});
 
 function renderApproval(card) {
   const el = document.createElement('div');
@@ -183,6 +230,7 @@ async function load() {
   tools = s.tools || {};
   showTools();
   showOptions(s.options);
+  showMode(s.mode);
   setBusy(!!s.busy);
   showEmpty();
   scrollDown(true);
@@ -209,6 +257,7 @@ function onEvent(ev) {
   else if (ev.kind === 'list') showList(ev);
   else if (ev.kind === 'context') { context = ev.context; showContext(); }
   else if (ev.kind === 'options') showOptions(ev.options);
+  else if (ev.kind === 'mode') showMode(ev.mode);
 }
 
 // ---------- the brain's chats ----------
@@ -292,6 +341,19 @@ for (const sel of [modelSel, effortSel]) sel.addEventListener('change', async ()
   const r = await api('/api/chat/options', { model: modelSel.value, effort: effortSel.value });
   if (r.error) alert(r.error);
   showOptions(r.options);
+});
+
+// how much this chat asks first (Claude Code's permission mode)
+function showMode(m = '') {
+  modeSel.value = m || '';
+  modeSel.classList.toggle('set', !!m);
+}
+modeSel.addEventListener('change', async () => {
+  if (modeSel.value === 'bypassPermissions' && !confirm('Don\'t ask: Claude runs every command and edits every file in this chat without asking first, including ones that can\'t be undone. Turn it on for this chat?')) return load();
+  const r = await api('/api/chat/mode', { mode: modeSel.value });
+  if (r.error) { alert(r.error); return load(); }
+  showMode(r.mode);
+  warmedAt = 0;
 });
 
 async function wrap() {

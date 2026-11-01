@@ -26,6 +26,11 @@ const sum = (...n) => n.reduce((a, b) => a + (Number(b) || 0), 0);
 // what the model/effort pickers offer (aliases follow the latest model of each family)
 const MODELS = ['fable', 'opus', 'sonnet', 'haiku'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+// how much Claude asks before acting (Claude Code's --permission-mode); empty = ask for anything not allowed
+const MODES = ['acceptEdits', 'auto', 'plan', 'bypassPermissions'];
+// file edits keep what changed, so the chat can show them as diffs
+const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
+const MAX_DIFF = 20000; // characters kept per side of an edit
 const managerPrompt = crew => `You are the Manager of this brain's team, and this chat is how the user talks to you.
 The team (employee name, skill: what it does):
 ${crew.map(c => `- ${c.name}, ${c.skill}: ${String(c.description || '').slice(0, 200)}`).join('\n')}
@@ -46,6 +51,17 @@ const DESK_PROMPT = `ClaudeOS desk tools (mcp__claudeos__*):
 - publish_artifact: when a page would be clearer than chat text (a report, dashboard, comparison, mock-up, small tool), write one self-contained .html file and publish it; give the user the link it returns.
 - start_session / message_session: hand a task of its own (a separate fix, a long investigation, work in another folder) to a side session that runs in parallel; its report comes back here. Quick things stay here.`;
 const TOOL_NAMES = ['browser', 'chrome', 'computer'];
+// a tool call as the chat lists it: a line, plus what changed for file edits
+function toolEntry(name, input = {}) {
+  const text = toolSummary(name, input);
+  if (!EDIT_TOOLS.has(name)) return text;
+  const cut = s => { s = String(s ?? ''); return s.length > MAX_DIFF ? s.slice(0, MAX_DIFF) + '\n…' : s; };
+  const file = input.file_path || input.notebook_path || '';
+  if (name === 'Write') return { text, file, write: cut(input.content) };
+  if (name === 'NotebookEdit') return { text, file, edits: [{ old: '', new: cut(input.new_source) }] };
+  const edits = name === 'MultiEdit' ? input.edits || [] : [input];
+  return { text, file, edits: edits.slice(0, 20).map(e => ({ old: cut(e.old_string), new: cut(e.new_string) })) };
+}
 const killTree = proc => execFile('taskkill', ['/pid', String(proc.pid), '/T', '/F'], () => {});
 const clip = (s, n) => (s = String(s || '').replace(/\s+/g, ' ').trim()).length > n ? s.slice(0, n - 1) + '…' : s;
 
@@ -63,6 +79,7 @@ function toolSummary(name, input = {}) {
   const linked = name.match(/^mcp__brain_\d+__(.*)$/);
   if (linked) return `Linked brain: ${linked[1].replace(/_/g, ' ')}${input.query ? ` "${input.query}"` : ''}`;
   if (name.startsWith('mcp__memory__')) return `Brain: ${name.slice('mcp__memory__'.length).replace(/_/g, ' ')}${input.query ? ` "${input.query}"` : ''}`;
+  if (EDIT_TOOLS.has(name)) return `${name === 'Write' ? 'Wrote' : 'Edited'} ${input.file_path || input.notebook_path || 'a file'}`;
   const target = input.file_path || input.path || input.pattern || input.command || input.url || input.description || '';
   return `${name}${target ? ': ' + String(target).slice(0, 120) : ''}`;
 }
@@ -169,7 +186,8 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     // context: how big the conversation is (what each message resends) and how long the cache lasts
     // folder: a project folder this chat works in instead of the brain's own (set before the first message)
     // tools: browser / chrome / computer turned on for this chat; parent: the chat that started this side session
-    let state = { sessionId: null, messages: [], context: null, carryOver: null, folder: null, tools: {}, parent: null };
+    // mode: the permission mode, picked per chat (a new chat starts with the last one picked)
+    let state = { sessionId: null, messages: [], context: null, carryOver: null, folder: null, tools: {}, parent: null, mode: index.options?.mode || '' };
     try { state = { ...state, ...JSON.parse(fs.readFileSync(file, 'utf8')) }; } catch { /* new chat */ }
     let run = null;      // the message being answered right now
     let live = null;     // the Claude process kept running for this chat: { proc, key, idle, since, stderr }
@@ -246,6 +264,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       if (extra.length) args.push('--append-system-prompt', extra.join('\n\n'));
       if (index.options?.model) args.push('--model', index.options.model);
       if (index.options?.effort) args.push('--effort', index.options.effort);
+      if (state.mode) args.push('--permission-mode', state.mode);
       return { args, key: JSON.stringify(args) };
     }
 
@@ -369,7 +388,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
             send1({ kind: 'delta', id: run.reply.id, text: block.text });
           }
           if (block.type === 'tool_use' && block.name !== 'mcp__claudeos__approve') {
-            update({ tools: [...run.reply.tools, toolSummary(block.name, block.input)] });
+            update({ tools: [...run.reply.tools, toolEntry(block.name, block.input)] });
           }
         }
         // separate text from consecutive assistant turns
@@ -494,7 +513,20 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
 
     function snapshot() {
       return { id, title: index.chats[id]?.title || 'New chat', messages: state.messages, busy: !!run, context: state.context, folder: state.folder,
-        tools: state.tools || {}, parent: state.parent || null };
+        tools: state.tools || {}, parent: state.parent || null, mode: state.mode || '' };
+    }
+    // how much Claude asks first; like the tools, a change starts a new process (resuming the session)
+    function setMode(mode = '') {
+      if (run) return { error: 'Claude is still answering. Wait for it, or press Stop.' };
+      if (mode && !MODES.includes(mode)) return { error: `Unknown mode "${mode}".` };
+      state.mode = mode;
+      index.options = { ...index.options, mode };
+      if (!mode) delete index.options.mode;
+      saveIndex();
+      if (state.messages.length) save();
+      cool();
+      send1({ kind: 'mode', mode });
+      return { ok: true, mode };
     }
     // browser / Chrome / computer use, per chat; a change starts a new process at the next message
     function setTools(tools = {}) {
@@ -527,7 +559,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     }
     // the text a search looks through
     const text = () => state.messages.map(m => m.text).join('\n');
-    return { id, send, stop, wrapUp, report, startWith, snapshot, text, setFolder, setTools, setupSession, parentOf, warm, cool, file,
+    return { id, send, stop, wrapUp, report, startWith, snapshot, text, setFolder, setTools, setMode, setupSession, parentOf, warm, cool, file,
       folder: () => state.folder || cwd, tools: () => state.tools || {},
       busy: () => !!run, empty: () => !state.messages.length,
       idleSince: () => (live && !run ? live.since : null) };
@@ -628,7 +660,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
   function setOptions({ model = '', effort = '' } = {}) {
     if (model && !MODELS.includes(model)) return { error: `Unknown model "${model}".`, options: index.options };
     if (effort && !EFFORTS.includes(effort)) return { error: `Unknown effort "${effort}".`, options: index.options };
-    index.options = { ...(model ? { model } : {}), ...(effort ? { effort } : {}) };
+    index.options = { ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(index.options?.mode ? { mode: index.options.mode } : {}) };
     saveIndex();
     emit({ kind: 'options', options: index.options });
     return { ok: true, options: index.options };
@@ -675,7 +707,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     send: (text, opts) => current().send(text, opts), stop: () => current().stop(), wrapUp: () => current().wrapUp(),
     busy: () => current().busy(), currentId: () => current().id,
     // all of them
-    setFolder: f => current().setFolder(f), setTools: t => current().setTools(t), warm: () => current().warm(), upload, attachmentFile,
+    setFolder: f => current().setFolder(f), setTools: t => current().setTools(t), setMode: m => current().setMode(m), warm: () => current().warm(), upload, attachmentFile,
     startSession, messageSession, chatFolder, owns: chatId => convs.has(chatId),
     open, newChat, rename, remove, list, report, anyBusy, stopAll: () => { for (const c of convs.values()) { c.stop(); c.cool(); } },
     setOptions, requestApproval, answerApproval, dropOthersApprovals, snapshot,

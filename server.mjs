@@ -14,6 +14,7 @@ import { runHandoff } from './handoff.mjs';
 import { createManager } from './manager.mjs';
 import { createTerminals } from './terminals.mjs';
 import { createArtifacts } from './artifacts.mjs';
+import { openFile } from './openfile.mjs';
 import { createMemoryEditor, observationId } from './memory-edit.mjs';
 import { createSkillEditor } from './skill-edit.mjs';
 import { appsInText, appForServer } from './public/apps.js';
@@ -532,8 +533,11 @@ async function handleApi(req, res, url) {
   // the Terminal and Artifacts tabs
   if (url.pathname === '/api/terminal/run') return json(res, 200, terminals.run({ command: body.command, tab: body.tab, cwd: body.cwd || (active ? chatFor(active).chatFolder(chat.currentId()) : HOME) }));
   if (url.pathname === '/api/terminal/open') return json(res, 200, terminals.open({ cwd: body.cwd || (active ? chatFor(active).chatFolder(chat.currentId()) : HOME) }));
+  if (url.pathname === '/api/terminal/input') return json(res, 200, terminals.input({ tab: String(body.tab || ''), text: String(body.text ?? '') }));
   if (url.pathname === '/api/terminal/stop') return json(res, 200, terminals.stop(String(body.tab || '')));
   if (url.pathname === '/api/terminal/close') return json(res, 200, terminals.close(String(body.tab || '')));
+  // a file Claude linked in the chat, in the user's editor (relative paths are from the open chat's folder)
+  if (url.pathname === '/api/open-file') return json(res, 200, await openFile(body.path, chat ? chat.chatFolder(chat.currentId()) : HOME));
   if (url.pathname === '/api/artifacts/delete') return json(res, 200, artifacts.remove(String(body.id || '')));
   if (url.pathname.startsWith('/api/brains/')) {
     if (anyBusy()) return json(res, 200, { error: 'Claude is still answering. Wait for it, or press Stop, before changing brains.' });
@@ -582,6 +586,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/chat') return json(res, 200, chat.send(body.text, { files: body.files }));
   if (url.pathname === '/api/chat/warm') { chat.warm(); return json(res, 200, { ok: true }); }
   if (url.pathname === '/api/chat/tools') return json(res, 200, chat.setTools(body.tools || {}));
+  if (url.pathname === '/api/chat/mode') return json(res, 200, chat.setMode(String(body.mode || '')));
   if (url.pathname === '/api/chat/folder') return json(res, 200, chat.setFolder(body.folder || null));
   if (url.pathname === '/api/chat/stop') { chat.stop(); for (const h of handoffs.values()) h.stop(); return json(res, 200, { ok: true }); }
   if (url.pathname === '/api/handoff') return json(res, 200, await handoff(active, body, req));
@@ -641,7 +646,7 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health'
     || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief'
-    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname.startsWith('/api/artifacts')) {
+    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file') {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));
   }
   if (url.pathname === '/api/state') {
