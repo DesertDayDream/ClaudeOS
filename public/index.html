@@ -202,6 +202,54 @@
   .crow .acts { display: none; gap: 4px; }
   .crow:hover .acts { display: flex; }
   .crow .ct span.busy { display: inline; color: #f2c14e; font-size: inherit; }
+  /* attachments: chips above the message box, thumbnails in sent messages */
+  .attach { display: flex; flex-wrap: wrap; gap: 6px; }
+  .attach:empty { display: none; }
+  .att { display: flex; align-items: center; gap: 6px; max-width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--line);
+    border-radius: 8px; padding: 3px 7px 3px 3px; font-size: 11.5px; color: var(--text); text-decoration: none; }
+  .att img { width: 40px; height: 40px; object-fit: cover; border-radius: 5px; display: block; }
+  .att .ic { width: 40px; height: 40px; border-radius: 5px; background: rgba(0,0,0,0.3); display: grid; place-items: center; color: var(--dim); font-size: 10px; text-transform: uppercase; }
+  .att span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+  .att.up { opacity: 0.55; }
+  .att.bad { border-color: #ff8a8a; }
+  .att button { background: none; border: 0; color: var(--dim); cursor: pointer; font-size: 14px; padding: 0 2px; }
+  .msg.user .files { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; white-space: normal; }
+  .msg.user .files .att.pic { padding: 0; }
+  .msg.user .files .att.pic img { width: auto; height: auto; max-width: 220px; max-height: 160px; }
+  #chat.drop::after { content: 'Drop to attach'; position: absolute; inset: 0; z-index: 6; display: grid; place-items: center; font-size: 15px;
+    background: rgba(14,17,30,0.85); border: 2px dashed rgba(217,119,87,0.7); border-radius: 10px; color: var(--text); pointer-events: none; }
+  aside header button { font-size: 12px; padding: 12px 0; }
+  #toolsMenu { position: absolute; z-index: 7; top: 40px; right: 10px; width: 270px; background: #141829; border: 1px solid var(--line); border-radius: 10px; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+  #toolsMenu[hidden] { display: none; }
+  #toolsMenu label { display: grid; grid-template-columns: auto 1fr; gap: 0 8px; padding: 6px; border-radius: 7px; cursor: pointer; font-size: 12.5px; }
+  #toolsMenu label:hover { background: rgba(255,255,255,0.05); }
+  #toolsMenu input { grid-row: span 2; margin-top: 2px; }
+  #toolsMenu span { color: var(--dim); font-size: 11px; }
+  #chatTools.set { border-color: rgba(95,212,255,0.5); color: var(--text); }
+  .msg.user.from-session { background: rgba(95,212,255,0.08); border: 1px solid rgba(95,212,255,0.35); }
+  .msg.user.from-session::before { content: 'Side session · '; color: var(--project); font-size: 11px; }
+  .crow .ct span.sub { display: inline; color: var(--project); font-size: inherit; }
+  /* the Terminal tab */
+  #term.on { display: flex; flex-direction: column; padding: 0; }
+  .termbar { display: flex; gap: 6px; align-items: center; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+  #termTabs { flex: 1; display: flex; gap: 4px; overflow-x: auto; }
+  #termTabs button { flex: none; background: rgba(255,255,255,0.04); border: 1px solid var(--line); color: var(--dim); border-radius: 7px; padding: 3px 8px; font: inherit; font-size: 11.5px; cursor: pointer; display: flex; gap: 5px; align-items: center; }
+  #termTabs button.on { color: var(--text); border-color: rgba(217,119,87,0.6); }
+  #termTabs button i { width: 6px; height: 6px; border-radius: 50%; background: #555a72; }
+  #termTabs button i.run { background: #5fd47a; animation: pulse 1.2s ease-in-out infinite; }
+  #termTabs button em { font-style: normal; opacity: 0.6; }
+  #termOut { flex: 1; margin: 0; padding: 8px 10px; overflow: auto; font: 11.5px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,0.25); }
+  #termForm { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--line); }
+  #termInput { flex: 1; min-width: 0; background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; font: 12px ui-monospace, Consolas, monospace; outline: none; }
+  /* the Artifacts tab */
+  .art { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 10px; overflow: hidden; }
+  .art iframe { width: 100%; height: 190px; border: 0; background: #fff; display: block; pointer-events: none; }
+  .art .meta { padding: 8px 10px; display: flex; gap: 8px; align-items: center; }
+  .art .meta div { flex: 1; min-width: 0; }
+  .art .meta b { display: block; font-size: 13px; }
+  .art .meta span { color: var(--dim); font-size: 11.5px; }
+  .chatbar .folder { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chatbar .folder.set { border-color: rgba(95,212,255,0.5); color: var(--text); }
   .approve .in { color: var(--dim); font-size: 11px; display: block; margin-bottom: 3px; }
   .msg { margin: 0 0 12px; }
   .msg.user { margin-left: 36px; background: rgba(217,119,87,0.16); border: 1px solid rgba(217,119,87,0.3);
@@ -236,7 +284,9 @@
   .composer textarea:focus { border-color: rgba(217,119,87,0.6); }
   .composer .row { display: flex; gap: 8px; align-items: center; }
   .composer .row .hint { flex: 1; color: var(--dim); font-size: 11px; }
+  .composer .row { flex-wrap: wrap; }
   .composer .pick { display: flex; gap: 4px; min-width: 0; }
+  .composer .row .pick { flex: 1 1 170px; }
   .composer .pick select { min-width: 0; max-width: 50%; background: rgba(0,0,0,0.3); color: var(--dim); border: 1px solid var(--line); border-radius: 8px; padding: 4px 4px; font: inherit; font-size: 11px; }
   .composer .pick select.set { color: var(--text); border-color: rgba(217,119,87,0.5); }
   .meter { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 11px; }
@@ -339,12 +389,21 @@
     <button data-tab="inbox" aria-selected="false">Inbox</button>
     <button data-tab="team" aria-selected="false">Team</button>
     <button data-tab="feed" aria-selected="false">Activity</button>
+    <button data-tab="term" aria-selected="false" title="Shell tabs you and Claude share">Terminal</button>
+    <button data-tab="arts" aria-selected="false" title="Pages Claude published">Artifacts</button>
   </header>
   <div class="tab on" id="chat">
     <div class="chatbar">
       <button type="button" class="btn mini" id="chatsBtn" title="Your chats in this brain: open, search, rename, delete">Chats</button>
       <span class="dot" id="chatsDot" title="Another chat is working"></span>
       <b id="chatTitle" title="Double-click to rename">New chat</b>
+      <button type="button" class="btn mini" id="chatTools" title="Browser, Claude in Chrome and computer use for this chat">Tools</button>
+      <div id="toolsMenu" hidden>
+        <label><input type="checkbox" data-tool="browser"> <b>Browser</b><span>Claude's own Chromium window you can watch, with its own sign-ins (Playwright; needs Node's npx)</span></label>
+        <label><input type="checkbox" data-tool="chrome"> <b>Claude in Chrome</b><span>Your real Chrome with your sign-ins (needs the Claude in Chrome extension)</span></label>
+        <label><input type="checkbox" data-tool="computer"> <b>Computer use</b><span>Claude can take screenshots and use the mouse and keyboard on this PC</span></label>
+      </div>
+      <button type="button" class="btn mini folder" id="chatFolder" title="The folder this chat works in. Pick a project folder (like UEFN Coding) before the first message to work there the way Claude Desktop does: its CLAUDE.md, settings, MCP servers and Claude Code memory.">Brain folder</button>
     </div>
     <div id="chatList" hidden>
       <input type="search" id="chatSearch" placeholder="Search your chats…" autocomplete="off" spellcheck="false">
@@ -354,12 +413,14 @@
     <form class="composer" id="composer">
       <div class="nudge" id="nudge" hidden></div>
       <div class="meter" id="meter" hidden></div>
+      <div class="attach" id="attach"></div>
       <textarea id="input" rows="2" placeholder="Ask the Manager anything… e.g. “Write a 45-second script about my island”"></textarea>
       <div class="row">
         <span class="hint pick" title="Model and effort for the Manager's next replies in this brain. Switching model mid-chat re-reads the whole chat once (no cache).">
           <select id="chatModel" aria-label="Model"><option value="">Default model</option><option value="fable">Fable</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select>
           <select id="chatEffort" aria-label="Effort"><option value="">Default effort</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select>
         </span>
+        <label class="btn" id="attachBtn" title="Attach files or images (you can also paste a screenshot or drop files on the chat)">📎<input type="file" id="attachFiles" multiple hidden></label>
         <button type="button" class="btn" id="wrapChat" title="Save what matters to the brain's memory, then start a fresh, cheaper chat that gets a short handover">Wrap up</button>
         <button type="button" class="btn" id="newChat" title="Start a fresh conversation">New chat</button>
         <button type="button" class="btn" id="stop" hidden>Stop</button>
@@ -374,6 +435,12 @@
   <div class="tab" id="inbox"></div>
   <div class="tab" id="team"></div>
   <div class="tab feed" id="feed"></div>
+  <div class="tab" id="term">
+    <div class="termbar"><div id="termTabs"></div><button type="button" class="btn mini" id="termNew" title="A new shell tab in this chat's folder">+</button></div>
+    <pre id="termOut"></pre>
+    <form id="termForm"><input id="termInput" autocomplete="off" spellcheck="false" placeholder="Run a command…"><button type="button" class="btn mini" id="termStop" title="Stop what is running (Ctrl-C)">Stop</button></form>
+  </div>
+  <div class="tab" id="arts"></div>
   <div id="detail"></div>
 </aside>
 <div id="tip"></div>
@@ -383,5 +450,6 @@
 <script type="module" src="/chat.js"></script>
 <script type="module" src="/inbox.js"></script>
 <script type="module" src="/brains.js"></script>
+<script type="module" src="/desk.js"></script>
 </body>
 </html>

@@ -12,6 +12,8 @@ import { exec, spawn } from 'node:child_process';
 import { createChat } from './chat.mjs';
 import { runHandoff } from './handoff.mjs';
 import { createManager } from './manager.mjs';
+import { createTerminals } from './terminals.mjs';
+import { createArtifacts } from './artifacts.mjs';
 import { createMemoryEditor, observationId } from './memory-edit.mjs';
 import { createSkillEditor } from './skill-edit.mjs';
 import { appsInText, appForServer } from './public/apps.js';
@@ -287,11 +289,43 @@ function broadcast(event, data) {
 // the served page knows, plus Host/Origin checks against other sites and DNS rebinding.
 const TOKEN = crypto.randomBytes(24).toString('hex');
 const LOCAL_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`]);
+// The chats' desk: shell tabs Claude and the user share, and the artifacts Claude publishes
+// (served on their own port, so a page can never reach this one's token or API).
+const terminals = createTerminals({ broadcast });
+const ARTIFACT_PORT = Number(process.env.ARTIFACT_PORT || PORT + 10);
+const artifacts = createArtifacts({ dir: path.join(DATA, 'artifacts'), port: ARTIFACT_PORT, broadcast });
+// a browser of Claude's own (Playwright's MCP server), with sign-ins kept in the data folder
+const browserServer = () => ({ command: 'npx', args: ['-y', '@playwright/mcp@latest', '--user-data-dir', path.join(DATA, 'browser')] });
+// the brain whose chats include this one (a desk tool call names its chat)
+const chatOwning = id => [...chats.values()].find(c => c.owns(id));
+async function desk(tool, a) {
+  const owner = chatOwning(String(a.chat || ''));
+  if (!owner) return { error: 'This chat is not running in ClaudeOS anymore.' };
+  const state = t => `${t.title} (tab ${t.id}, ${t.cwd}): ${t.running ? 'running' : t.code == null ? 'idle' : `exited with code ${t.code}`}`;
+  if (tool === 'terminal_run') {
+    const r = terminals.run({ command: a.command, tab: a.tab, title: a.title, cwd: a.cwd || owner.chatFolder(a.chat), by: 'Claude' });
+    return r.error ? r : { text: `Running in the Terminal tab "${r.tab.title}" (tab ${r.tab.id}). Read its output with terminal_read.` };
+  }
+  if (tool === 'terminal_read') {
+    const r = await terminals.read({ tab: a.tab, lines: a.lines, wait: a.wait_ms });
+    return r.error ? r : { text: `${state(r.tab)}\n\n${r.text || '(no output yet)'}` };
+  }
+  if (tool === 'terminal_list') { const l = terminals.list(); return { text: l.length ? l.map(state).join('\n') : 'No terminal tabs.' }; }
+  if (tool === 'terminal_stop') { const r = a.close ? terminals.close(a.tab) : terminals.stop(a.tab); return r.error ? r : { text: a.close ? 'Stopped and closed.' : 'Stopped.' }; }
+  if (tool === 'publish_artifact') {
+    const r = artifacts.publish({ file: a.file_path, title: a.title, description: a.description, id: a.id, chat: a.chat });
+    return r.error ? r : { text: `${r.updated ? 'Updated' : 'Published'} “${r.artifact.title}” (id ${r.artifact.id}): ${r.artifact.url}\nIt shows in the ClaudeOS Artifacts tab. Give the user this link.` };
+  }
+  if (tool === 'start_session') return owner.startSession(a);
+  if (tool === 'message_session') return owner.messageSession(a);
+  return { error: `Unknown desk tool ${tool}.` };
+}
+
 // each brain's chats (any number, each its own conversation); the page shows the active brain's
 const chats = new Map();
 function chatFor(brain) {
   if (!chats.has(brain.id)) {
-    chats.set(brain.id, createChat({ cwd: brain.path, memoryFile: memoryFileOf(brain), helper, memoryServer,
+    chats.set(brain.id, createChat({ cwd: brain.path, memoryFile: memoryFileOf(brain), helper, memoryServer, browserServer,
       dir: path.join(DATA, 'chats', brain.id), legacyFile: path.join(DATA, 'chats', `${brain.id}.json`), activityFile: ACTIVITY, port: PORT,
       links: () => brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, memoryFile: memoryFileOf(b) })), token: TOKEN,
       // a brain you switched away from keeps working, out of sight
@@ -472,13 +506,35 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/chat' && req.method === 'GET') return json(res, 200, chat ? chat.snapshot() : { messages: [], busy: false, approvals: [] });
   if (url.pathname === '/api/chats' && req.method === 'GET') return json(res, 200, chat ? chat.list(url.searchParams.get('q') || '') : { chats: [] });
   if (url.pathname === '/api/manager' && req.method === 'GET') return json(res, 200, active ? managerFor(active).snapshot() : { inbox: [], files: [], briefs: [], busy: false });
+  if (url.pathname === '/api/terminals' && req.method === 'GET') return json(res, 200, terminals.snapshot());
+  if (url.pathname === '/api/artifacts' && req.method === 'GET') return json(res, 200, { list: artifacts.list(), port: ARTIFACT_PORT });
+  // an attachment's bytes, for the chat's thumbnails (only files under the brain's attachments/)
+  if (url.pathname === '/api/chat/file' && req.method === 'GET') {
+    const f = chat?.attachmentFile(url.searchParams.get('path'));
+    if (!f) { res.writeHead(404); return res.end(); }
+    res.writeHead(200, { 'content-type': f.type, 'cache-control': 'private, max-age=3600' });
+    return fs.createReadStream(f.abs).pipe(res);
+  }
   if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
   // a file dropped on the Inbox tab streams straight into the brain's inbox/ folder
   if (url.pathname === '/api/inbox/upload') {
     if (!active) return json(res, 200, { error: 'Set up a brain first.' });
     return json(res, 200, await managerFor(active).upload(req, url.searchParams.get('name')));
   }
+  // a file pasted or dropped into a chat message, into the brain's attachments/ folder
+  if (url.pathname === '/api/chat/upload') {
+    if (!chat) return json(res, 200, { error: 'Set up a brain first.' });
+    return json(res, 200, await chat.upload(req, url.searchParams.get('name')));
+  }
   const body = await readJson(req);
+  // the desk tools a chat's Claude calls (approval-mcp.mjs), for whichever brain that chat is in
+  if (url.pathname.startsWith('/api/desk/')) return json(res, 200, await desk(url.pathname.slice('/api/desk/'.length), body));
+  // the Terminal and Artifacts tabs
+  if (url.pathname === '/api/terminal/run') return json(res, 200, terminals.run({ command: body.command, tab: body.tab, cwd: body.cwd || (active ? chatFor(active).chatFolder(chat.currentId()) : HOME) }));
+  if (url.pathname === '/api/terminal/open') return json(res, 200, terminals.open({ cwd: body.cwd || (active ? chatFor(active).chatFolder(chat.currentId()) : HOME) }));
+  if (url.pathname === '/api/terminal/stop') return json(res, 200, terminals.stop(String(body.tab || '')));
+  if (url.pathname === '/api/terminal/close') return json(res, 200, terminals.close(String(body.tab || '')));
+  if (url.pathname === '/api/artifacts/delete') return json(res, 200, artifacts.remove(String(body.id || '')));
   if (url.pathname.startsWith('/api/brains/')) {
     if (anyBusy()) return json(res, 200, { error: 'Claude is still answering. Wait for it, or press Stop, before changing brains.' });
     try {
@@ -523,7 +579,10 @@ async function handleApi(req, res, url) {
     } catch (err) { return json(res, 200, { error: err.message }); }
   }
   if (!chat && (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/brief' || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/handoff') || url.pathname.startsWith('/api/skills'))) return json(res, 200, { error: 'Set up a brain first.' });
-  if (url.pathname === '/api/chat') return json(res, 200, chat.send(body.text));
+  if (url.pathname === '/api/chat') return json(res, 200, chat.send(body.text, { files: body.files }));
+  if (url.pathname === '/api/chat/warm') { chat.warm(); return json(res, 200, { ok: true }); }
+  if (url.pathname === '/api/chat/tools') return json(res, 200, chat.setTools(body.tools || {}));
+  if (url.pathname === '/api/chat/folder') return json(res, 200, chat.setFolder(body.folder || null));
   if (url.pathname === '/api/chat/stop') { chat.stop(); for (const h of handoffs.values()) h.stop(); return json(res, 200, { ok: true }); }
   if (url.pathname === '/api/handoff') return json(res, 200, await handoff(active, body, req));
   if (url.pathname === '/api/skills/copy') return json(res, 200, copySkill(active, body));
@@ -581,7 +640,8 @@ const server = http.createServer((req, res) => {
   if (!LOCAL_HOSTS.has(req.headers.host)) { res.writeHead(421); return res.end('wrong host'); }
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health'
-    || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief') {
+    || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief'
+    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname.startsWith('/api/artifacts')) {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));
   }
   if (url.pathname === '/api/state') {
@@ -636,5 +696,6 @@ function quit() {
   for (const c of chats.values()) c.stopAll();
   for (const h of handoffs.values()) h.stop();
   for (const m of managers.values()) m.stop();
+  terminals.stopAll();
   setTimeout(() => process.exit(0), 800);
 }

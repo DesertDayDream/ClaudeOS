@@ -19,6 +19,27 @@ const CHAT = process.env.CLAUDEOS_CHAT || '';
 // Only the chat (the Manager) gets post_brief, with the team it may assign work to.
 let TEAM = [];
 try { TEAM = JSON.parse(process.env.CLAUDEOS_TEAM || '[]'); } catch { /* no team */ }
+// A chat also gets the desk tools: terminal tabs, artifacts, and (unless it is a side session
+// itself) side sessions of its own.
+const DESK = process.env.CLAUDEOS_DESK === '1';
+const SESSIONS = DESK && process.env.CLAUDEOS_SESSIONS === '1';
+const DESK_TOOLS = [
+  { name: 'terminal_run', description: 'Run a shell command (PowerShell on Windows) in a tab of the ClaudeOS Terminal tab, which the user can watch, type into and stop. Use it for long-running things the user should see: dev servers, watchers, test runners, builds. Returns at once with the tab id; read the output with terminal_read. Use your Bash tool for short commands whose output you need right away. Pass tab to reuse a tab whose command has ended.',
+    inputSchema: { type: 'object', required: ['command'], properties: { command: { type: 'string' }, title: { type: 'string', description: 'Short name for a new tab, e.g. "dev server".' }, tab: { type: 'string', description: 'An existing tab to run it in.' }, cwd: { type: 'string', description: 'Folder for a new tab (default: this chat\'s folder).' } } } },
+  { name: 'terminal_read', description: 'Read the last lines of a terminal tab. wait_ms waits up to that long for new output first (max 60000).',
+    inputSchema: { type: 'object', required: ['tab'], properties: { tab: { type: 'string' }, lines: { type: 'number' }, wait_ms: { type: 'number' } } } },
+  { name: 'terminal_list', description: 'List the terminal tabs: id, title, folder, and whether a command is running.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'terminal_stop', description: 'Stop what runs in a terminal tab (Ctrl-C); close: true also removes the tab.',
+    inputSchema: { type: 'object', required: ['tab'], properties: { tab: { type: 'string' }, close: { type: 'boolean' } } } },
+  { name: 'publish_artifact', description: 'Publish an HTML page you wrote (one self-contained .html file: CSS and scripts inline or from a CDN) as an artifact. The user sees it in the ClaudeOS Artifacts tab and can open it in their browser. Use it when a page is clearer than chat text: a report, a dashboard, a comparison, a mock-up, a small tool. Publishing the same file again (or passing its id) updates it in place. Returns its URL: give the user that link.',
+    inputSchema: { type: 'object', required: ['file_path', 'title'], properties: { file_path: { type: 'string', description: 'Absolute path of the .html file.' }, title: { type: 'string', description: 'Two to four words.' }, description: { type: 'string', description: 'One sentence.' }, id: { type: 'string', description: 'An artifact to update.' } } } },
+  ...(SESSIONS ? [
+    { name: 'start_session', description: 'Start a side session: a new chat in this brain that works on its own task in parallel, which the user can open from the Chats list, watch and talk to. Use it for a task of its own that shouldn\'t hold up this chat (a separate fix, a long investigation, work in another project folder). The prompt must stand on its own: the session can\'t see this chat. When it finishes a turn you started, its answer comes back here as a message.',
+      inputSchema: { type: 'object', required: ['title', 'prompt'], properties: { title: { type: 'string', description: 'Under 60 characters.' }, prompt: { type: 'string', description: 'The full brief: goal, files, what done looks like.' }, folder: { type: 'string', description: 'A project folder to work in (default: this chat\'s folder).' } } } },
+    { name: 'message_session', description: 'Send a follow-up message to a side session you started (by the id start_session returned). Its answer comes back here.',
+      inputSchema: { type: 'object', required: ['session', 'message'], properties: { session: { type: 'string' }, message: { type: 'string' } } } },
+  ] : []),
+];
 
 function ask(args, where = '/api/approval') {
   return new Promise(resolve => {
@@ -73,7 +94,11 @@ rl.on('line', async line => {
         skipped: { type: 'array', items: { type: 'object', properties: { request: { type: 'string' }, reason: { type: 'string' } } }, description: 'Requests nobody on the team can do, or too unclear to act on.' },
         notes: { type: 'string', description: 'Anything the user should know.' },
       } },
-    }] : [])] });
+    }] : []), ...(DESK ? DESK_TOOLS : [])] });
+  }
+  if (method === 'tools/call' && DESK && DESK_TOOLS.some(t => t.name === params?.name)) {
+    const r = await ask({ ...(params.arguments || {}), chat: CHAT }, `/api/desk/${params.name}`);
+    return reply(id, { content: [{ type: 'text', text: r.error || r.text || JSON.stringify(r) }], isError: !!r.error });
   }
   if (method === 'tools/call' && params?.name === 'ask_brain') {
     const r = await ask(params.arguments || {}, '/api/handoff');

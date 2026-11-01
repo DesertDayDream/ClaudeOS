@@ -96,8 +96,10 @@ function render(msg) {
   }
   entry.msg = msg;
   const stick = atBottom();
-  if (msg.role === 'user') entry.el.textContent = msg.text;
-  else {
+  if (msg.role === 'user') {
+    entry.el.textContent = msg.text;
+    if (msg.files?.length) entry.el.prepend(sentFiles(msg.files));
+  } else {
     entry.el.innerHTML =
       (msg.carry ? '<div class="head">Fresh start · handover from your last chat (the details are saved in the brain\'s memory)</div>' : '') +
       (msg.tools?.length ? `<div class="tools">${msg.tools.map(t => `<div title="${esc(t)}">${esc(t)}</div>`).join('')}</div>` : '') +
@@ -175,16 +177,29 @@ async function load() {
   for (const m of s.messages || []) render(m);
   for (const c of s.approvals || []) renderApproval(c);
   context = s.context || null;
+  folder = s.folder || null;
+  started = (s.messages || []).some(m => m.role === 'user');
+  showFolder();
+  tools = s.tools || {};
+  showTools();
   showOptions(s.options);
   setBusy(!!s.busy);
   showEmpty();
   scrollDown(true);
+  warmedAt = 0;
+  if (document.activeElement === input) warm();
 }
 
 function onEvent(ev) {
   // events carry their chat; only the open one's reach the log (the list shows the others working)
   if (ev.chat && ev.chat !== currentId) return;
-  if (ev.kind === 'message') { log.querySelector('.empty')?.remove(); render(ev.message); }
+  if (ev.kind === 'message') {
+    log.querySelector('.empty')?.remove();
+    render(ev.message);
+    if (ev.message.role === 'user' && !started) { started = true; showFolder(); }
+  }
+  else if (ev.kind === 'folder') { folder = ev.folder; showFolder(); }
+  else if (ev.kind === 'tools') { tools = ev.tools || {}; showTools(); }
   else if (ev.kind === 'delta') { const e = messages.get(ev.id); if (e) { e.msg.text += ev.text; render(e.msg); } }
   else if (ev.kind === 'update') { const e = messages.get(ev.id); if (e) render({ ...e.msg, ...ev.fields }); }
   else if (ev.kind === 'busy') setBusy(ev.busy);
@@ -224,7 +239,7 @@ function showList(l) {
 function drawRows(rows) {
   const mark = s => query ? esc(s).replace(new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])), 'gi'), m => `<mark>${m}</mark>`) : esc(s);
   rowsEl.innerHTML = rows.length ? rows.map(c => `<div class="crow ${c.id === currentId ? 'on' : ''}" data-id="${c.id}">
-      <div class="ct"><b>${mark(c.title)}</b><span>${c.busy ? '<span class="busy">● working · </span>' : ''}${ago(c.updated)} · ${c.count} messages</span>${c.snippet ? `<em>${mark(c.snippet)}</em>` : ''}</div>
+      <div class="ct"><b>${mark(c.title)}</b><span>${c.parent ? '<span class="sub">↳ side session · </span>' : ''}${c.busy ? '<span class="busy">● working · </span>' : ''}${ago(c.updated)} · ${c.count} messages</span>${c.snippet ? `<em>${mark(c.snippet)}</em>` : ''}</div>
       <div class="acts"><button type="button" class="btn mini" data-act="rename" title="Rename">✎</button><button type="button" class="btn mini" data-act="delete" title="Delete">×</button></div>
     </div>`).join('')
     : `<div class="empty">${query ? 'No chat mentions that.' : 'No saved chats yet. Your chats show up here once you send a message.'}</div>`;
@@ -286,13 +301,159 @@ async function wrap() {
   if (r.error) alert(r.error);
 }
 
+// ---------- attachments ----------
+// Pasted, dropped or picked files upload right away into the brain's attachments/ folder and wait
+// as chips above the message box; Send takes them along (images are shown to Claude directly).
+const attachEl = document.getElementById('attach');
+const attachInput = document.getElementById('attachFiles');
+const chatPane = document.getElementById('chat');
+let pending = []; // { key, name, size, url?, file? (once uploaded), error? }
+const kb = n => n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+const extOf = name => (name.match(/\.([^.]+)$/)?.[1] || 'file').slice(0, 4);
+
+// thumbnails need the token, so they come through fetch, not a plain <img src>
+const blobs = new Map(); // path -> object URL
+async function thumb(img, p) {
+  if (!blobs.has(p)) {
+    const res = await fetch(`/api/chat/file?path=${encodeURIComponent(p)}`, { headers: { 'x-claudeos-token': TOKEN } }).catch(() => null);
+    if (!res?.ok) return;
+    blobs.set(p, URL.createObjectURL(await res.blob()));
+  }
+  img.src = blobs.get(p);
+}
+function sentFiles(files) {
+  const box = document.createElement('div');
+  box.className = 'files';
+  for (const f of files) {
+    const a = document.createElement('a');
+    a.className = `att${f.image ? ' pic' : ''}`;
+    a.title = `${f.path} · ${kb(f.size)}`;
+    if (f.image) {
+      const img = document.createElement('img');
+      img.alt = f.name;
+      thumb(img, f.path);
+      a.href = '#';
+      a.addEventListener('click', e => { e.preventDefault(); if (img.src) window.open(img.src, '_blank'); });
+      a.appendChild(img);
+    } else a.innerHTML = `<span class="ic">${esc(extOf(f.name))}</span><span>${esc(f.name)}</span>`;
+    box.appendChild(a);
+  }
+  return box;
+}
+function drawPending() {
+  attachEl.innerHTML = pending.map(p => `<div class="att${p.file ? '' : p.error ? ' bad' : ' up'}" data-key="${p.key}" title="${esc(p.error || `${p.name} · ${kb(p.size)}${p.file ? '' : ' · uploading…'}`)}">
+      ${p.url ? `<img src="${p.url}" alt="">` : `<span class="ic">${esc(extOf(p.name))}</span>`}<span>${esc(p.error || p.name)}</span><button type="button" title="Remove">×</button></div>`).join('');
+}
+attachEl.addEventListener('click', e => {
+  const key = e.target.closest('button') && e.target.closest('.att')?.dataset.key;
+  if (!key) return;
+  const p = pending.find(x => x.key === key);
+  if (p?.url) URL.revokeObjectURL(p.url);
+  pending = pending.filter(x => x.key !== key);
+  drawPending();
+});
+async function attach(files) {
+  for (const f of files) {
+    // a pasted screenshot is always "image.png"; give it a name worth keeping
+    const name = /^image\.(png|jpe?g|gif|webp)$/i.test(f.name) ? `screenshot-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.${f.name.split('.').pop()}` : f.name;
+    const p = { key: Math.random().toString(36).slice(2), name, size: f.size, url: f.type.startsWith('image/') ? URL.createObjectURL(f) : null };
+    pending.push(p);
+    drawPending();
+    const r = await fetch(`/api/chat/upload?name=${encodeURIComponent(name)}`, { method: 'POST', headers: { 'x-claudeos-token': TOKEN }, body: f })
+      .then(res => res.json()).catch(err => ({ error: err.message }));
+    if (!pending.includes(p)) continue; // removed while uploading
+    if (r.error) p.error = r.error; else p.file = r.file;
+    drawPending();
+  }
+  warm();
+}
+attachInput.addEventListener('change', () => { attach([...attachInput.files]); attachInput.value = ''; });
+input.addEventListener('paste', e => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (!files.length) return; // plain text pastes as usual
+  e.preventDefault();
+  attach(files);
+});
+let dragDepth = 0;
+const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
+chatPane.addEventListener('dragenter', e => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; chatPane.classList.add('drop'); });
+chatPane.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+chatPane.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; chatPane.classList.remove('drop'); } });
+chatPane.addEventListener('drop', e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  chatPane.classList.remove('drop');
+  attach([...e.dataTransfer.files]);
+  input.focus();
+});
+
+// ---------- the folder a chat works in ----------
+const folderBtn = document.getElementById('chatFolder');
+let folder = null, started = false;
+function showFolder() {
+  folderBtn.textContent = folder ? `📁 ${folder.split(/[\\/]/).filter(Boolean).pop()}` : 'Brain folder';
+  folderBtn.classList.toggle('set', !!folder);
+  folderBtn.title = (folder ? `This chat works in ${folder}, like a Claude Desktop session there.` : 'This chat works in the brain\'s own folder.') +
+    (started ? ' Start a new chat to work in another folder.' : ' Click to pick a project folder (its CLAUDE.md, settings, MCP servers and Claude Code memory apply). Set it before the first message.');
+}
+folderBtn.addEventListener('click', async () => {
+  if (started) return alert(`This chat works in ${folder || 'the brain folder'}. Start a new chat to work in another folder.`);
+  let recent = [];
+  try { recent = JSON.parse(localStorage.getItem('claudeos.folders') || '[]'); } catch { /* none yet */ }
+  const pick = prompt(`Folder for this chat (full path). Leave empty for the brain's own folder.${recent.length ? `\n\nRecent:\n${recent.join('\n')}` : ''}`, folder || recent[0] || '');
+  if (pick === null) return;
+  const r = await api('/api/chat/folder', { folder: pick.trim().replace(/^"|"$/g, '') });
+  if (r.error) return alert(r.error);
+  folder = r.folder;
+  if (folder) try { localStorage.setItem('claudeos.folders', JSON.stringify([folder, ...recent.filter(x => x !== folder)].slice(0, 6))); } catch { /* fine */ }
+  showFolder();
+  warm();
+});
+
+// ---------- this chat's tools: browser, Claude in Chrome, computer use ----------
+const toolsBtn = document.getElementById('chatTools');
+const toolsMenu = document.getElementById('toolsMenu');
+const TOOL_LABEL = { browser: 'Browser', chrome: 'Chrome', computer: 'Computer' };
+let tools = {};
+function showTools() {
+  const on = Object.keys(TOOL_LABEL).filter(t => tools[t]);
+  toolsBtn.textContent = on.length ? `Tools: ${on.map(t => TOOL_LABEL[t]).join(', ')}` : 'Tools';
+  toolsBtn.classList.toggle('set', on.length > 0);
+  for (const box of toolsMenu.querySelectorAll('input')) box.checked = !!tools[box.dataset.tool];
+}
+toolsBtn.addEventListener('click', e => { e.stopPropagation(); toolsMenu.hidden = !toolsMenu.hidden; });
+document.addEventListener('click', e => { if (!toolsMenu.hidden && !toolsMenu.contains(e.target)) toolsMenu.hidden = true; });
+toolsMenu.addEventListener('change', async () => {
+  const want = Object.fromEntries([...toolsMenu.querySelectorAll('input')].map(b => [b.dataset.tool, b.checked]));
+  const r = await api('/api/chat/tools', { tools: want });
+  if (r.error) alert(r.error); else tools = r.tools;
+  showTools();
+  warmedAt = 0;
+});
+
+// a chat's Claude starts ahead of the first message, so the reply doesn't wait for it
+let warmedAt = 0;
+function warm() {
+  if (busy || Date.now() - warmedAt < 60e3) return;
+  warmedAt = Date.now();
+  api('/api/chat/warm', {});
+}
+input.addEventListener('focus', warm);
+
 async function send() {
   const text = input.value.trim();
-  if (!text || busy) return;
+  if (busy || pending.some(p => !p.file && !p.error)) return; // still uploading
+  const ready = pending.filter(p => p.file);
+  if (!text && !ready.length) return;
+  const keep = pending;
   input.value = '';
+  pending = [];
+  drawPending();
   autosize();
-  const r = await api('/api/chat', { text });
-  if (r.error) { input.value = text; alert(r.error); }
+  const r = await api('/api/chat', { text, files: ready.map(p => ({ path: p.file.path, name: p.file.name })) });
+  if (r.error) { input.value = text; pending = keep; drawPending(); alert(r.error); }
+  else for (const p of keep) if (p.url) URL.revokeObjectURL(p.url);
 }
 
 function autosize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 160) + 'px'; }

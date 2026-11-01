@@ -12,6 +12,8 @@ async function run() {
     await import('./hooks/claude-os-hook.mjs');
   } else if (sub === 'approval-mcp') {
     await import('./approval-mcp.mjs');
+  } else if (sub === 'computer-mcp') {
+    await import('./computer-mcp.mjs');
   } else if (sub === 'memory-server') {
     // inside the exe its own "am I the program?" check always says yes; make it say no, and start it here once
     process.argv[1] = '';

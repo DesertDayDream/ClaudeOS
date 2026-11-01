@@ -13,6 +13,13 @@ Give Claude a brain you can see.
 - **Token use:** under the chat, a meter shows how many tokens each message resends and whether the cache is still warm; each reply shows what it read and wrote. **Wrap up** saves what matters to the brain and starts a fresh chat that gets a short handover, and ClaudeOS suggests it when a chat gets big or the cache has expired.
 - **The chat** runs Claude inside the brain's folder. Pick the model (Fable, Opus, Sonnet, Haiku) and the effort under the message box; the brain keeps your choice. You watch the employees it hands work to light up at their desks. Anything that needs your OK, from the Manager or an employee, shows up as an Allow / Deny card (the Chat tab gets a dot).
 - **Chats:** each brain keeps as many chats as you like. *New chat* starts a fresh one; *Chats* lists them all, newest first, with a search over every message. Rename (✎, or double-click the title) and delete (×; it goes to the brain's chat trash). Each chat runs on its own: leave one working and start another, and a dot tells you it's still going. The team's reports always go back to the chat that sent the brief.
+- **Fast replies:** each chat keeps its Claude running between messages, so a follow-up starts answering in a second or two instead of relaunching Claude. An idle chat's Claude quits after 20 minutes and starts again (where the chat left off) at your next message.
+- **Attachments:** paste a screenshot (Ctrl+V), drop files on the chat, or click 📎. Files are saved in the brain's `attachments/` folder; images go to Claude directly and show as thumbnails in the chat.
+- **Work in a project folder:** *Brain folder* in the chat bar picks the folder a new chat works in (before its first message). There it works like a Claude Desktop session: that folder's `CLAUDE.md`, settings, MCP servers and Claude Code memory apply, with the brain added beside it.
+- **Tools** (chat bar), per chat: **Browser** gives Claude a Chromium window of its own to read sites and check pages (Playwright, through `npx`; sign-ins kept in `~/.claudeos/browser`); **Claude in Chrome** lets it use your real Chrome (needs the extension); **Computer use** lets it take screenshots and use the mouse and keyboard on this PC (Windows).
+- **The Terminal tab** holds shell tabs you and Claude share. Claude runs dev servers, watchers and builds there (it asks first, like any command), you watch them, type your own commands and stop them.
+- **Side sessions:** Claude can hand a separate task to a new chat that runs beside this one (it shows in *Chats* as a side session you can open and talk to). When it finishes, its report comes back to the chat that started it.
+- **The Artifacts tab** shows the pages Claude publishes: reports, dashboards, mock-ups, small tools, as one HTML file each. Click *Open* to see one full size in your browser. They're served on their own port (the app's port + 10) in a sandbox, so a page can't reach ClaudeOS itself.
 - **The Inbox** is where you leave requests and files for later (files go into the brain's `inbox/` folder). *Brief & assign* hands everything waiting to the Manager in the chat. The Inbox tab shows each brief, who's on what, each employee's report and what it cost.
 - **Linked brains:** from the brain menu, choose *Link brains…* to let this brain use another one. Claude here can read the linked brain's memory (never change it) and hand its team tasks, which run in that brain and send back the answer. Its skills show in the Team tab with a *Copy* button. Linked brains float beside the cloud.
 - **Brains** are folders. Make as many as you like (one per project, client or idea) and switch between them from the name under the title.
@@ -57,12 +64,13 @@ ClaudeOS only ever adds what a folder is missing. It never overwrites or deletes
 
 ## Where your data lives
 
-The app folder holds only code, so you can move it, update it or zip it and give it to someone. Your own data is in `~/.claudeos` (`C:\Users\<you>\.claudeos` on Windows): the list of brains, each brain's chats (`chats/<brain>/`, deleted ones in `trash/` there), each brain's inbox and briefs (`manager/`), employee names and the activity log. Set `CLAUDEOS_HOME` to keep it somewhere else.
+The app folder holds only code, so you can move it, update it or zip it and give it to someone. Your own data is in `~/.claudeos` (`C:\Users\<you>\.claudeos` on Windows): the list of brains, each brain's chats (`chats/<brain>/`, deleted ones in `trash/` there), each brain's inbox and briefs (`manager/`), published artifacts (`artifacts/`), the Browser tool's profile (`browser/`), employee names and the activity log. Set `CLAUDEOS_HOME` to keep it somewhere else.
 
 ## Privacy and safety
 
 - Everything runs on your computer. The server only listens on `127.0.0.1`, and the chat only accepts requests from the ClaudeOS page itself, so other websites can't send Claude commands.
 - What Claude reads is sent to Anthropic, as with any Claude Code session. Don't put passwords or keys in a brain.
+- Computer use and the browsers are off until you turn them on for a chat. With computer use on, Claude can click and type anywhere on your screen: keep an eye on it, and press Stop to end it.
 
 ## Credits
 
