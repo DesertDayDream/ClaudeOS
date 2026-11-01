@@ -100,7 +100,7 @@ export function toolSummary(name, input = {}) {
   return `${name}${target ? ': ' + String(target).slice(0, 120) : ''}`;
 }
 
-export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, helper, memoryServer, browserServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], projects = () => [], onIdle = () => {} }) {
+export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, helper, memoryServer, browserServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], projects = () => [], onIdle = () => {}, notify = () => {} }) {
   // the brain's chats: which one the page shows, the model/effort picked, and a row per saved chat
   const indexFile = path.join(dir, 'index.json');
   let index = { current: null, options: {}, chats: {} };
@@ -459,6 +459,12 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       // a side session's answer to the chat that started it goes back there
       const back = state.parent && run.fromParent
         ? (run.stopped ? 'The session was stopped before it finished.' : run.reply.text.trim() || `It ended with an error: ${run.reply.error || 'no answer'}`) : '';
+      // stopped by you: no need to tell you
+      if (!run.stopped && !run.wrap) {
+        const who = state.employee?.name || 'Claude';
+        notify({ chat: id, title: run.reply.error ? `${who} hit an error` : `${who} answered`,
+          body: (run.reply.error || run.reply.text).replace(/[#*_`>|]/g, '').replace(/s+/g, ' ').trim().slice(0, 200) || index.chats[id]?.title || '' });
+      }
       run = null;
       // a wrapped-up chat is finished with; any other keeps its process warm for the next message
       if (handover) cool(); else idleTimer();
@@ -736,6 +742,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       const card = { id, tool: tool_name, summary: toolSummary(tool_name, input), input, ...(who ? { who: String(who).slice(0, 60) } : { chat: asker.id }) };
       approvals.set(id, { resolve: allow => resolve(allow), card, input });
       emit({ kind: 'approval', card });
+      notify({ chat: card.chat || null, title: `${card.who || 'Claude'} needs your OK`, body: card.summary || tool_name });
     });
   }
   function answerApproval(id, allow) {

@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { exec, spawn } from 'node:child_process';
+import { exec } from 'node:child_process';
 import { createChat } from './chat.mjs';
 import { runHandoff } from './handoff.mjs';
 import { createManager } from './manager.mjs';
@@ -24,6 +24,7 @@ import { CATALOG, CONNECTORS_URL, addIntegration, removeIntegration, loginIntegr
 import { createRegistry, setupBrain, repairHooks, listFolder, slugFor, samePath, inside } from './brains.mjs';
 import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile } from './runtime.mjs';
 import { startTray } from './tray.mjs';
+import { createDesktop, openPage as openWindow, showPage as showWindow } from './desktop.mjs';
 
 const HOME = os.homedir();
 const CLAUDE = path.resolve(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude'));
@@ -36,6 +37,8 @@ const brains = createRegistry({ file: path.join(DATA, 'brains.json') });
 // if the app folder moved since a brain was set up, point that brain's hooks at this copy
 // each brain's building: departments, who sits where, and their projects
 const org = createOrg({ dir: path.join(DATA, 'org') });
+const desktop = createDesktop({ dataDir: DATA });
+desktop.repairLogin();
 const memoryFileOf = brain => path.join(brain.path, 'brain', 'memory.jsonl');
 for (const b of brains.list()) { try { repairHooks(b.path, HOOK, memoryServer(memoryFileOf(b))); } catch { /* folder may be gone */ } }
 
@@ -337,7 +340,8 @@ function chatFor(brain) {
       broadcast: (event, data) => { if (brains.active()?.id === brain.id) broadcast(event, data); },
       othersWorking: () => managerFor(brain).busy(), team: () => teamOf(brain), projects: () => projectsOf(brain),
       // the chat is the Manager: when it stops, the Manager desk stops typing and unbriefed requests wait again
-      onIdle: chatId => managerFor(brain).chatDone(chatId) }));
+      onIdle: chatId => managerFor(brain).chatDone(chatId),
+      notify: n => notify({ ...n, brain: brain.name }) }));
   }
   return chats.get(brain.id);
 }
@@ -570,6 +574,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/chats' && req.method === 'GET') return json(res, 200, chat ? chat.list(url.searchParams.get('q') || '') : { chats: [] });
   if (url.pathname === '/api/employee' && req.method === 'GET') return json(res, 200, active ? employeeView(active, url.searchParams.get('id') || '') : { error: 'Set up a brain first.' });
   if (url.pathname === '/api/manager' && req.method === 'GET') return json(res, 200, active ? managerFor(active).snapshot() : { inbox: [], files: [], briefs: [], busy: false });
+  if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, await settingsView());
   if (url.pathname === '/api/terminals' && req.method === 'GET') return json(res, 200, terminals.snapshot());
   if (url.pathname === '/api/artifacts' && req.method === 'GET') return json(res, 200, { list: artifacts.list(), port: ARTIFACT_PORT });
   // an attachment's bytes, for the chat's thumbnails (only files under the brain's attachments/)
@@ -593,6 +598,14 @@ async function handleApi(req, res, url) {
   const body = await readJson(req);
   // the desk tools a chat's Claude calls (approval-mcp.mjs), for whichever brain that chat is in
   if (url.pathname.startsWith('/api/desk/')) return json(res, 200, await desk(url.pathname.slice('/api/desk/'.length), body));
+  // window, hotkey, notifications, start at login
+  if (url.pathname === '/api/settings') {
+    const before = desktop.settings().hotkey;
+    const r = await desktop.set(body);
+    if (r.error) return json(res, 200, r);
+    if (desktop.settings().hotkey !== before) restartTray();
+    return json(res, 200, await settingsView());
+  }
   // the Terminal and Artifacts tabs
   if (url.pathname === '/api/terminal/run') return json(res, 200, terminals.run({ command: body.command, tab: body.tab, cwd: body.cwd || (active ? chatFor(active).chatFolder(chat.currentId()) : HOME) }));
   if (url.pathname === '/api/terminal/open') return json(res, 200, terminals.open({ cwd: body.cwd || (active ? chatFor(active).chatFolder(chat.currentId()) : HOME) }));
@@ -711,7 +724,7 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health'
     || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief' || url.pathname === '/api/org' || url.pathname.startsWith('/api/employee')
-    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file') {
+    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file' || url.pathname === '/api/settings') {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));
   }
   if (url.pathname === '/api/state') {
@@ -739,27 +752,46 @@ const server = http.createServer((req, res) => {
   res.end(buf);
 });
 
+const PAGE_URL = `http://localhost:${PORT}`;
 server.listen(PORT, '127.0.0.1', () => {
-  const url = `http://localhost:${PORT}`;
-  console.log(`ClaudeOS running at ${url}  (data: ${DATA})`);
-  if (process.argv.includes('--open')) openPage(url);
-  if (process.argv.includes('--tray')) startTray({ url, onQuit: quit });
+  console.log(`ClaudeOS running at ${PAGE_URL}  (data: ${DATA})`);
+  if (process.argv.includes('--open')) openPage(PAGE_URL);
+  if (process.argv.includes('--tray')) {
+    trayOn = true;
+    restartTray(process.argv.includes('--background') ? '' : 'Click the icon or press your hotkey to open it. Right-click to quit.');
+  }
 });
 server.on('error', err => {
   if (err.code === 'EADDRINUSE') {
     console.log(`ClaudeOS is already running at http://localhost:${PORT}`);
     // double-clicking ClaudeOS.exe again just brings the page back
-    if (IS_EXE) openPage(`http://localhost:${PORT}`);
-    setTimeout(() => process.exit(0), 500);
+    const bye = () => setTimeout(() => process.exit(0), 500);
+    if (IS_EXE) showWindow(PAGE_URL, { appWindow: desktop.settings().appWindow }, bye); else bye();
     return;
   }
   throw err;
 });
 
-function openPage(url) {
-  const [cmd, args] = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : [process.platform === 'darwin' ? 'open' : 'xdg-open', [url]];
-  spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+function openPage(url) { openWindow(url, { appWindow: desktop.settings().appWindow }); }
+
+// ---------- tray, hotkey and notifications ----------
+let tray = null, trayOn = false, hotkeyOk = null;
+function restartTray(greet = '') {
+  if (!trayOn) return;
+  tray?.stop();
+  hotkeyOk = null;
+  tray = startTray({ hotkey: desktop.settings().hotkey, greet, onQuit: quit, onShow: () => openPage(PAGE_URL),
+    onHotkey: ok => { hotkeyOk = ok; broadcast('settings', {}); } });
 }
+// An answer finished or Claude needs a yes: the page shows it if it is open (when you are not
+// looking at it), else the tray does.
+function notify({ title, body, chat, brain }) {
+  if (!desktop.settings().notify) return;
+  const t = brains.list().length > 1 && brain ? `${title} · ${brain}` : title;
+  if (clients.size) broadcast('notify', { title: t, body, chat });
+  else tray?.notify(t, body);
+}
+async function settingsView() { return { ...(await desktop.get()), tray: trayOn, hotkeyOk }; }
 
 // Quit from the tray: stop anything Claude is doing for us first.
 function quit() {

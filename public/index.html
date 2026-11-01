@@ -309,6 +309,18 @@
   aside header button { font-size: 12px; padding: 12px 0; }
   #toolsMenu { position: absolute; z-index: 7; top: 40px; right: 10px; width: 270px; background: #141829; border: 1px solid var(--line); border-radius: 10px; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
   #toolsMenu[hidden] { display: none; }
+  .brainpick.gear { margin-left: 6px; padding-left: 10px; padding-right: 10px; }
+  #settingsMenu { position: absolute; z-index: 8; top: calc(100% + 6px); left: 0; width: 320px; background: #141829; border: 1px solid var(--line); border-radius: 10px; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+  #settingsMenu[hidden] { display: none; }
+  #settingsMenu label, #settingsMenu .row { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; padding: 7px 6px; border-radius: 7px; font-size: 12.5px; align-items: center; }
+  #settingsMenu label { cursor: pointer; }
+  #settingsMenu label:hover { background: rgba(255,255,255,0.05); }
+  #settingsMenu label.off { opacity: 0.55; cursor: default; }
+  #settingsMenu input[type=checkbox] { grid-row: span 2; }
+  #settingsMenu span { color: var(--dim); font-size: 11px; grid-column: 2; }
+  #settingsMenu .row span { grid-column: 1 / -1; }
+  #settingsMenu .row input { background: rgba(255,255,255,0.05); border: 1px solid var(--line); border-radius: 6px; color: var(--text); font: 12px ui-monospace, Consolas, monospace; padding: 4px 6px; }
+  #settingsMenu .bad { color: #ff8a8a; font-weight: 500; }
   #toolsMenu label { display: grid; grid-template-columns: auto 1fr; gap: 0 8px; padding: 6px; border-radius: 7px; cursor: pointer; font-size: 12.5px; }
   #toolsMenu label:hover { background: rgba(255,255,255,0.05); }
   #toolsMenu input { grid-row: span 2; margin-top: 2px; }
@@ -490,6 +502,8 @@
       <i class="orb"></i><span class="label" id="brainName">Brain</span><span class="caret">▾</span>
     </button>
     <div class="menu" id="brainMenu" hidden></div>
+    <button class="brainpick gear" id="settingsBtn" title="Settings: own window, hotkey, notifications, start with Windows">⚙</button>
+    <div id="settingsMenu" hidden></div>
   </div>
   <div class="stats">
     <div><b id="nMem">0</b>memories</div>
@@ -574,5 +588,6 @@
 <script type="module" src="/queue.js"></script>
 <script type="module" src="/brains.js"></script>
 <script type="module" src="/desk.js"></script>
+<script type="module" src="/settings.js"></script>
 </body>
 </html>

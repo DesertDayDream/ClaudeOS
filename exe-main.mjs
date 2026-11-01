@@ -28,7 +28,8 @@ async function run() {
     console.log = console.error = write;
     process.on('uncaughtException', err => { write('crash:', err); setTimeout(() => process.exit(1), 100); });
     process.argv.push('--tray');
-    if (!process.env.CLAUDEOS_NO_OPEN) process.argv.push('--open'); // tests set it
+    // tests set CLAUDEOS_NO_OPEN; Windows starting us at sign-in passes --background (tray only)
+    if (!process.env.CLAUDEOS_NO_OPEN && !process.argv.includes('--background')) process.argv.push('--open');
     await import('./server.mjs');
   }
 }

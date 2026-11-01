@@ -26,7 +26,7 @@ Give Claude a brain you can see.
 
 ## The easy way: ClaudeOS.exe (Windows)
 
-If someone gave you `ClaudeOS.exe`, you only need [Claude Code](https://claude.com/claude-code), opened once with `claude` so you're logged in. Double-click `ClaudeOS.exe`: it opens ClaudeOS in your browser and puts an icon in the system tray (click it to open the page again, right-click to quit). It has Node and the memory server built in. Windows may warn that it's from an unknown publisher, because it isn't signed. Its log is in `~/.claudeos/claudeos.log`.
+If someone gave you `ClaudeOS.exe`, you only need [Claude Code](https://claude.com/claude-code), opened once with `claude` so you're logged in. Double-click `ClaudeOS.exe`: it opens ClaudeOS in a window of its own (Edge or Chrome app mode) and puts an icon in the system tray (click it to bring the window back, right-click to quit). Press **Ctrl+Alt+O** anywhere to bring ClaudeOS forward. The ⚙ button next to the brain name sets the hotkey, notifications (when an answer lands or Claude needs your OK while you're elsewhere; with no window open the tray shows them) and **Start with Windows** (tray only at sign-in). It has Node and the memory server built in. Windows may warn that it's from an unknown publisher, because it isn't signed. Its log is in `~/.claudeos/claudeos.log`.
 
 To build it yourself from this folder: `npm install`, then `npm run build:exe`. The result is `dist/ClaudeOS.exe` (about 90 MB), with the ClaudeOS icon from `assets/icon.ico`. To change the icon, edit `scripts/make-icon.mjs` and run `npm run icon` before building.
 
