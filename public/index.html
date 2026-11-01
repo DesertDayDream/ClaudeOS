@@ -154,6 +154,18 @@
   .composer textarea:focus { border-color: rgba(217,119,87,0.6); }
   .composer .row { display: flex; gap: 8px; align-items: center; }
   .composer .row .hint { flex: 1; color: var(--dim); font-size: 11px; }
+  .meter { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 11px; }
+  .meter .bar { flex: 0 0 64px; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.08); overflow: hidden; }
+  .meter .bar i { display: block; height: 100%; background: var(--project); }
+  .meter.big .bar i { background: #ffc861; }
+  .meter .txt { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nudge { border: 1px solid rgba(255,200,97,0.45); background: rgba(255,200,97,0.08); border-radius: 10px; padding: 8px 10px; font-size: 12px; }
+  .nudge .acts { margin-top: 6px; display: flex; gap: 6px; }
+  .nudge .btn { padding: 3px 10px; font-size: 12px; }
+  .msg .usage { color: var(--dim); font-size: 11px; margin-top: 4px; opacity: 0.8; }
+  .msg.user.wrap { background: none; border-style: dashed; color: var(--dim); }
+  .msg.assistant.carry { border: 1px solid rgba(95,212,255,0.3); background: rgba(95,212,255,0.06); border-radius: 10px; padding: 9px 11px; }
+  .msg.assistant.carry .head { color: var(--project); font-size: 12px; margin-bottom: 4px; }
   /* brain switcher */
   .brainbar { position: relative; margin-top: 8px; pointer-events: auto; display: inline-block; }
   .brainbar[hidden] { display: none; }
@@ -245,9 +257,12 @@
   <div class="tab on" id="chat">
     <div id="log"></div>
     <form class="composer" id="composer">
+      <div class="nudge" id="nudge" hidden></div>
+      <div class="meter" id="meter" hidden></div>
       <textarea id="input" rows="2" placeholder="Ask Claude anything… e.g. “Write a 45-second script about my island”"></textarea>
       <div class="row">
         <span class="hint">Enter to send · Shift+Enter for a new line</span>
+        <button type="button" class="btn" id="wrapChat" title="Save what matters to the brain's memory, then start a fresh, cheaper chat that gets a short handover">Wrap up</button>
         <button type="button" class="btn" id="newChat" title="Start a fresh conversation">New chat</button>
         <button type="button" class="btn" id="stop" hidden>Stop</button>
         <button type="submit" class="btn primary" id="send">Send</button>

@@ -406,6 +406,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/handoff') return json(res, 200, await handoff(active, body, req));
   if (url.pathname === '/api/skills/copy') return json(res, 200, copySkill(active, body));
   if (url.pathname === '/api/chat/new') return json(res, 200, chat.reset());
+  if (url.pathname === '/api/chat/wrap') return json(res, 200, chat.wrapUp());
   if (url.pathname === '/api/approval') return json(res, 200, await chat.requestApproval(body));
   if (url.pathname === '/api/approval/answer') return json(res, 200, chat.answerApproval(body.id, body.allow));
   return json(res, 404, { error: 'not found' });

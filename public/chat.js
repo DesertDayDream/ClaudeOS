@@ -7,10 +7,18 @@ const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const stopBtn = document.getElementById('stop');
 const newBtn = document.getElementById('newChat');
+const wrapBtn = document.getElementById('wrapChat');
 const form = document.getElementById('composer');
+const meter = document.getElementById('meter');
+const nudge = document.getElementById('nudge');
 
+// Every message resends the whole conversation. Past BIG tokens, or once the cache has expired on a
+// chat of STALE tokens or more, wrapping up and starting fresh is cheaper than carrying on.
+const BIG = 120000, STALE = 50000;
 const messages = new Map(); // id -> { msg, el }
 let busy = false;
+let context = null;        // { tokens, base, window, ttl, at } from the server
+const dismissed = new Set(); // nudges closed for this chat ("big" / "stale" + when)
 
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -35,6 +43,43 @@ function markdown(src) {
   }).join('');
 }
 
+const kTok = n => n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : String(n);
+const mins = ms => ms >= 3600e3 ? `${Math.round(ms / 3600e3)} h` : `${Math.max(1, Math.round(ms / 60e3))} min`;
+
+function usageLine(u) {
+  const pct = u.sent ? Math.round((u.cached / u.sent) * 100) : 0;
+  const cost = u.cost != null ? ` · ≈$${u.cost.toFixed(u.cost < 0.1 ? 3 : 2)} at API prices` : '';
+  const tip = `Claude read ${u.sent.toLocaleString()} tokens over ${u.calls} step${u.calls === 1 ? '' : 's'}, ${u.cached.toLocaleString()} of them from cache (cheap), and wrote ${u.output.toLocaleString()}.` +
+    (u.warm < 0.5 ? ' The cache had expired, so the conversation was sent again at full price.' : '');
+  return `<div class="usage" title="${esc(tip)}">${kTok(u.sent)} read · ${pct}% from cache · ${kTok(u.output)} written${cost}</div>`;
+}
+
+function showContext() {
+  if (!context) { meter.hidden = true; nudge.hidden = true; return; }
+  const left = context.ttl - (Date.now() - context.at), warm = left > 0;
+  meter.hidden = false;
+  meter.classList.toggle('big', context.tokens >= BIG);
+  meter.innerHTML = `<span class="bar"><i style="width:${Math.min(100, (context.tokens / BIG) * 100)}%"></i></span>
+    <span class="txt">Each message resends ${kTok(context.tokens)} tokens · ${warm ? `cache warm for ${mins(left)}` : 'cache expired'}</span>`;
+  meter.title = `This conversation is ${context.tokens.toLocaleString()} tokens. Claude reads all of it again with every message. ` +
+    `Within ${mins(context.ttl)} of the last reply most of it comes from cache, which costs far less; after that it is sent at full price. ` +
+    `A fresh chat in this brain starts at about ${kTok(context.base)}.`;
+  const kind = context.tokens >= BIG ? 'big' : !warm && context.tokens >= STALE ? 'stale' : null;
+  const key = kind && `${kind}:${kind === 'stale' ? context.at : ''}`;
+  if (!kind || busy || dismissed.has(key)) { nudge.hidden = true; return; }
+  nudge.hidden = false;
+  nudge.innerHTML = (kind === 'big'
+    ? `This chat is big: every message resends about <b>${kTok(context.tokens)}</b> tokens. Wrapping up saves what matters to the brain and starts over at about ${kTok(context.base)}.`
+    : `The cache has expired, so your next message resends all <b>${kTok(context.tokens)}</b> tokens at full price. Wrapping up first is cheaper.`) +
+    `<div class="acts"><button type="button" class="btn primary" data-act="wrap">Wrap up &amp; start fresh</button><button type="button" class="btn" data-act="keep">Keep going</button></div>`;
+  nudge.onclick = e => {
+    const act = e.target.closest('button')?.dataset.act;
+    if (act === 'wrap') wrap();
+    if (act === 'keep') { dismissed.add(key); nudge.hidden = true; }
+  };
+}
+setInterval(showContext, 30000); // the cache countdown
+
 function atBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight < 60; }
 function scrollDown(force) { if (force || atBottom()) log.scrollTop = log.scrollHeight; }
 
@@ -42,7 +87,7 @@ function render(msg) {
   let entry = messages.get(msg.id);
   if (!entry) {
     const el = document.createElement('div');
-    el.className = `msg ${msg.role}`;
+    el.className = `msg ${msg.role}${msg.wrap ? ' wrap' : ''}${msg.carry ? ' carry' : ''}`;
     log.appendChild(el);
     entry = { msg, el };
     messages.set(msg.id, entry);
@@ -52,11 +97,13 @@ function render(msg) {
   if (msg.role === 'user') entry.el.textContent = msg.text;
   else {
     entry.el.innerHTML =
+      (msg.carry ? '<div class="head">Fresh start · handover from your last chat (the details are saved in the brain\'s memory)</div>' : '') +
       (msg.tools?.length ? `<div class="tools">${msg.tools.map(t => `<div title="${esc(t)}">${esc(t)}</div>`).join('')}</div>` : '') +
       `<div class="body">${markdown(msg.text)}</div>` +
       (msg.streaming && !msg.text ? '<span class="typing"></span>' : '') +
       (msg.error ? `<div class="err">${esc(msg.error)}</div>` : '') +
-      (msg.note ? `<div class="note">${esc(msg.note)}</div>` : '');
+      (msg.note ? `<div class="note">${esc(msg.note)}</div>` : '') +
+      (msg.usage && !msg.streaming ? usageLine(msg.usage) : '');
   }
   scrollDown(stick);
 }
@@ -91,6 +138,8 @@ function setBusy(b) {
   sendBtn.disabled = b;
   stopBtn.hidden = !b;
   newBtn.disabled = b;
+  wrapBtn.disabled = b;
+  showContext();
 }
 
 function showEmpty() {
@@ -114,6 +163,7 @@ async function load() {
   messages.clear();
   for (const m of s.messages || []) render(m);
   for (const c of s.approvals || []) renderApproval(c);
+  context = s.context || null;
   setBusy(!!s.busy);
   showEmpty();
   scrollDown(true);
@@ -126,7 +176,15 @@ function onEvent(ev) {
   else if (ev.kind === 'busy') setBusy(ev.busy);
   else if (ev.kind === 'approval') renderApproval(ev.card);
   else if (ev.kind === 'approval-done') approvalDone(ev.id, ev.allowed);
-  else if (ev.kind === 'reset') { log.innerHTML = ''; messages.clear(); showEmpty(); }
+  else if (ev.kind === 'reset') { log.innerHTML = ''; messages.clear(); dismissed.clear(); showEmpty(); }
+  else if (ev.kind === 'context') { context = ev.context; showContext(); }
+}
+
+async function wrap() {
+  if (busy) return;
+  nudge.hidden = true;
+  const r = await api('/api/chat/wrap', {});
+  if (r.error) alert(r.error);
 }
 
 async function send() {
@@ -145,6 +203,7 @@ input.addEventListener('keydown', e => {
 });
 form.addEventListener('submit', e => { e.preventDefault(); send(); });
 stopBtn.addEventListener('click', () => api('/api/chat/stop', {}));
+wrapBtn.addEventListener('click', wrap);
 newBtn.addEventListener('click', async () => {
   if (!confirm('Start a new conversation? Claude forgets this chat (the shared brain keeps everything it saved).')) return;
   api('/api/chat/new', {});
