@@ -1,6 +1,7 @@
 import { events } from '/events.js';
-// ClaudeOS Inbox tab: leave requests (and files) for the Manager, press "Brief & assign", and follow
-// the brief: which employee does what, what waits for what, and how each part ended.
+// ClaudeOS Inbox tab: leave requests (and files) for the Manager, press "Brief & assign" to hand them to
+// the Manager (the chat), and follow its briefs: which employee does what, what waits for what, and how
+// each part ended.
 const TOKEN = window.CLAUDEOS_TOKEN;
 const el = document.getElementById('inbox');
 const tabBtn = document.querySelector('aside header [data-tab="inbox"]');
@@ -11,7 +12,7 @@ const open = new Set(); // task keys with their full report showing
 const esc = v => String(v ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const size = n => n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.ceil(n / 1024) + ' KB';
 const STATUS = { waiting: 'Waiting', working: 'Working', done: 'Done', error: 'Failed', stopped: 'Stopped', skipped: 'Skipped' };
-const BRIEF = { briefing: 'Manager is writing the brief…', working: 'Team at work', done: 'Done', failed: 'Finished with problems', stopped: 'Stopped' };
+const BRIEF = { working: 'Team at work', done: 'Done', failed: 'Finished with problems', stopped: 'Stopped' };
 const RUN_CLASS = { waiting: 'stopped', working: 'working', done: '', error: 'error', stopped: 'stopped', skipped: 'stopped' };
 
 async function api(path, body) {
@@ -24,11 +25,11 @@ async function api(path, body) {
 }
 
 function render() {
-  const waiting = s.inbox.filter(x => x.status === 'new');
+  const waiting = s.inbox.filter(x => x.status === 'new'), sent = s.inbox.filter(x => x.status === 'sent');
   const count = waiting.length + s.files.length;
   tabBtn.textContent = count ? `Inbox (${count})` : 'Inbox';
   const focus = document.activeElement?.id === 'inboxText';
-  let html = `<div class="ib-intro">Leave requests for the <b>Manager</b>. It reads everything waiting, writes one brief and splits the work between the employees. Up to ${s.max} work at the same time; a part that needs another's output waits for it.</div>
+  let html = `<div class="ib-intro">Leave requests for the <b>Manager</b>, the one you talk to in the Chat tab. <i>Brief &amp; assign</i> hands everything waiting to it: it writes one brief and splits the work between the employees. Up to ${s.max} work at the same time; a part that needs another's output waits for it. The team's reports come back in Chat. You can also just ask the Manager in Chat.</div>
     <textarea id="inboxText" rows="3" placeholder="e.g. “Turn the desert clip into a reel with a cover and post copy”">${esc(draft)}</textarea>
     <div class="ib-row"><label class="btn" title="Saved into this brain's inbox/ folder">Add files<input type="file" id="inboxFiles" multiple hidden></label>
       <button class="btn" data-ib="add">Add to inbox</button></div>
@@ -36,11 +37,10 @@ function render() {
     <div class="runs-h">Waiting · ${count}</div>`;
   if (!count && !uploading) html += '<div class="empty">Nothing waiting. Add a request above, or drop files anywhere on this tab.</div>';
   for (const x of waiting) html += `<div class="ib-item"><span>${esc(x.text)}</span><button class="btn mini" data-ib="remove" data-id="${x.id}" title="Remove">×</button></div>`;
+  for (const x of sent) html += `<div class="ib-item sent"><span>${esc(x.text)}</span><em>With the Manager in Chat</em></div>`;
   for (const f of s.files) html += `<div class="ib-item file"><code>${esc(f.path)}</code><em>${size(f.size)}</em></div>`;
   if (uploading) html += `<div class="ib-item file"><em>Uploading ${uploading} file${uploading > 1 ? 's' : ''}…</em></div>`;
-  html += s.busy
-    ? '<div class="ib-row"><button class="btn danger" data-ib="stop">Stop the team</button></div>'
-    : `<div class="ib-row"><button class="btn primary" data-ib="run" ${count ? '' : 'disabled'}>Brief &amp; assign</button></div>`;
+  html += `<div class="ib-row"><button class="btn primary" data-ib="run" ${count && !s.chatting ? '' : 'disabled'} title="${s.chatting ? 'The Manager is answering in Chat' : 'Hand everything waiting to the Manager in Chat'}">Brief &amp; assign</button>${s.busy ? ' <button class="btn danger" data-ib="stop">Stop the team</button>' : ''}</div>`;
   const briefs = [...s.briefs].reverse();
   if (briefs.length) html += '<div class="runs-h">Briefs</div>';
   for (const b of briefs) html += briefCard(b);
@@ -50,10 +50,10 @@ function render() {
 
 function briefCard(b) {
   const done = b.tasks.filter(t => t.status === 'done').length;
-  const cost = [b.managerUsage, ...b.tasks.map(t => t.usage)].reduce((a, u) => a + (u?.cost || 0), 0);
+  const cost = b.tasks.map(t => t.usage).reduce((a, u) => a + (u?.cost || 0), 0);
   let html = `<div class="brief ${b.status}"><div class="bt"><b>${esc(b.title || 'New brief')}</b><span>${BRIEF[b.status] || b.status}${b.tasks.length ? ` · ${done}/${b.tasks.length} done` : ''}${cost ? ` · ≈$${cost.toFixed(2)}` : ''}</span></div>`;
   if (b.summary) html += `<div class="bs">${esc(b.summary)}</div>`;
-  if (b.error) html += `<div class="ib-err">${esc(b.error)}${b.managerResult ? `<br><span>${esc(b.managerResult)}</span>` : ''}</div>`;
+  if (b.error) html += `<div class="ib-err">${esc(b.error)}</div>`;
   for (const t of b.tasks) {
     const key = b.id + t.id;
     const waits = t.after.length && t.status === 'waiting' ? ` · waits for ${t.after.map(id => esc(b.tasks.find(x => x.id === id)?.name || id)).join(', ')}` : '';
@@ -106,6 +106,7 @@ async function act(what, btn) {
 
 async function load() { const r = await api('/api/manager'); if (!r.error) s = r; render(); }
 events.addEventListener('manager', e => { s = JSON.parse(e.data); render(); });
+events.addEventListener('chat', e => { const ev = JSON.parse(e.data); if (ev.kind === 'busy') { s.chatting = ev.busy; render(); } });
 events.addEventListener('open', () => load());
 events.addEventListener('brain', () => load()); // each brain has its own inbox
 tabBtn.addEventListener('click', () => load()); // files may have landed in inbox/ from outside

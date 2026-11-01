@@ -100,7 +100,11 @@
   .ib-item.file code { font: 11.5px ui-monospace, Consolas, monospace; color: #9fe3ff; }
   .ib-item em { font-style: normal; color: var(--dim); font-size: 11px; }
   .brief { border: 1px solid var(--line); border-radius: 12px; padding: 9px 10px 4px; margin-bottom: 10px; background: rgba(242,193,78,0.04); }
-  .brief.briefing, .brief.working { border-color: rgba(242,193,78,0.55); }
+  .brief.working { border-color: rgba(242,193,78,0.55); }
+  .ib-item.sent { opacity: 0.7; }
+  .ib-item.sent em { color: #f2c14e; font-style: normal; font-size: 11px; white-space: nowrap; }
+  .msg.user.from-team, .msg.user.from-inbox { background: rgba(242,193,78,0.12); border: 1px solid rgba(242,193,78,0.4); }
+  .msg.user.from-team::before { content: 'From the team · '; color: #f2c14e; font-size: 11px; }
   .brief .bt b { display: block; font-weight: 650; }
   .brief .bt span { color: #f2c14e; font-size: 11px; }
   .brief .bs { font-size: 12px; color: #c5c9e6; margin: 6px 0 8px; white-space: pre-wrap; }
@@ -211,6 +215,9 @@
   .composer textarea:focus { border-color: rgba(217,119,87,0.6); }
   .composer .row { display: flex; gap: 8px; align-items: center; }
   .composer .row .hint { flex: 1; color: var(--dim); font-size: 11px; }
+  .composer .pick { display: flex; gap: 4px; min-width: 0; }
+  .composer .pick select { min-width: 0; max-width: 50%; background: rgba(0,0,0,0.3); color: var(--dim); border: 1px solid var(--line); border-radius: 8px; padding: 4px 4px; font: inherit; font-size: 11px; }
+  .composer .pick select.set { color: var(--text); border-color: rgba(217,119,87,0.5); }
   .meter { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 11px; }
   .meter .bar { flex: 0 0 64px; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.08); overflow: hidden; }
   .meter .bar i { display: block; height: 100%; background: var(--project); }
@@ -317,13 +324,16 @@
     <form class="composer" id="composer">
       <div class="nudge" id="nudge" hidden></div>
       <div class="meter" id="meter" hidden></div>
-      <textarea id="input" rows="2" placeholder="Ask Claude anything… e.g. “Write a 45-second script about my island”"></textarea>
+      <textarea id="input" rows="2" placeholder="Ask the Manager anything… e.g. “Write a 45-second script about my island”"></textarea>
       <div class="row">
-        <span class="hint">Enter to send · Shift+Enter for a new line</span>
+        <span class="hint pick" title="Model and effort for the Manager's next replies in this brain. Switching model mid-chat re-reads the whole chat once (no cache).">
+          <select id="chatModel" aria-label="Model"><option value="">Default model</option><option value="fable">Fable</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select>
+          <select id="chatEffort" aria-label="Effort"><option value="">Default effort</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select>
+        </span>
         <button type="button" class="btn" id="wrapChat" title="Save what matters to the brain's memory, then start a fresh, cheaper chat that gets a short handover">Wrap up</button>
         <button type="button" class="btn" id="newChat" title="Start a fresh conversation">New chat</button>
         <button type="button" class="btn" id="stop" hidden>Stop</button>
-        <button type="submit" class="btn primary" id="send">Send</button>
+        <button type="submit" class="btn primary" id="send" title="Enter to send · Shift+Enter for a new line">Send</button>
       </div>
     </form>
   </div>

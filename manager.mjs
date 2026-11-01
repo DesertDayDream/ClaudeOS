@@ -1,9 +1,10 @@
-// The Manager: one shared inbox per brain. You leave requests there (typed in the Inbox tab, or files
-// dropped into the brain's inbox/ folder). "Brief & assign" runs the Manager once, headless in the brain
-// folder: it reads everything waiting, writes one brief and splits it into tasks for the employees
-// (skills) through the post_brief tool. Then each task runs as its own `claude -p` in the brain folder,
-// so employees work at the same time (MAX_PARALLEL at most), and a task that needs another's output
-// waits for it and gets its report.
+// The Manager's team desk: one shared inbox per brain, and the briefs it hands out. The Manager is the
+// chat: talking in the Chat tab is talking to the Manager. You leave requests in the Inbox tab (typed, or
+// files dropped into the brain's inbox/ folder) and "Brief & assign" hands them to the chat; the
+// Manager (or any chat message that is work for the team) splits the work into tasks through the
+// post_brief tool. Each task runs as its own `claude -p` in the brain folder, so employees work at the
+// same time (MAX_PARALLEL at most, across all briefs), a task that needs another's output waits for it
+// and gets its report, and the finished brief reports back to the Manager in the chat.
 import { spawn, execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -12,28 +13,27 @@ import path from 'node:path';
 const MAX_PARALLEL = 3;
 const MAX_TASKS = 12;
 const MAX_BRIEFS = 30;
-const MANAGER_DENIED = ['Skill', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'Task', 'Agent', 'WebFetch', 'WebSearch'];
 const clip = (s, n) => (s = String(s || '').trim()).length > n ? s.slice(0, n - 1) + '…' : s;
 
-export function createManager({ cwd, dataFile, activityFile, memoryFile, helper, memoryServer, port, token, broadcast, team }) {
+export function createManager({ cwd, dataFile, activityFile, memoryFile, helper, memoryServer, port, token, broadcast, team, chatBusy = () => false, onBriefDone = () => {} }) {
   let state = { inbox: [], briefs: [] };
   try { state = { ...state, ...JSON.parse(fs.readFileSync(dataFile, 'utf8')) }; } catch { /* first run */ }
   // runs from before a restart are gone
+  for (const x of state.inbox) if (x.status === 'sent') x.status = 'new';
   for (const b of state.briefs) {
     if (b.status === 'briefing' || b.status === 'working') b.status = 'stopped';
     for (const t of b.tasks || []) if (t.status === 'working' || t.status === 'waiting') t.status = 'stopped';
   }
 
-  const procs = new Map(); // task id (or 'manager') -> { proc, session, stopped }
-  let pendingBrief = null; // what post_brief handed us during the Manager's run
+  const procs = new Map(); // brief id + task id -> { proc, session, stopped }
 
   function save() {
     state.briefs = state.briefs.slice(-MAX_BRIEFS);
     try { fs.mkdirSync(path.dirname(dataFile), { recursive: true }); fs.writeFileSync(dataFile, JSON.stringify(state)); } catch { /* keep going */ }
   }
   function changed() { save(); broadcast('manager', snapshot()); }
-  const current = () => state.briefs.find(b => b.status === 'briefing' || b.status === 'working');
-  const busy = () => !!current();
+  const working = () => state.briefs.filter(b => b.status === 'working');
+  const busy = () => working().length > 0;
 
   function inboxFiles() {
     const dir = path.join(cwd, 'inbox'), out = [];
@@ -54,7 +54,7 @@ export function createManager({ cwd, dataFile, activityFile, memoryFile, helper,
   }
 
   function snapshot() {
-    return { inbox: state.inbox, files: inboxFiles(), briefs: state.briefs.slice(-10), busy: busy(), max: MAX_PARALLEL };
+    return { inbox: state.inbox, files: inboxFiles(), briefs: state.briefs.slice(-10), busy: busy(), chatting: chatBusy(), max: MAX_PARALLEL };
   }
 
   function add(text) {
@@ -69,6 +69,7 @@ export function createManager({ cwd, dataFile, activityFile, memoryFile, helper,
     const i = state.inbox.findIndex(x => x.id === id);
     if (i < 0) return { error: 'That request is gone.' };
     if (state.inbox[i].status === 'briefed' && busy()) return { error: 'The team is working on it. Stop the brief first.' };
+    if (state.inbox[i].status === 'sent') return { error: 'The Manager is reading it in the Chat tab right now.' };
     state.inbox.splice(i, 1);
     changed();
     return { ok: true };
@@ -134,81 +135,44 @@ export function createManager({ cwd, dataFile, activityFile, memoryFile, helper,
     try { fs.appendFileSync(activityFile, JSON.stringify(ev) + '\n'); } catch { /* the board shows it as unfinished */ }
   }
 
-  // ---------- the Manager writes the brief ----------
-  function start() {
-    if (busy()) return { error: 'The team is still on the last brief. Wait for it, or press Stop.' };
+  // ---------- the Manager (the chat) writes the brief ----------
+  // "Brief & assign": the message the chat gets, the short line the chat shows, and the requests it covers
+  function handOver() {
     const items = state.inbox.filter(x => x.status === 'new');
     const files = inboxFiles();
     if (!items.length && !files.length) return { error: 'The inbox is empty. Add a request or drop a file first.' };
-    const crew = team();
-    if (!crew.length) return { error: 'This brain has no employees yet. Hire one in the Team tab first.' };
-    const brief = { id: crypto.randomBytes(4).toString('hex'), ts: Date.now(), status: 'briefing', items: items.map(x => x.id),
-      title: '', summary: '', notes: '', skipped: [], tasks: [], managerResult: '', error: '' };
-    state.briefs.push(brief);
-    for (const x of items) x.status = 'briefed';
-    pendingBrief = null;
-    const prompt = managerPrompt(items, files, crew);
-    runClaude('manager', prompt, {
-      who: 'Manager',
-      allowed: ['mcp__memory__search_nodes', 'mcp__memory__open_nodes', 'mcp__memory__read_graph', 'mcp__claudeos__post_brief', 'Read', 'Glob', 'Grep', 'LS'],
-      denied: MANAGER_DENIED,
-      extraEnv: { CLAUDEOS_TEAM: JSON.stringify(crew.map(c => c.skill)) },
-    }, r => {
-      brief.managerUsage = r.usage || null;
-      brief.managerResult = clip(r.result || '', 2000);
-      if (r.stopped) { brief.status = 'stopped'; reopen(brief); return changed(); }
-      if (!pendingBrief) {
-        brief.status = 'failed';
-        brief.error = r.error || 'The Manager finished without writing a brief.';
-        reopen(brief);
-        return changed();
-      }
-      Object.assign(brief, pendingBrief, { status: 'working' });
-      pendingBrief = null;
-      // requests the Manager set aside go back to the inbox
-      for (const s of brief.skipped) { const it = state.inbox.find(x => x.id === s.request); if (it) it.status = 'new'; }
-      changed();
-      tick(brief);
-    });
-    changed();
-    return { ok: true, id: brief.id };
-  }
-  function reopen(brief) { for (const id of brief.items) { const it = state.inbox.find(x => x.id === id); if (it && it.status === 'briefed') it.status = 'new'; } }
-
-  function managerPrompt(items, files, crew) {
+    if (!team().length) return { error: 'This brain has no employees yet. Hire one in the Team tab first.' };
     const req = items.length ? items.map(x => `- [${x.id}] ${x.text}`).join('\n') : '(none typed; see the files)';
     const fileList = files.length ? files.map(f => `- ${f.path} (${f.size > 1e6 ? (f.size / 1e6).toFixed(1) + ' MB' : Math.ceil(f.size / 1024) + ' KB'})`).join('\n') : '(empty)';
-    return `Manager: brief ${items.length || 'the'} inbox request${items.length === 1 ? '' : 's'}
+    const text = `Brief the team on what is waiting in the inbox.
 
-You are the Manager of this brain's team. You don't do the work yourself: you read the inbox, write ONE brief that splits the work between the employees, and hand it over by calling mcp__claudeos__post_brief once.
-
-Requests in the inbox:
+Requests (put their ids in each task's "request"):
 ${req}
 
 Files waiting in inbox/:
 ${fileList}
 
-The team (employee name, skill: what it does):
-${crew.map(c => `- ${c.name}, ${c.skill}: ${clip(c.description, 300)}`).join('\n')}
-
-How to brief:
-- Search the brain's memory (mcp__memory__search_nodes) when the work depends on the user's preferences, brand rules or past decisions. Read files if you need to understand a request.
-- Each task goes to one employee and must stand on its own: the employee can't see the inbox or this brief. Say the goal, the exact input files, where to save the output, and anything from memory they need.
-- Put a task id in "after" only when that task needs the other one's output (the edit before its cover image). Everything else runs at the same time, so never chain tasks that don't depend on each other.
-- Fewer, bigger tasks beat many tiny ones: every task is a separate run. Use at most ${MAX_TASKS}.
-- Only use employees from the list, by their skill name. If a request (or part of one) fits nobody or is too unclear to act on, put it in "skipped" with the reason instead of guessing.
-- Files in inbox/ with no typed request are work too when an employee's skill says it takes them (a raw clip for an editor).
-
-After post_brief accepts the brief, reply with one short line.`;
+Files in inbox/ with no typed request are work too when an employee's skill says it takes them (a raw clip for an editor). Brief it all with mcp__claudeos__post_brief, then tell me in a few lines who does what.`;
+    const n = (k, w) => `${k} ${w}${k === 1 ? '' : 's'}`;
+    const label = `Brief & assign: ${[items.length && n(items.length, 'request'), files.length && n(files.length, 'file')].filter(Boolean).join(' and ')} from the inbox`;
+    return { text, label, ids: items.map(x => x.id) };
+  }
+  function markSent(ids) { for (const x of state.inbox) if (ids.includes(x.id) && x.status === 'new') x.status = 'sent'; changed(); }
+  // the chat's answer ended: requests it didn't brief are waiting again
+  function chatDone() {
+    let n = 0;
+    for (const x of state.inbox) if (x.status === 'sent') { x.status = 'new'; n++; }
+    if (n) changed(); else broadcast('manager', snapshot());
   }
 
-  // Called (long-poll) through approval-mcp.mjs when the Manager calls post_brief.
+  function reopen(brief) { for (const id of brief.items) { const it = state.inbox.find(x => x.id === id); if (it && it.status === 'briefed') it.status = 'new'; } }
+
+  // Called (long-poll) through approval-mcp.mjs when the chat calls post_brief.
   function postBrief(args) {
-    const brief = current();
-    if (!brief || brief.status !== 'briefing') return { error: 'No brief is being written right now.' };
     const crew = team(), skills = new Set(crew.map(c => c.skill));
+    if (!crew.length) return { error: 'This brain has no employees yet. The user can hire one in the Team tab.' };
     const tasks = Array.isArray(args?.tasks) ? args.tasks : [];
-    if (!tasks.length && !(args?.skipped || []).length) return { error: 'The brief has no tasks. Add at least one, or put every request in "skipped" with a reason.' };
+    if (!tasks.length) return { error: 'The brief has no tasks. Give at least one, or don\'t brief: answer the user yourself.' };
     if (tasks.length > MAX_TASKS) return { error: `Use at most ${MAX_TASKS} tasks.` };
     const seen = new Set(), problems = [];
     const clean = tasks.map((t, i) => {
@@ -223,24 +187,32 @@ After post_brief accepts the brief, reply with one short line.`;
         status: 'waiting', result: '', start: 0, end: 0, usage: null, session: null };
     });
     if (problems.length) return { error: problems.join('\n') };
-    pendingBrief = {
-      title: clip(args.title || 'Brief', 120), summary: clip(args.summary, 1500), notes: clip(args.notes, 1500),
-      skipped: (Array.isArray(args.skipped) ? args.skipped : []).map(s => ({ request: String(s.request || ''), reason: clip(s.reason, 400) })),
-      tasks: clean,
-    };
-    return { ok: true, text: `Brief accepted: ${clean.length} task${clean.length === 1 ? '' : 's'}. ClaudeOS starts them now.` };
+    const skipped = (Array.isArray(args.skipped) ? args.skipped : []).map(s => ({ request: String(s.request || ''), reason: clip(s.reason, 400) }));
+    const asked = new Set([...clean.flatMap(t => t.request), ...skipped.map(s => s.request)]);
+    const items = state.inbox.filter(x => asked.has(x.id) && (x.status === 'new' || x.status === 'sent'));
+    const brief = { id: crypto.randomBytes(4).toString('hex'), ts: Date.now(), status: 'working', items: items.map(x => x.id),
+      title: clip(args.title || 'Brief', 120), summary: clip(args.summary, 1500), notes: clip(args.notes, 1500), skipped, tasks: clean, error: '' };
+    state.briefs.push(brief);
+    // a request the Manager only set aside goes back to waiting
+    for (const x of items) x.status = clean.some(t => t.request.includes(x.id)) ? 'briefed' : 'new';
+    tickAll();
+    return { ok: true, text: `Brief accepted: ${clean.length} task${clean.length === 1 ? '' : 's'}. ClaudeOS starts them now and reports back in this chat when the team is done; don't wait or check on it.` };
   }
 
   // ---------- the employees work it ----------
+  // starts what can start, in every brief at work, up to MAX_PARALLEL employees at once
+  function tickAll() {
+    for (const b of working()) tick(b);
+    changed();
+  }
   function tick(brief) {
-    if (brief.status !== 'working') return changed(); // stopped: just save how its tasks ended
     const by = new Map(brief.tasks.map(t => [t.id, t]));
     for (const t of brief.tasks) {
       if (t.status !== 'waiting') continue;
       const deps = t.after.map(id => by.get(id));
       if (deps.some(d => d.status === 'error' || d.status === 'skipped' || d.status === 'stopped')) { t.status = 'skipped'; t.result = 'Skipped: a task it waited for didn\'t finish.'; }
     }
-    let running = brief.tasks.filter(t => t.status === 'working').length;
+    let running = working().reduce((n, b) => n + b.tasks.filter(t => t.status === 'working').length, 0);
     for (const t of brief.tasks) {
       if (running >= MAX_PARALLEL) break;
       if (t.status !== 'waiting' || !t.after.every(id => by.get(id).status === 'done')) continue;
@@ -254,8 +226,13 @@ After post_brief accepts the brief, reply with one short line.`;
         const it = state.inbox.find(x => x.id === id);
         if (it && it.status === 'briefed') it.status = brief.tasks.filter(t => t.request.includes(id)).every(t => t.status === 'done') ? 'done' : 'new';
       }
+      onBriefDone(brief, report(brief));
     }
-    changed();
+  }
+  // what the Manager hears back in the chat when a brief is finished
+  function report(b) {
+    const lines = b.tasks.map(t => `- ${t.name} (${t.employee}), task ${t.id}: ${t.status === 'done' ? 'done' : t.status}\n${String(t.result).replace(/^/gm, '  ')}`);
+    return `The team finished the brief "${b.title}". Their reports:\n${lines.join('\n')}\n\nTell me in a few lines what was done and where the output is, and what (if anything) needs my decision.`;
   }
 
   function startTask(brief, t, deps) {
@@ -271,31 +248,31 @@ After post_brief accepts the brief, reply with one short line.`;
 You are ${me.name}, the ${me.skill} employee on this brain's team, working on the Manager's brief "${brief.title}". Start by using the ${me.skill} skill, then do only this task. Other employees may be working in this folder at the same time, so only touch the files your task names or creates. End with a short report: what you did and where the output is.`;
     t.status = 'working';
     t.start = Date.now();
-    const run = runClaude(t.id, prompt, { who: `${me.name} (${me.skill})`, allowed: ['mcp__memory'] }, r => {
+    const run = runClaude(brief.id + ':' + t.id, prompt, { who: `${me.name} (${me.skill})`, allowed: ['mcp__memory'] }, r => {
       t.end = Date.now();
       t.usage = r.usage || null;
       if (r.stopped) { t.status = 'stopped'; t.result = 'Stopped.'; }
       else if (r.error) { t.status = 'error'; t.result = clip(r.error, 2000); }
       else { t.status = 'done'; t.result = clip(r.result, 4000); }
-      tick(brief);
+      tickAll();
     });
     t.session = run.session;
   }
 
   function stop() {
-    const brief = current();
-    if (!brief) return { ok: true };
-    brief.status = 'stopped';
-    for (const t of brief.tasks) if (t.status === 'waiting') { t.status = 'stopped'; t.result = 'Stopped before it started.'; }
+    for (const brief of working()) {
+      brief.status = 'stopped';
+      for (const t of brief.tasks) if (t.status === 'waiting') { t.status = 'stopped'; t.result = 'Stopped before it started.'; }
+      reopen(brief);
+    }
     for (const run of procs.values()) {
       run.stopped = true;
       // end Claude and anything it started
       execFile('taskkill', ['/pid', String(run.proc.pid), '/T', '/F'], () => {});
     }
-    reopen(brief);
     changed();
     return { ok: true };
   }
 
-  return { snapshot, add, remove, upload, start, stop, postBrief, busy };
+  return { snapshot, add, remove, upload, handOver, markSent, chatDone, stop, postBrief, busy };
 }

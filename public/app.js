@@ -520,9 +520,10 @@ function addEmployee(skill, delay) {
 }
 
 // ---------- the Manager: a bigger desk in front of the brain, facing the team and you ----------
-// Reads the shared inbox, writes the brief and splits it between the employees (manager.mjs).
+// The Manager is the chat: it types while it answers in the Chat tab, and its briefs split the work
+// between the employees (manager.mjs).
 const MANAGER_COLOR = 0xf2c14e;
-let managerState = { inbox: [], files: [], briefs: [], busy: false };
+let managerState = { inbox: [], files: [], briefs: [], busy: false, chatting: false };
 const boss = (() => {
   const root = new THREE.Group(), body = new THREE.Group();
   root.add(body);
@@ -552,10 +553,10 @@ const boss = (() => {
   scene.add(root);
   return { root, body, sphere, eyes, label, bubble, screen, busyAmt: 0, phase: 1.3, blinkAt: 0 };
 })();
-function bossBrief() { return managerState.briefs.find(b => b.status === 'briefing' || b.status === 'working'); }
+function bossBrief() { return managerState.briefs.find(b => b.status === 'working'); }
 function bossLine() {
   const b = bossBrief();
-  if (b?.status === 'briefing') return 'Writing the brief…';
+  if (managerState.chatting) return 'Answering you in Chat…';
   if (b) return `${b.title} · ${b.tasks.filter(t => t.status === 'done').length}/${b.tasks.length} done`;
   const waiting = managerState.inbox.filter(x => x.status === 'new').length + managerState.files.length;
   return waiting ? `Inbox: ${waiting} waiting` : '';
@@ -566,6 +567,8 @@ function setManager(next) {
   renderPanel();
 }
 events.addEventListener('manager', e => setManager(JSON.parse(e.data)));
+// talking in the Chat tab is talking to the Manager
+events.addEventListener('chat', e => { const ev = JSON.parse(e.data); if (ev.kind === 'busy') managerState = { ...managerState, chatting: ev.busy }; });
 async function loadManager() { const r = await api('/api/manager'); if (!r.error) setManager(r); }
 events.addEventListener('open', loadManager);
 events.addEventListener('brain', loadManager);
@@ -1256,7 +1259,7 @@ canvas.addEventListener('pointermove', ev => {
   canvas.style.cursor = 'pointer';
   let title, sub;
   if (u.kind === 'employee') { const s = employees.get(u.id).data; title = `${employeeName(s)} · ${s.name}`; const b = work.busy.get(s.id); sub = b ? 'Working on: ' + (b.prompt || 'a task') : `${work.load.get(s.id) || 0} jobs done`; }
-  else if (u.kind === 'manager') { title = 'Manager · briefs & splits the work'; sub = bossLine() || 'Inbox empty. Click to open the Inbox.'; }
+  else if (u.kind === 'manager') { title = 'Manager · briefs & splits the work'; sub = bossLine() || 'Talk to the Manager in the Chat tab, or leave work in the Inbox.'; }
   else if (u.kind === 'linked') { title = `${u.memory.name} · ${u.brain.name}`; sub = u.memory.description; }
   else { const m = memories.get(u.id).data; title = m.name; sub = m.description; }
   tip.innerHTML = `<b>${esc(title)}</b><span>${esc(sub)}</span>`;
@@ -1358,9 +1361,9 @@ function animate() {
     });
   }
 
-  // the Manager types while it writes the brief, then watches the team; idle it peeks over at you
+  // the Manager types while it answers you in the chat, then watches the team; idle it peeks over at you
   {
-    const brief = bossBrief(), writing = brief?.status === 'briefing';
+    const brief = bossBrief(), writing = !!managerState.chatting;
     boss.busyAmt += ((writing ? 1 : 0) - boss.busyAmt) * Math.min(1, dt * 3);
     const lean = 0.12 * boss.busyAmt - 0.28 * (1 - boss.busyAmt);
     boss.body.position.set(0, (0.28 + Math.sin(t * 1.4 + boss.phase) * 0.04) * (1 - boss.busyAmt) + Math.abs(Math.sin(t * 9)) * 0.05 * boss.busyAmt, lean);

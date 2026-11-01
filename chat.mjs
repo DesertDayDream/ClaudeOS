@@ -3,6 +3,8 @@
 // resumes the same conversation, and streams the reply back to the page. Tool calls that the
 // folder's settings don't already allow are sent to the page as Allow/Deny cards through a small
 // MCP server (approval-mcp.mjs) that Claude calls as its --permission-prompt-tool.
+// The chat is the brain's Manager: it can hand work to the team (post_brief, run by manager.mjs), and
+// when a brief is done the team's reports come back here as a message of their own.
 import { spawn, execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -18,14 +20,23 @@ const WRAP_PROMPT = `The user is ending this chat to start a fresh one, to save 
 2. Save work that is still unfinished as observations on an entity named "Open tasks" (entityType "tasks"), and delete observations there that this chat finished.
 3. Then reply with only a short handover for your next session, under 150 words: what this chat was about, what was decided, what is still open. No preamble.`;
 const sum = (...n) => n.reduce((a, b) => a + (Number(b) || 0), 0);
+// what the model/effort pickers offer (aliases follow the latest model of each family)
+const MODELS = ['fable', 'opus', 'sonnet', 'haiku'];
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const managerPrompt = crew => `You are the Manager of this brain's team, and this chat is how the user talks to you.
+The team (employee name, skill: what it does):
+${crew.map(c => `- ${c.name}, ${c.skill}: ${String(c.description || '').slice(0, 200)}`).join('\n')}
+When the user wants work done that fits the team, don't do it yourself: brief them with mcp__claudeos__post_brief. Each employee works in their own run at their desk, at the same time as the others, and can't see this chat, so each task must stand on its own: the goal, the exact input files, where to save the output, and anything from memory they need (search it first when the work depends on the user's preferences or past decisions). Put a task id in "after" only when that task needs the other's output; never chain tasks that don't depend on each other. Fewer, bigger tasks beat many tiny ones. Parts nobody on the team can do, or too unclear to act on, go in "skipped" with the reason. After the brief is accepted, tell the user in a few lines who does what and stop: the team's reports come back in this chat by themselves. Questions and quick things you answer yourself.`;
 
-export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, memoryServer, port, token, broadcast, links = () => [], othersWorking = () => false }) {
+export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, memoryServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], onIdle = () => {} }) {
   // context: how big the conversation is (what each message resends) and how long the cache lasts
-  let state = { sessionId: null, messages: [], context: null, carryOver: null };
+  // options: the model and effort picked in the chat; they outlast New chat and Wrap up
+  let state = { sessionId: null, messages: [], context: null, carryOver: null, options: {} };
   try { state = { ...state, ...JSON.parse(fs.readFileSync(stateFile, 'utf8')) }; } catch { /* first run */ }
 
   let run = null;              // the Claude process answering right now
   const approvals = new Map(); // id -> { resolve, card }
+  const reports = [];          // finished briefs waiting for the chat to be free
 
   function save() {
     state.messages = state.messages.slice(-MAX_MESSAGES);
@@ -42,6 +53,7 @@ export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, m
 
   function toolSummary(name, input = {}) {
     if (name === 'Skill') return `Handing off to ${input.skill || input.command || 'a skill'}`;
+    if (name === 'mcp__claudeos__post_brief') return `Briefing the team: ${input.title || 'new brief'} (${(input.tasks || []).map(t => t.employee).join(', ')})`;
     if (name === 'mcp__claudeos__ask_brain') return `Asking ${input.brain || 'a linked brain'}: ${String(input.task || '').slice(0, 100)}`;
     const linked = name.match(/^mcp__brain_\d+__(.*)$/);
     if (linked) return `Linked brain: ${linked[1].replace(/_/g, ' ')}${input.query ? ` "${input.query}"` : ''}`;
@@ -50,20 +62,22 @@ export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, m
     return `${name}${target ? ': ' + String(target).slice(0, 120) : ''}`;
   }
 
-  function send(text, { wrap = false } = {}) {
+  // label: what the chat shows instead of the full text (the Inbox's hand-over); from: 'inbox' | 'team'
+  function send(text, { wrap = false, label = '', from = '' } = {}) {
     if (run) return { error: 'Claude is still answering. Wait for it, or press Stop.' };
     text = String(text || '').trim();
     if (!text) return { error: 'Empty message.' };
-    push(wrap ? { role: 'user', text: 'Wrap up & start fresh', wrap: true } : { role: 'user', text });
+    push(wrap ? { role: 'user', text: 'Wrap up & start fresh', wrap: true } : { role: 'user', text: label || text, ...(from ? { from } : {}) });
 
     const reply = push({ role: 'assistant', text: '', tools: [], streaming: true });
     // the memory server is passed here too, so a brain's memory works before its folder is trusted
-    const linked = links();
+    const linked = links(), crew = team();
     const mcpServers = {
       memory: memoryServer(memoryFile),
       claudeos: {
         ...helper('approval-mcp'),
-        env: { CLAUDEOS_PORT: String(port), CLAUDEOS_TOKEN: token, CLAUDEOS_LINKS: linked.map(b => b.name).join('\n') },
+        env: { CLAUDEOS_PORT: String(port), CLAUDEOS_TOKEN: token, CLAUDEOS_LINKS: linked.map(b => b.name).join('\n'),
+          ...(crew.length ? { CLAUDEOS_TEAM: JSON.stringify(crew.map(c => c.skill)) } : {}) },
       },
     };
     // each linked brain's shared brain, readable but never writable from here
@@ -74,11 +88,13 @@ export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, m
       for (const t of WRITE_TOOLS) denied.push(`mcp__brain_${i + 1}__${t}`);
     });
     if (linked.length) allowed.push('mcp__claudeos__ask_brain');
+    if (crew.length) allowed.push('mcp__claudeos__post_brief');
     const args = ['-p', text, '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
       '--mcp-config', JSON.stringify({ mcpServers }), '--permission-prompt-tool', 'mcp__claudeos__approve',
       // the brain's own memory never needs a prompt, even in a folder Claude Code hasn't trusted yet
       '--allowedTools', allowed.join(','), ...(denied.length ? ['--disallowedTools', denied.join(',')] : [])];
     const extra = [];
+    if (crew.length) extra.push(managerPrompt(crew));
     if (linked.length) {
       extra.push(`Linked brains (other ClaudeOS brains the user connected to this one):\n${linked.map((b, i) =>
         `- ${b.name}: read its shared brain with mcp__brain_${i + 1}__search_nodes / open_nodes / read_graph (read-only).`).join('\n')}\n` +
@@ -88,6 +104,8 @@ export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, m
     if (state.carryOver) extra.push(`Handover from the previous chat in this brain (its details are in the brain's memory; search it if you need more):\n${state.carryOver}`);
     if (extra.length) args.push('--append-system-prompt', extra.join('\n\n'));
     if (state.sessionId) args.push('--resume', state.sessionId);
+    if (state.options?.model) args.push('--model', state.options.model);
+    if (state.options?.effort) args.push('--effort', state.options.effort);
 
     const proc = spawn('claude', args, {
       cwd,
@@ -180,12 +198,26 @@ export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, m
     save();
     emit({ kind: 'busy', busy: false });
     if (handover) {
-      state = { sessionId: null, messages: [], context: null, carryOver: handover };
+      state = { sessionId: null, messages: [], context: null, carryOver: handover, options: state.options };
       emit({ kind: 'reset' });
       push({ role: 'assistant', carry: true, text: handover });
       save();
       emit({ kind: 'context', context: null });
     }
+    onIdle();
+    // the next answer starts after this one has fully ended
+    if (reports.length) setTimeout(nextReport, 0);
+  }
+
+  // A brief is done: its reports go to the Manager as a message of their own, once the chat is free.
+  function report(title, text) {
+    reports.push({ title, text });
+    if (!run) nextReport();
+  }
+  function nextReport() {
+    if (run || !reports.length) return;
+    const r = reports.shift();
+    if (send(r.text, { label: `Team report: ${r.title}`, from: 'team' }).error) reports.unshift(r);
   }
 
   // What this reply cost and how big the conversation is now, from the usage Claude Code reports.
@@ -233,7 +265,7 @@ export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, m
 
   function reset() {
     if (run) return { error: 'Stop the current answer first.' };
-    state = { sessionId: null, messages: [], context: null, carryOver: null };
+    state = { sessionId: null, messages: [], context: null, carryOver: null, options: state.options };
     save();
     emit({ kind: 'reset' });
     emit({ kind: 'context', context: null });
@@ -271,9 +303,19 @@ export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, m
     }
   }
 
-  function snapshot() {
-    return { messages: state.messages, busy: !!run, approvals: [...approvals.values()].map(a => a.card), context: state.context };
+  // takes effect from the next message (one already being answered keeps what it started with)
+  function setOptions({ model = '', effort = '' } = {}) {
+    if (model && !MODELS.includes(model)) return { error: `Unknown model "${model}".`, options: state.options };
+    if (effort && !EFFORTS.includes(effort)) return { error: `Unknown effort "${effort}".`, options: state.options };
+    state.options = { ...(model ? { model } : {}), ...(effort ? { effort } : {}) };
+    save();
+    emit({ kind: 'options', options: state.options });
+    return { ok: true, options: state.options };
   }
 
-  return { send, stop, reset, wrapUp, requestApproval, answerApproval, dropOthersApprovals, snapshot };
+  function snapshot() {
+    return { messages: state.messages, busy: !!run, approvals: [...approvals.values()].map(a => a.card), context: state.context, options: state.options || {} };
+  }
+
+  return { send, stop, reset, wrapUp, report, setOptions, requestApproval, answerApproval, dropOthersApprovals, snapshot };
 }

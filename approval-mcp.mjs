@@ -12,9 +12,9 @@ function fail(id, message) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0
 
 // Brains this chat may hand work to (empty in a hand-off itself, so hand-offs never chain).
 const LINKS = (process.env.CLAUDEOS_LINKS || '').split('\n').filter(Boolean);
-// Who is asking for approvals (an employee working a brief, or the Manager); empty in the chat.
+// Who is asking for approvals (an employee working a brief); empty in the chat, which is the Manager.
 const WHO = process.env.CLAUDEOS_WHO || '';
-// Only the Manager's run gets post_brief, with the team it may assign work to.
+// Only the chat (the Manager) gets post_brief, with the team it may assign work to.
 let TEAM = [];
 try { TEAM = JSON.parse(process.env.CLAUDEOS_TEAM || '[]'); } catch { /* no team */ }
 
@@ -57,14 +57,14 @@ rl.on('line', async line => {
       inputSchema: { type: 'object', properties: { brain: { type: 'string', enum: LINKS }, task: { type: 'string', description: 'What to do, with all the context it needs: it can\'t see this conversation.' } }, required: ['brain', 'task'] },
     }] : []), ...(TEAM.length ? [{
       name: 'post_brief',
-      description: 'Hand your brief to ClaudeOS. It starts every task whose "after" tasks are done, up to 3 at a time, each as its own run of that employee. Call it once.',
+      description: 'Hand work to your team. ClaudeOS starts every task whose "after" tasks are done, up to 3 at a time, each as its own run of that employee at their desk, and reports back in this chat when the whole brief is done.',
       inputSchema: { type: 'object', required: ['title', 'summary', 'tasks'], properties: {
         title: { type: 'string', description: 'A few words naming the job.' },
         summary: { type: 'string', description: 'The brief: what the user wants and how the work is split, in 2 to 5 sentences.' },
         tasks: { type: 'array', items: { type: 'object', required: ['id', 'employee', 'task'], properties: {
           id: { type: 'string', description: 'Short id, like t1.' },
           employee: { type: 'string', enum: TEAM, description: 'The skill name of the employee who does it.' },
-          task: { type: 'string', description: 'Everything the employee needs: goal, input files, where to save output, relevant facts from memory. They can\'t see the inbox.' },
+          task: { type: 'string', description: 'Everything the employee needs: goal, input files, where to save output, relevant facts from memory. They can\'t see this chat or the inbox.' },
           after: { type: 'array', items: { type: 'string' }, description: 'Ids of earlier tasks whose output this one needs. Leave empty to run at once.' },
           request: { type: 'array', items: { type: 'string' }, description: 'Ids of the inbox requests this task works on.' },
         } } },

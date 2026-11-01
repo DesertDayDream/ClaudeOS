@@ -11,6 +11,8 @@ const wrapBtn = document.getElementById('wrapChat');
 const form = document.getElementById('composer');
 const meter = document.getElementById('meter');
 const nudge = document.getElementById('nudge');
+const modelSel = document.getElementById('chatModel');
+const effortSel = document.getElementById('chatEffort');
 
 // Every message resends the whole conversation. Past BIG tokens, or once the cache has expired on a
 // chat of STALE tokens or more, wrapping up and starting fresh is cheaper than carrying on.
@@ -87,7 +89,7 @@ function render(msg) {
   let entry = messages.get(msg.id);
   if (!entry) {
     const el = document.createElement('div');
-    el.className = `msg ${msg.role}${msg.wrap ? ' wrap' : ''}${msg.carry ? ' carry' : ''}`;
+    el.className = `msg ${msg.role}${msg.wrap ? ' wrap' : ''}${msg.carry ? ' carry' : ''}${msg.from ? ' from-' + msg.from : ''}`;
     log.appendChild(el);
     entry = { msg, el };
     messages.set(msg.id, entry);
@@ -168,6 +170,7 @@ async function load() {
   for (const m of s.messages || []) render(m);
   for (const c of s.approvals || []) renderApproval(c);
   context = s.context || null;
+  showOptions(s.options);
   setBusy(!!s.busy);
   showEmpty();
   scrollDown(true);
@@ -182,7 +185,21 @@ function onEvent(ev) {
   else if (ev.kind === 'approval-done') approvalDone(ev.id, ev.allowed);
   else if (ev.kind === 'reset') { log.innerHTML = ''; messages.clear(); dismissed.clear(); showEmpty(); }
   else if (ev.kind === 'context') { context = ev.context; showContext(); }
+  else if (ev.kind === 'options') showOptions(ev.options);
 }
+
+// the Manager's model and effort, kept per brain; empty = Claude Code's default
+function showOptions(o = {}) {
+  modelSel.value = o.model || '';
+  effortSel.value = o.effort || '';
+  modelSel.classList.toggle('set', !!o.model);
+  effortSel.classList.toggle('set', !!o.effort);
+}
+for (const sel of [modelSel, effortSel]) sel.addEventListener('change', async () => {
+  const r = await api('/api/chat/options', { model: modelSel.value, effort: effortSel.value });
+  if (r.error) alert(r.error);
+  showOptions(r.options);
+});
 
 async function wrap() {
   if (busy) return;

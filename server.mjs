@@ -294,21 +294,26 @@ function chatFor(brain) {
     chats.set(brain.id, createChat({ cwd: brain.path, memoryFile: memoryFileOf(brain), helper, memoryServer,
       stateFile: path.join(DATA, 'chats', `${brain.id}.json`), activityFile: ACTIVITY, port: PORT,
       links: () => brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, memoryFile: memoryFileOf(b) })), token: TOKEN, broadcast,
-      othersWorking: () => managerFor(brain).busy() }));
+      othersWorking: () => managerFor(brain).busy(), team: () => teamOf(brain),
+      // the chat is the Manager: when it stops, the Manager desk stops typing and unbriefed requests wait again
+      onIdle: () => managerFor(brain).chatDone() }));
   }
   return chats.get(brain.id);
 }
-// one Manager (shared inbox + briefs) per brain; it hands tasks to the brain's own team
+// the brain's own employees (project skills), as the Manager assigns them
+function teamOf(brain) {
+  const skills = skillsIn(teamDir(brain), 'project', path.basename(brain.path));
+  nameSkills(skills);
+  return skills.map(s => ({ skill: s.name, name: names[s.id] || s.name, description: s.description || '' }));
+}
+// one team desk (shared inbox + briefs) per brain; the chat is its Manager
 const managers = new Map();
 function managerFor(brain) {
   if (!managers.has(brain.id)) {
-    const team = () => {
-      const skills = skillsIn(teamDir(brain), 'project', path.basename(brain.path));
-      nameSkills(skills);
-      return skills.map(s => ({ skill: s.name, name: names[s.id] || s.name, description: s.description || '' }));
-    };
     managers.set(brain.id, createManager({ cwd: brain.path, dataFile: path.join(DATA, 'manager', `${brain.id}.json`), activityFile: ACTIVITY,
-      memoryFile: memoryFileOf(brain), helper, memoryServer, port: PORT, token: TOKEN, team,
+      memoryFile: memoryFileOf(brain), helper, memoryServer, port: PORT, token: TOKEN, team: () => teamOf(brain),
+      chatBusy: () => chatFor(brain).snapshot().busy,
+      onBriefDone: (brief, text) => chatFor(brain).report(brief.title, text),
       broadcast: (event, data) => {
         if (brains.active()?.id === brain.id) broadcast(event, data);
         if (!data.busy) chatFor(brain).dropOthersApprovals();
@@ -541,17 +546,23 @@ async function handleApi(req, res, url) {
   }
   if (url.pathname.startsWith('/api/inbox/') || url.pathname === '/api/brief') {
     const m = managerFor(active), what = url.pathname.split('/').pop();
-    if (what === 'brief') return json(res, 200, m.postBrief(body)); // from the Manager's post_brief tool
+    if (what === 'brief') return json(res, 200, m.postBrief(body)); // from the chat's post_brief tool
     if (what === 'add') return json(res, 200, m.add(body.text));
     if (what === 'remove') return json(res, 200, m.remove(String(body.id || '')));
     if (what === 'run') {
-      if (chat.snapshot().busy) return json(res, 200, { error: 'Claude is answering in the chat. Wait for it, or press Stop, then brief the team.' });
-      return json(res, 200, m.start());
+      // "Brief & assign" hands the inbox to the Manager, which is the chat
+      if (chat.snapshot().busy) return json(res, 200, { error: 'The Manager is answering in the chat. Wait for it, or press Stop, then brief the team.' });
+      const h = m.handOver();
+      if (h.error) return json(res, 200, h);
+      const r = chat.send(h.text, { label: h.label, from: 'inbox' });
+      if (!r.error) m.markSent(h.ids);
+      return json(res, 200, r);
     }
     if (what === 'stop') return json(res, 200, m.stop());
     return json(res, 404, { error: 'not found' });
   }
   if (url.pathname === '/api/chat/new') return json(res, 200, chat.reset());
+  if (url.pathname === '/api/chat/options') return json(res, 200, chat.setOptions(body));
   if (url.pathname === '/api/chat/wrap') return json(res, 200, chat.wrapUp());
   if (url.pathname === '/api/approval') return json(res, 200, await chat.requestApproval(body));
   if (url.pathname === '/api/approval/answer') return json(res, 200, chat.answerApproval(body.id, body.allow));
