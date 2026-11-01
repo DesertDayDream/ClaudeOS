@@ -28,7 +28,7 @@ await build({
 // 2. the page: three.js bundled into app.js, so no import map is needed
 await build({
   entryPoints: [path.join(ROOT, 'public', 'app.js')], outfile: path.join(WORK, 'www', 'app.js'),
-  bundle: true, format: 'esm', target: 'es2022', minify: true, external: ['/events.js'], logLevel: 'warning',
+  bundle: true, format: 'esm', target: 'es2022', minify: true, external: ['/events.js', '/markdown.js'], logLevel: 'warning',
 });
 const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8').replace(/<script type="importmap">[\s\S]*?<\/script>\s*/, '');
 fs.writeFileSync(path.join(WORK, 'www', 'index.html'), html);
