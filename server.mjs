@@ -235,7 +235,7 @@ function checkIntegrations(brain, force) {
       if (/^(memory|claudeos|brain_\d+)$/.test(server)) continue;
       const tail = line.slice(dash + 3);
       const status = /✔|connected/i.test(tail) && !/fail|not connected/i.test(tail) ? 'connected'
-        : /approv/i.test(tail) ? 'needs approval' : /auth/i.test(tail) ? 'needs sign-in' : 'failed';
+        : /approv/i.test(tail) ? 'needs approval' : /fail/i.test(tail) ? 'failed' : /auth/i.test(tail) ? 'needs sign-in' : 'failed';
       list.push({ server, key: appForServer(server), status, detail: tail.replace(/^[^\w]+/, '').slice(0, 200) });
     }
     const again = integrations.again;
