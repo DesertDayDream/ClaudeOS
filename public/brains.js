@@ -30,7 +30,7 @@ function toast(title, detail) {
 
 events.addEventListener('message', ev => {
   const s = JSON.parse(ev.data);
-  current = s.brain;
+  current = s.brain && { ...s.brain, links: (s.brains || []).find(b => b.id === s.brain.id)?.links || [] };
   list = s.brains || [];
   btn.parentElement.hidden = !current;
   if (current) {
@@ -49,13 +49,14 @@ function renderMenu() {
   menu.innerHTML = list.map(b => `
     <div class="item" data-id="${esc(b.id)}" title="${esc(b.path)}">
       <span class="check">${b.id === current?.id ? '●' : ''}</span>
-      <span class="nm">${esc(b.name)}</span>
+      <span class="nm">${esc(b.name)}${current?.links?.includes(b.id) ? ' <em class="lk">linked</em>' : ''}</span>
       <button class="rm" data-rm="${esc(b.id)}" title="Remove from this list (the folder stays)">×</button>
       <span class="pt">${esc(b.path)}</span>
     </div>`).join('') + `
     <hr>
     <button class="act" data-act="new">+ New brain<span>Create a new folder with an empty cloud</span></button>
-    <button class="act" data-act="add">Add existing folder<span>Turn a folder you already have into a brain</span></button>`;
+    <button class="act" data-act="add">Add existing folder<span>Turn a folder you already have into a brain</span></button>
+    ${list.length > 1 ? `<button class="act" data-act="link">Link brains…<span>Let ${esc(current?.name || 'this brain')} read another brain's memory, hand it work and copy its skills</span></button>` : ''}`;
 }
 
 function openMenu(open) {
@@ -78,7 +79,7 @@ menu.addEventListener('click', async e => {
     return;
   }
   const act = e.target.closest('[data-act]');
-  if (act) { openMenu(false); return act.dataset.act === 'new' ? newDialog() : addDialog(); }
+  if (act) { openMenu(false); return act.dataset.act === 'new' ? newDialog() : act.dataset.act === 'link' ? linkDialog() : addDialog(); }
   const item = e.target.closest('.item');
   if (item && item.dataset.id !== current?.id) {
     openMenu(false);
@@ -180,6 +181,30 @@ async function newDialog({ first = false } = {}) {
   };
 }
 const welcome = () => newDialog({ first: true });
+
+// Which other brains the current one is linked to. A link goes one way: this brain gets to use the other.
+function linkDialog() {
+  const others = list.filter(b => b.id !== current.id);
+  const d = showModal(`
+    <h2>Link brains to ${esc(current.name)}</h2>
+    <p class="sub">A linked brain stays its own folder. ${esc(current.name)} can:</p>
+    <ul class="sub">
+      <li><b>read its memory</b>: Claude here can search it, but never changes it. Its dots float beside this cloud.</li>
+      <li><b>hand its team work</b>: the task runs in that brain, with its memory and skills, and the answer comes back to this chat.</li>
+      <li><b>copy its skills</b>: from the Team tab, to hire the same employee here.</li>
+    </ul>
+    ${others.map(b => `<label class="choice"><input type="checkbox" value="${esc(b.id)}" ${current.links.includes(b.id) ? 'checked' : ''}><div><b>${esc(b.name)}</b><span>${esc(b.path)}</span></div></label>`).join('')}
+    <div class="actions"><span class="msg-err" id="lkErr"></span><button class="btn" data-cancel>Cancel</button><button class="btn primary" id="lkGo">Save links</button></div>`, 'link');
+  d.querySelector('[data-cancel]').onclick = closeModal;
+  d.querySelector('#lkGo').onclick = async () => {
+    const links = [...d.querySelectorAll('input:checked')].map(i => i.value);
+    const r = await api('/api/brains/links', { id: current.id, links });
+    if (r.error) { d.querySelector('#lkErr').textContent = r.error; return; }
+    closeModal();
+    toast(links.length ? `${current.name} is linked to ${links.length} brain${links.length > 1 ? 's' : ''}` : `${current.name} has no links now`,
+      links.length ? 'Claude can use them from your next message.' : '');
+  };
+}
 
 async function addDialog({ back = false } = {}) {
   const d = showModal(`

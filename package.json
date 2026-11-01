@@ -5,12 +5,20 @@
   "type": "module",
   "description": "ClaudeOS: give Claude a brain you can see. A live 3D view of its memory and skills, with a chat, for any number of brain folders.",
   "scripts": {
-    "start": "node server.mjs --open"
+    "start": "node server.mjs --open",
+    "build:exe": "node scripts/build-exe.mjs",
+    "icon": "node scripts/make-icon.mjs"
   },
   "dependencies": {
     "three": "0.170.0"
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/server-memory": "^2.0.1",
+    "esbuild": "^0.24.2",
+    "postject": "^1.0.0-alpha.6",
+    "resedit": "^2.0.3"
   }
 }

@@ -7,6 +7,16 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { events } from '/events.js';
 
+const TOKEN = window.CLAUDEOS_TOKEN;
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { 'content-type': 'application/json', 'x-claudeos-token': TOKEN },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+}
+
 const TYPE_COLORS = { brain: 0xc9a7ff, user: 0xffc861, feedback: 0xff7aa8, project: 0x5fd4ff, reference: 0x7dff9e };
 const SOURCE_COLORS = { personal: 0xd97757, plugin: 0x7b8cff, project: 0x4fd1a5, contractor: 0x8a8fa8 };
 const FIRST_NAMES = ['Ada', 'Bram', 'Cleo', 'Dax', 'Esme', 'Finn', 'Gia', 'Hugo', 'Iris', 'Jude', 'Kai', 'Lena',
@@ -183,6 +193,56 @@ function removeMemory(id) {
   memories.delete(id);
 }
 
+// ---------- linked brains: small satellite clouds beside this one ----------
+const satellites = new Map(); // brain id -> { group, glow, beam, dots: Map(memory id -> mesh), data }
+const satDotGeo = new THREE.SphereGeometry(0.1, 10, 10);
+const SAT_COLOR = 0xc9a7ff;
+function syncSatellites(linked) {
+  const keep = new Set();
+  linked.forEach((b, i) => {
+    keep.add(b.id);
+    let sat = satellites.get(b.id);
+    if (!sat) {
+      const group = new THREE.Group();
+      const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: puffTex, color: 0x8f86d8, transparent: true, opacity: 0.12, depthWrite: false }));
+      glow.scale.setScalar(4.2);
+      group.add(glow);
+      const label = labelSprite(b.name, 'linked brain', SAT_COLOR);
+      label.position.y = 2;
+      group.add(label);
+      const beam = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+        new THREE.LineBasicMaterial({ color: SAT_COLOR, transparent: true, opacity: 0, depthWrite: false }));
+      scene.add(beam, group);
+      sat = { group, glow, label, beam, dots: new Map(), phase: Math.random() * 6 };
+      satellites.set(b.id, sat);
+    }
+    sat.data = b;
+    const a = (i - (linked.length - 1) / 2) * 0.55; // fan out behind and above the brain
+    sat.home = new THREE.Vector3(Math.sin(a) * 13, 6 + (i % 2) * 1.2, -Math.cos(a) * 13);
+    const ids = new Set(b.memories.map(m => m.id));
+    for (const [id, mesh] of sat.dots) if (!ids.has(id)) { sat.group.remove(mesh); sat.dots.delete(id); }
+    for (const m of b.memories) {
+      if (sat.dots.has(m.id)) { sat.dots.get(m.id).userData.memory = m; continue; }
+      const r = rng(hash(m.id));
+      const mesh = new THREE.Mesh(satDotGeo, new THREE.MeshBasicMaterial({ color: SAT_COLOR, transparent: true, opacity: 0.55 }));
+      mesh.position.set((r() - 0.5) * 2.6, (r() - 0.5) * 1.8, (r() - 0.5) * 2.6);
+      mesh.userData = { kind: 'linked', id: `linked:${b.id}|${m.id}`, brain: b, memory: m };
+      sat.group.add(mesh);
+      sat.dots.set(m.id, mesh);
+    }
+  });
+  for (const [id, sat] of satellites) {
+    if (keep.has(id)) continue;
+    scene.remove(sat.group, sat.beam);
+    satellites.delete(id);
+  }
+}
+function linkedDot(sel) {
+  if (!sel?.startsWith('linked:')) return null;
+  const [brainId, memId] = sel.slice(7).split('|');
+  return satellites.get(brainId)?.dots.get(memId) || null;
+}
+
 // ---------- employees (skills) ----------
 const employees = new Map(); // id -> { root, body, sphere, eyes, label, data, ... }
 const empGroup = new THREE.Group();
@@ -229,6 +289,41 @@ function labelSprite(first, role, color) {
   return s;
 }
 
+// The task a busy employee is on, floating over its head.
+function bubbleSprite() {
+  const c = document.createElement('canvas');
+  c.width = 640; c.height = 96;
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false, opacity: 0 }));
+  s.scale.set(4, 0.6, 1);
+  s.position.y = 1.95;
+  s.userData = { canvas: c, text: null };
+  return s;
+}
+function setBubble(s, text, color) {
+  if (s.userData.text === text) return;
+  s.userData.text = text;
+  const c = s.userData.canvas, g = c.getContext('2d');
+  g.clearRect(0, 0, c.width, c.height);
+  g.font = '500 34px system-ui, Segoe UI, sans-serif';
+  const label = text.length > 38 ? text.slice(0, 37) + '…' : text;
+  const w = Math.min(c.width - 8, g.measureText(label).width + 44);
+  const x = (c.width - w) / 2;
+  g.fillStyle = 'rgba(14,17,30,0.88)';
+  g.strokeStyle = hex(color);
+  g.lineWidth = 3;
+  g.beginPath();
+  g.roundRect(x, 8, w, 64, 20);
+  g.moveTo(c.width / 2 - 10, 72); g.lineTo(c.width / 2, 88); g.lineTo(c.width / 2 + 10, 72);
+  g.fill(); g.stroke();
+  g.fillStyle = '#e9ecff';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(label, c.width / 2, 41);
+  s.material.map.needsUpdate = true;
+}
+
 function addEmployee(skill, delay) {
   const color = SOURCE_COLORS[skill.source] ?? SOURCE_COLORS.plugin;
   const root = new THREE.Group();
@@ -251,6 +346,8 @@ function addEmployee(skill, delay) {
   body.add(eyes);
   const label = labelSprite(employeeName(skill), skill.name, color);
   root.add(label);
+  const bubble = bubbleSprite();
+  root.add(bubble);
   const aura = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color, transparent: true, opacity: 0,
     depthWrite: false, blending: THREE.AdditiveBlending }));
   aura.scale.setScalar(3.4);
@@ -269,7 +366,7 @@ function addEmployee(skill, delay) {
   }
   root.scale.setScalar(0.0001);
   empGroup.add(root);
-  employees.set(skill.id, { root, body, sphere, eyes, label, aura, beam, sparks, data: skill, born: performance.now() + delay,
+  employees.set(skill.id, { root, body, sphere, eyes, label, bubble, color, aura, beam, sparks, data: skill, born: performance.now() + delay,
     slot: 0, busyAmt: 0, blinkAt: performance.now() + 1500 + Math.random() * 4000, phase: Math.random() * 6 });
 }
 
@@ -308,19 +405,31 @@ function matchSkill(name, skills) {
     || skills.find(s => s.name === name.split(':').pop());
 }
 
-// Turn the hook log into tasks, workloads and who is busy right now.
+// Turn the hook log into tasks (one per prompt), each employee's runs, and who is busy right now.
+// A task runs from its prompt to its stop; every skill handed work in between ran in it.
 function deriveWork(activity, skills) {
-  const sessions = new Map();
+  const open = new Map();   // session -> its task still running
+  const latest = new Map(); // session -> its newest task
+  const tasks = [];
   const load = new Map();
   const contractors = new Map();
   const now = Date.now();
   for (const ev of activity) {
-    let s = sessions.get(ev.session);
-    if (ev.type === 'task' || !s) {
-      s = { task: ev.type === 'task' ? ev.prompt : s?.task, skills: new Set(), open: true, last: ev.ts };
-      sessions.set(ev.session, s);
+    let task = open.get(ev.session);
+    if (ev.type === 'stop' && !task) {
+      // the chat's own stop/error note lands just after the hook's stop: it has the better story
+      const prev = latest.get(ev.session);
+      if (prev && ev.outcome && ev.outcome !== 'done' && ev.ts - prev.end < 60000) Object.assign(prev, { outcome: ev.outcome, result: ev.result || prev.result });
+      continue;
     }
-    s.last = ev.ts;
+    if (ev.type === 'task' || !task) {
+      task = { key: `${ev.session}:${ev.ts}`, prompt: ev.type === 'task' ? ev.prompt : '', start: ev.ts, last: ev.ts, end: 0,
+        outcome: '', result: '', files: [], tools: 0, bySkill: {}, skills: [], calledAs: {} };
+      tasks.push(task);
+      open.set(ev.session, task);
+      latest.set(ev.session, task);
+    }
+    task.last = ev.ts;
     if (ev.type === 'skill') {
       let sk = matchSkill(ev.skill, skills);
       if (!sk) {
@@ -329,20 +438,37 @@ function deriveWork(activity, skills) {
           description: 'Built-in skill with no SKILL.md on this PC. Shows up when Claude calls it.' };
         contractors.set(id, sk);
       }
-      s.skills.add(sk.id);
+      if (!task.skills.includes(sk.id)) task.skills.push(sk.id);
+      task.calledAs[sk.id] = ev.skill;
       load.set(sk.id, (load.get(sk.id) || 0) + 1);
     }
-    if (ev.type === 'stop') s.open = false;
+    if (ev.type === 'stop') {
+      Object.assign(task, { end: ev.ts, outcome: ev.outcome || 'done', result: ev.result || '', files: ev.files || [], tools: ev.tools || 0, bySkill: ev.bySkill || {} });
+      open.delete(ev.session);
+    }
   }
-  const busy = new Map(); // skill id -> task text
-  for (const s of sessions.values()) {
-    if (!s.open || now - s.last > BUSY_WINDOW_MS) continue;
-    for (const id of s.skills) busy.set(id, s.task || 'working');
+  const busy = new Map(); // skill id -> the task it is on
+  const runs = new Map(); // skill id -> its tasks, newest first
+  for (const t of tasks.reverse()) {
+    t.status = t.end ? t.outcome : now - t.last > BUSY_WINDOW_MS ? 'unfinished' : 'working';
+    for (const id of t.skills) {
+      if (t.status === 'working' && !busy.has(id)) busy.set(id, t);
+      if (!runs.has(id)) runs.set(id, []);
+      runs.get(id).push(t);
+    }
   }
-  return { load, busy, contractors: [...contractors.values()] };
+  return { load, busy, runs, contractors: [...contractors.values()] };
 }
 
-let work = { load: new Map(), busy: new Map(), contractors: [] };
+let work = { load: new Map(), busy: new Map(), runs: new Map(), contractors: [] };
+
+function duration(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60 ? (s % 60) + 's' : ''}`.trim();
+  return `${Math.floor(s / 3600)}h ${Math.floor(s / 60) % 60}m`;
+}
+const STATUS_TEXT = { working: 'working', done: 'done', stopped: 'stopped', error: 'failed', unfinished: 'no finish logged' };
 
 let brainId = null;
 function apply(next) {
@@ -360,6 +486,7 @@ function apply(next) {
   }
   for (const id of prevMemIds) removeMemory(id);
 
+  syncSatellites(next.linked || []);
   work = deriveWork(next.activity, next.skills);
   const allSkills = [...next.skills, ...work.contractors];
   for (const [id, n] of Object.entries(next.names || {})) names.set(id, n);
@@ -399,15 +526,30 @@ function renderPanel() {
     html += `<div class="group">${SOURCE_TITLES[g]} · ${list.length}</div>`;
     for (const s of list) {
       const n = work.load.get(s.id) || 0;
-      const busy = work.busy.has(s.id);
+      const busy = work.busy.get(s.id);
+      const lastRun = work.runs.get(s.id)?.[0];
+      const now = busy ? `<div class="now working">${esc(busy.prompt || 'working')}</div>`
+        : lastRun ? `<div class="now ${lastRun.status}">${esc(lastRun.prompt || 'a task')} · ${ago(lastRun.end || lastRun.last)}</div>` : '';
       html += `<div class="emp ${busy ? 'busy' : ''} ${selected === s.id ? 'sel' : ''}" data-id="${esc(s.id)}">
         <div class="dot" style="background:${hex(SOURCE_COLORS[s.source] ?? SOURCE_COLORS.plugin)}"></div>
         <div class="who">${esc(employeeName(s))}</div>
         <div class="load">${busy ? 'working' : n ? `${n} job${n > 1 ? 's' : ''}` : 'idle'}</div>
-        <div class="role">${esc(s.name)}</div></div>`;
+        <div class="role">${esc(s.name)}</div>${now}</div>`;
     }
   }
-  if (!state.skills.length) html = '<div class="empty">No SKILL.md files found yet. Every skill you create appears here as a new employee.</div>';
+  // the teams of linked brains: copy a skill over to hire the same employee here
+  const have = new Set(state.skills.filter(s => s.source === 'project').map(s => s.name));
+  for (const b of state.linked || []) {
+    html += `<div class="group">From ${esc(b.name)} · ${b.skills.length}</div>`;
+    if (!b.skills.length) html += `<div class="empty">${esc(b.name)} has no team of its own yet.</div>`;
+    for (const s of [...b.skills].sort((x, y) => x.name.localeCompare(y.name))) {
+      html += `<div class="lskill"><div class="dot" style="background:${hex(SOURCE_COLORS.project)}"></div>
+        <div><b>${esc(s.name)}</b><span>${esc(s.description)}</span></div>
+        ${have.has(s.name) ? '<em>on your team</em>' : `<button class="btn" data-copy="${esc(s.name)}" data-from="${esc(b.id)}" title="Copy .claude/skills/${esc(s.folder)} into ${esc(state.brain?.name || 'this brain')}">Copy</button>`}</div>`;
+    }
+  }
+  renderMemList();
+  if (!state.skills.length && !state.linked?.length) html = '<div class="empty">No SKILL.md files found yet. Every skill you create appears here as a new employee.</div>';
   team.innerHTML = html;
 
   const feed = document.getElementById('feed');
@@ -418,7 +560,7 @@ function renderPanel() {
         const sk = matchSkill(ev.skill, state.skills);
         return { type: 'skill', text: `${sk ? employeeName(sk) : ev.skill} picked up work (${ev.skill})`, ts: ev.ts };
       }
-      if (ev.type === 'stop') return { type: 'stop', text: 'Task finished', ts: ev.ts };
+      if (ev.type === 'stop') return { type: 'stop', text: ev.outcome === 'stopped' ? 'Task stopped' : ev.outcome === 'error' ? 'Task failed' : 'Task finished', ts: ev.ts };
       return null;
     }).filter(Boolean),
     ...liveFeed,
@@ -434,18 +576,186 @@ function renderDetail() {
   if (!selected) { el.classList.remove('on'); return; }
   const emp = employees.get(selected);
   const mem = memories.get(selected);
-  if (emp) {
-    const s = emp.data;
-    const busy = work.busy.get(s.id);
-    el.innerHTML = `<h3>${esc(employeeName(s))} · ${esc(s.name)}</h3>
-      <div class="k">${esc(SOURCE_TITLES[s.source] || s.source)}${s.owner ? ' · ' + esc(s.owner) : ''} · ${work.load.get(s.id) || 0} jobs${busy ? ' · working on: ' + esc(busy) : ''}</div>
-      <div>${esc(s.description)}</div>`;
+  const ld = linkedDot(selected);
+  if (ld) {
+    const { brain, memory: m } = ld.userData;
+    el.classList.remove('board', 'editing');
+    delete el.dataset.mode;
+    el.innerHTML = `<h3>${esc(m.name)}</h3><div class="k">shared brain of ${esc(brain.name)} · linked, read-only here</div>
+      <div class="full">${esc(m.description)}</div><div class="file">Switch to ${esc(brain.name)} to edit it.</div>`;
+  } else if (emp) {
+    renderBoard(el, emp.data);
+    el.classList.remove('editing');
+    delete el.dataset.mode;
   } else if (mem) {
-    const m = mem.data;
-    el.innerHTML = `<h3>${esc(m.name)}</h3><div class="k">${esc(m.type)} memory · ${esc(m.projectLabel)} · ${m.created ? new Date(m.created).toLocaleDateString() : ''}</div><div>${esc(m.description)}</div>`;
+    el.classList.remove('board');
+    renderMemoryDetail(el, mem.data);
   } else { selected = null; el.classList.remove('on'); return; }
   el.classList.add('on');
 }
+
+// ---------- employee task board ----------
+// What the employee is on now, then its recent runs: the task, how it ended, Claude's answer,
+// and the files this employee wrote in it.
+const openRuns = new Set(); // runs whose full answer is showing
+function renderBoard(el, s) {
+  const busy = work.busy.get(s.id);
+  const runs = (work.runs.get(s.id) || []).slice(0, 20);
+  const done = runs.filter(r => r.status === 'done').length;
+  let html = `<h3>${esc(employeeName(s))} · ${esc(s.name)}</h3>
+    <div class="k">${esc(SOURCE_TITLES[s.source] || s.source)}${s.owner ? ' · ' + esc(s.owner) : ''} · ${work.load.get(s.id) || 0} jobs${runs.length ? ` · ${done}/${runs.length} recent runs done` : ''}</div>
+    <div class="desc">${esc(s.description)}</div>`;
+  if (busy) html += `<div class="nowcard"><b>Working on</b>${esc(busy.prompt || 'a task')}<span>started ${ago(busy.start)}</span></div>`;
+  html += `<div class="runs-h">Recent runs</div>`;
+  if (!runs.length) html += `<div class="empty">No runs yet. When Claude hands ${esc(employeeName(s))} work, each task shows up here with how it went.</div>`;
+  for (const r of runs) {
+    const mine = r.bySkill[r.calledAs[s.id]] || {};
+    const others = r.skills.filter(id => id !== s.id).map(id => employees.get(id)).filter(Boolean).map(e => employeeName(e.data));
+    const took = r.end ? ` · took ${duration(r.end - r.start)}` : r.status === 'working' ? ` · ${duration(Date.now() - r.start)} so far` : '';
+    html += `<div class="run ${r.status} ${openRuns.has(r.key) ? 'open' : ''}" data-run="${esc(r.key)}">
+      <div class="top"><i></i><b>${esc(r.prompt || 'A task')}</b></div>
+      <div class="meta">${STATUS_TEXT[r.status] || r.status} · ${ago(r.start)}${took}${mine.tools ? ` · ${mine.tools} tool${mine.tools > 1 ? 's' : ''}` : ''}</div>
+      ${r.result ? `<div class="res">${esc(r.result)}</div>` : ''}
+      ${mine.files?.length ? `<div class="files">${mine.files.slice(0, 8).map(f => `<code title="${esc(f)}">${esc(f.split(/[\\/]/).pop())}</code>`).join('')}${mine.files.length > 8 ? `<span>+${mine.files.length - 8} more</span>` : ''}</div>` : ''}
+      ${others.length ? `<div class="with">with ${esc(others.join(', '))}</div>` : ''}
+    </div>`;
+  }
+  el.innerHTML = html;
+  el.classList.add('board');
+}
+document.getElementById('detail').addEventListener('click', e => {
+  const run = e.target.closest('.run');
+  if (!run || !run.querySelector('.res')) return;
+  openRuns.has(run.dataset.run) ? openRuns.delete(run.dataset.run) : openRuns.add(run.dataset.run);
+  run.classList.toggle('open');
+});
+
+// ---------- memory inspector ----------
+// What the detail panel is doing with the selected memory: reading it, editing it, or asking to delete it.
+let inspect = { id: null, mode: 'view', text: null, kind: '', file: '', err: '' };
+const stripFrontmatter = t => t.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim();
+
+async function loadMemory(id) {
+  const r = await api(`/api/memory?id=${encodeURIComponent(id)}`);
+  if (inspect.id !== id) return; // picked something else meanwhile
+  if (r.error) inspect.err = r.error; else Object.assign(inspect, { text: r.text, kind: r.kind, file: r.file, err: '' });
+  renderDetail();
+}
+
+function renderMemoryDetail(el, m) {
+  if (inspect.id !== m.id) { inspect = { id: m.id, mode: 'view', text: null, kind: '', file: '', err: '' }; loadMemory(m.id); }
+  // the panel re-renders on every live update; don't wipe out what is being typed
+  if (inspect.mode === 'edit' && el.dataset.mode === 'edit' && el.dataset.for === m.id) return;
+  el.dataset.for = m.id;
+  el.dataset.mode = inspect.mode;
+  el.classList.toggle('editing', inspect.mode === 'edit');
+  const head = `<h3>${esc(m.name)}</h3><div class="k">${esc(m.type)} memory · ${esc(m.projectLabel)}${m.created ? ' · ' + new Date(m.created).toLocaleDateString() : ''}</div>`;
+  const err = `<span class="msg-err">${esc(inspect.err)}</span>`;
+  if (inspect.mode === 'edit') {
+    el.innerHTML = `${head}<textarea id="memEdit" spellcheck="false"></textarea>
+      <div class="bar">${err}<button class="btn" data-act="cancel">Cancel</button><button class="btn primary" data-act="save">Save</button></div>`;
+    const ta = el.querySelector('textarea');
+    ta.value = inspect.text ?? m.description;
+    ta.focus();
+    return;
+  }
+  const body = inspect.text == null ? m.description : inspect.kind === 'claude' ? stripFrontmatter(inspect.text) : inspect.text;
+  const bar = inspect.mode === 'confirm'
+    ? `<span class="ask">Delete this memory? Claude stops seeing it. You can undo right after.</span><button class="btn" data-act="cancel">Cancel</button><button class="btn danger primary" data-act="delete">Delete</button>`
+    : `${err}<button class="btn danger" data-act="ask">Delete</button><button class="btn" data-act="edit" ${inspect.text == null ? 'disabled' : ''}>Edit</button>`;
+  el.innerHTML = `${head}<div class="full">${esc(body)}</div>
+    ${inspect.file ? `<div class="file">${esc(inspect.file)}${inspect.kind === 'brain' ? ` · ${esc(m.name)}` : ''}</div>` : ''}
+    <div class="bar">${bar}</div>`;
+}
+
+function setMode(mode) { inspect.mode = mode; inspect.err = ''; renderDetail(); }
+
+document.getElementById('detail').addEventListener('click', async e => {
+  const btn = e.target.closest('[data-act]');
+  if (!btn || !memories.has(inspect.id)) return;
+  const act = btn.dataset.act;
+  if (act === 'edit') return setMode('edit');
+  if (act === 'ask') return setMode('confirm');
+  if (act === 'cancel') return setMode('view');
+  btn.disabled = true;
+  if (act === 'save') {
+    const r = await api('/api/memory/save', { id: inspect.id, text: document.getElementById('memEdit').value });
+    if (r.error) { inspect.err = r.error; btn.disabled = false; document.querySelector('#detail .msg-err').textContent = r.error; return; }
+    // a shared-brain memory's id comes from its text, so an edit gives it a new id (and a new dot)
+    selected = r.id;
+    inspect = { id: r.id, mode: 'view', text: null, kind: '', file: '', err: '' };
+    loadMemory(r.id);
+    renderPanel();
+  }
+  if (act === 'delete') {
+    const name = memories.get(inspect.id).data.name;
+    const r = await api('/api/memory/delete', { id: inspect.id });
+    if (r.error) { inspect.mode = 'view'; inspect.err = r.error; return renderDetail(); }
+    selected = null;
+    renderPanel();
+    toast(`Deleted: ${name}`, 'Undo', async () => {
+      const u = await api('/api/memory/restore', { trashId: r.trashId });
+      if (u.error) return toast(u.error);
+      selected = u.id; // the dot comes back with the next live update
+    });
+  }
+});
+
+addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || !selected || e.target.closest?.('#log, .composer, .modal')) return;
+  if (inspect.mode !== 'view' && memories.has(selected)) return setMode('view');
+  selected = null;
+  renderPanel();
+});
+
+function toast(title, action, onAction, detail) {
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.innerHTML = `${esc(title)}${action ? `<button class="btn">${esc(action)}</button>` : ''}${detail ? `<span>${esc(detail)}</span>` : ''}`;
+  t.querySelector('button')?.addEventListener('click', () => { t.remove(); onAction(); });
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 8000);
+}
+
+// ---------- memory search ----------
+const memSearch = document.getElementById('memSearch');
+let query = [];
+const reEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function highlight(text) {
+  if (!query.length) return esc(text);
+  return String(text).split(new RegExp(`(${query.map(reEsc).join('|')})`, 'i'))
+    .map((part, i) => i % 2 ? `<mark>${esc(part)}</mark>` : esc(part)).join('');
+}
+
+function renderMemList() {
+  const list = document.getElementById('memList');
+  const all = [...memories.values()].sort((a, b) => b.data.created - a.data.created);
+  let shown = 0, html = '';
+  for (const e of all) {
+    const m = e.data;
+    const hay = `${m.name} ${m.description} ${m.projectLabel} ${m.type}`.toLowerCase();
+    e.match = query.every(q => hay.includes(q));
+    if (!e.match) continue;
+    shown++;
+    html += `<div class="mem ${selected === m.id ? 'sel' : ''}" data-id="${esc(m.id)}">
+      <i style="color:${hex(TYPE_COLORS[m.type] ?? TYPE_COLORS.project)};background:currentColor"></i>
+      <b>${highlight(m.name)}</b><span>${highlight(m.description)}</span></div>`;
+  }
+  if (!all.length) html = '<div class="empty">No memories yet. Everything Claude saves in this brain shows up here.</div>';
+  else if (!shown) html = '<div class="empty">No memory matches that.</div>';
+  list.innerHTML = html;
+}
+
+memSearch.addEventListener('input', () => {
+  query = memSearch.value.toLowerCase().split(/\s+/).filter(Boolean);
+  renderMemList();
+});
+document.getElementById('memList').addEventListener('click', e => {
+  const row = e.target.closest('.mem');
+  if (!row) return;
+  selected = row.dataset.id;
+  renderPanel();
+});
 
 document.querySelector('aside header').addEventListener('click', e => {
   const b = e.target.closest('button');
@@ -453,7 +763,14 @@ document.querySelector('aside header').addEventListener('click', e => {
   for (const x of document.querySelectorAll('aside header button')) x.setAttribute('aria-selected', String(x === b));
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.id === b.dataset.tab);
 });
-document.getElementById('team').addEventListener('click', e => {
+document.getElementById('team').addEventListener('click', async e => {
+  const copy = e.target.closest('[data-copy]');
+  if (copy) {
+    copy.disabled = true;
+    const r = await api('/api/skills/copy', { from: copy.dataset.from, skill: copy.dataset.copy });
+    if (r.error) { copy.disabled = false; return toast(r.error); }
+    return toast(`Hired: ${copy.dataset.copy}`, null, null, `Copied into .claude/skills/${r.folder}`);
+  }
   const row = e.target.closest('.emp');
   if (!row) return;
   selected = row.dataset.id;
@@ -468,7 +785,8 @@ let downAt = null;
 function pick(ev) {
   mouse.set(ev.clientX / innerWidth * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(mouse, camera);
-  const targets = [...[...employees.values()].map(e => e.sphere), ...[...memories.values()].map(m => m.mesh)];
+  const targets = [...[...employees.values()].map(e => e.sphere), ...[...memories.values()].map(m => m.mesh),
+    ...[...satellites.values()].flatMap(s => [...s.dots.values()])];
   const hit = ray.intersectObjects(targets, false)[0];
   return hit?.object.userData;
 }
@@ -477,7 +795,8 @@ canvas.addEventListener('pointermove', ev => {
   if (!u) { tip.style.display = 'none'; canvas.style.cursor = ''; return; }
   canvas.style.cursor = 'pointer';
   let title, sub;
-  if (u.kind === 'employee') { const s = employees.get(u.id).data; title = `${employeeName(s)} · ${s.name}`; sub = work.busy.get(s.id) ? 'Working on: ' + work.busy.get(s.id) : `${work.load.get(s.id) || 0} jobs done`; }
+  if (u.kind === 'employee') { const s = employees.get(u.id).data; title = `${employeeName(s)} · ${s.name}`; const b = work.busy.get(s.id); sub = b ? 'Working on: ' + (b.prompt || 'a task') : `${work.load.get(s.id) || 0} jobs done`; }
+  else if (u.kind === 'linked') { title = `${u.memory.name} · ${u.brain.name}`; sub = u.memory.description; }
   else { const m = memories.get(u.id).data; title = m.name; sub = m.description; }
   tip.innerHTML = `<b>${esc(title)}</b><span>${esc(sub)}</span>`;
   tip.style.display = 'block';
@@ -496,6 +815,9 @@ canvas.addEventListener('pointerup', ev => {
 const clock = new THREE.Clock();
 const tmp = new THREE.Vector3();
 const brainWorld = new THREE.Vector3();
+const focus = new THREE.Vector3();
+const HOME = new THREE.Vector3();
+let goHome = false;
 function animate() {
   const dt = Math.min(clock.getDelta(), 0.05);
   const t = clock.elapsedTime;
@@ -516,9 +838,11 @@ function animate() {
     const age = (now - e.born) / 1000;
     if (age < 0) continue;
     const k = Math.min(1, age / 0.8);
-    const s = easeOutBack(k) * (1 + Math.sin(t * 2 + e.twinkle) * 0.12);
+    const dim = query.length && !e.match;
+    const s = easeOutBack(k) * (1 + Math.sin(t * 2 + e.twinkle) * 0.12) * (dim ? 0.45 : 1);
     e.mesh.scale.setScalar(Math.max(0.0001, s));
-    e.halo.scale.setScalar(selected === e.data.id ? 1.6 : 0.9);
+    e.halo.scale.setScalar(selected === e.data.id ? 2.6 : 0.9);
+    e.halo.material.opacity = dim ? 0.08 : selected === e.data.id ? 0.9 : 0.55;
     const ringT = Math.min(1, age / (e.big ? 1.6 : 0.9));
     e.ring.scale.setScalar(0.3 + ringT * (e.big ? 9 : 3.5));
     e.ring.material.opacity = (1 - ringT) * (e.big ? 0.9 : 0.5);
@@ -547,6 +871,9 @@ function animate() {
     e.sphere.material.emissiveIntensity = 0.08 + e.busyAmt * (0.6 + Math.sin(t * 6 + e.phase) * 0.25);
     e.aura.material.opacity = e.busyAmt * 0.35;
     e.label.material.opacity = 0.5 + e.busyAmt * 0.45 + (selected === e.data.id ? 0.3 : 0);
+    if (busy) setBubble(e.bubble, work.busy.get(e.data.id).prompt || 'working…', e.color);
+    e.bubble.material.opacity = e.busyAmt * 0.95;
+    e.bubble.visible = e.busyAmt > 0.01;
 
     const pos = e.beam.geometry.attributes.position;
     pos.setXYZ(1, tmp.x, tmp.y, tmp.z);
@@ -559,6 +886,24 @@ function animate() {
       sp.material.opacity = e.busyAmt * Math.sin(f * Math.PI) * 0.9;
     });
   }
+
+  for (const sat of satellites.values()) {
+    const busy = sat.data.busy;
+    sat.group.position.copy(sat.home).setY(sat.home.y + Math.sin(t * 0.6 + sat.phase) * 0.25);
+    sat.group.rotation.y += dt * 0.08;
+    sat.glow.material.opacity = busy ? 0.22 + Math.sin(t * 5) * 0.08 : 0.12;
+    sat.label.material.opacity = busy ? 0.95 : 0.55;
+    for (const d of sat.dots.values()) d.material.opacity = selected === d.userData.id ? 1 : busy ? 0.85 : 0.5;
+    const pos = sat.beam.geometry.attributes.position;
+    pos.setXYZ(1, sat.group.position.x, sat.group.position.y, sat.group.position.z);
+    pos.needsUpdate = true;
+    sat.beam.material.opacity = busy ? 0.4 + Math.sin(t * 6) * 0.15 : 0.08;
+  }
+
+  // swing the view round to the memory being inspected, and back to the brain after
+  const focused = memories.get(selected) || (linkedDot(selected) && { mesh: linkedDot(selected) });
+  if (focused) { focused.mesh.getWorldPosition(focus); controls.target.lerp(focus, Math.min(1, dt * 2.5)); goHome = true; }
+  else if (goHome) { controls.target.lerp(HOME, Math.min(1, dt * 2.5)); if (controls.target.lengthSq() < 1e-4) goHome = false; }
 
   controls.update();
   composer.render();

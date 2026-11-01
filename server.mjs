@@ -9,24 +9,26 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { exec, spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { createChat } from './chat.mjs';
-import { createRegistry, setupBrain, repairHooks, hookCommand, listFolder, slugFor, samePath, inside } from './brains.mjs';
+import { runHandoff } from './handoff.mjs';
+import { createMemoryEditor, observationId } from './memory-edit.mjs';
+import { createRegistry, setupBrain, repairHooks, listFolder, slugFor, samePath, inside } from './brains.mjs';
+import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile } from './runtime.mjs';
+import { startTray } from './tray.mjs';
 
-const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
-const CLAUDE = path.join(HOME, '.claude');
+const CLAUDE = path.resolve(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude'));
 const PORT = Number(process.env.PORT || 4747);
 const DATA = path.resolve(process.env.CLAUDEOS_HOME || path.join(HOME, '.claudeos'));
 const ACTIVITY = path.join(DATA, 'activity.jsonl');
-const TEMPLATES = path.join(ROOT, 'templates');
-const HOOK = hookCommand(path.join(ROOT, 'hooks', 'claude-os-hook.mjs'), DATA);
+const TEMPLATES = templatesDir(DATA);
+const HOOK = hookCommand(DATA);
 const brains = createRegistry({ file: path.join(DATA, 'brains.json') });
 // if the app folder moved since a brain was set up, point that brain's hooks at this copy
-for (const b of brains.list()) { try { repairHooks(b.path, HOOK); } catch { /* folder may be gone */ } }
 const memoryFileOf = brain => path.join(brain.path, 'brain', 'memory.jsonl');
+for (const b of brains.list()) { try { repairHooks(b.path, HOOK, memoryServer(memoryFileOf(b))); } catch { /* folder may be gone */ } }
 
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml' };
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png' };
 
 function readFrontmatter(file) {
   let text;
@@ -101,10 +103,8 @@ function collectBrain(brain) {
     try { e = JSON.parse(line); } catch { continue; }
     if (e.type !== 'entity') continue;
     for (const obs of e.observations || []) {
-      let h = 0;
-      for (let i = 0; i < obs.length; i++) h = (Math.imul(h, 31) + obs.charCodeAt(i)) | 0;
       out.push({
-        id: `brain/${e.name}/${(h >>> 0).toString(36)}`,
+        id: observationId(e.name, obs),
         name: e.name,
         description: obs,
         type: 'brain',
@@ -127,6 +127,7 @@ function skillsIn(dir, source, owner) {
     const st = statSafe(file);
     out.push({
       id: `${source}:${owner ? owner + ':' : ''}${fm.name || name}`,
+      folder: name,
       name: fm.name || name,
       invokeAs: owner ? `${owner}:${fm.name || name}` : (fm.name || name),
       description: fm.description || '',
@@ -191,23 +192,29 @@ function nameSkills(skills) {
 
 function snapshot() {
   const brain = brains.active();
-  const list = brains.list().map(b => ({ id: b.id, name: b.name, path: b.path }));
+  const list = brains.list().map(b => ({ id: b.id, name: b.name, path: b.path, links: b.links || [] }));
   if (!brain) return { brain: null, brains: list, memories: [], skills: [], names: {}, activity: [], at: Date.now() }; // first run
   const skills = collectSkills(brain);
   return {
     brain: { id: brain.id, name: brain.name, path: brain.path },
     brains: list,
     memories: [...collectBrain(brain), ...collectMemories(brain)], skills, names: { ...nameSkills(skills) },
+    // linked brains: their shared brain (read-only here), their own team, and whether they're working for us
+    linked: brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, path: b.path, busy: handoffs.has(b.id),
+      memories: collectBrain(b), skills: skillsIn(path.join(b.path, '.claude', 'skills'), 'project', path.basename(b.path)) })),
     activity: collectActivity(brain), at: Date.now(),
   };
 }
+
+// Tasks handed to linked brains that are running now: brain id -> { stop }.
+const handoffs = new Map();
 
 // Poll instead of fs.watch: cheap at this size and reliable across OneDrive/Windows.
 let last = snapshot();
 let lastKey = keyOf(last);
 const clients = new Set();
 function keyOf(s) {
-  return JSON.stringify([s.brain?.id, s.brains, s.memories.map(m => m.id + m.description), s.skills.map(s => s.id), s.activity.length && s.activity[s.activity.length - 1]]);
+  return JSON.stringify([s.brain?.id, s.brains, s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id), s.activity.length && s.activity[s.activity.length - 1]]);
 }
 function refresh() {
   const next = snapshot();
@@ -232,12 +239,18 @@ const LOCAL_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`]);
 const chats = new Map();
 function chatFor(brain) {
   if (!chats.has(brain.id)) {
-    chats.set(brain.id, createChat({ cwd: brain.path, memoryFile: memoryFileOf(brain), appDir: ROOT,
-      stateFile: path.join(DATA, 'chats', `${brain.id}.json`), port: PORT, token: TOKEN, broadcast }));
+    chats.set(brain.id, createChat({ cwd: brain.path, memoryFile: memoryFileOf(brain), helper, memoryServer,
+      stateFile: path.join(DATA, 'chats', `${brain.id}.json`), activityFile: ACTIVITY, port: PORT,
+      links: () => brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, memoryFile: memoryFileOf(b) })), token: TOKEN, broadcast }));
   }
   return chats.get(brain.id);
 }
 const anyBusy = () => [...chats.values()].some(c => c.snapshot().busy);
+const memoryEditor = createMemoryEditor({ claudeDir: CLAUDE, dataDir: DATA, memoryFileOf });
+// only memories the active brain is showing right now can be opened, so an id can't reach other files
+function memoryById(brain, id) {
+  return [...collectBrain(brain), ...collectMemories(brain)].find(m => m.id === id);
+}
 
 const BAD_NAME = /[<>:"/\\|?*\x00-\x1f]|^\.+$|^(con|prn|aux|nul|com\d|lpt\d)$/i;
 function switchTo(brain) {
@@ -255,7 +268,7 @@ function createBrain({ name, parent, template }) {
   if (brains.byPath(dir)) return { error: 'That folder is already one of your brains.' };
   if (fs.existsSync(dir) && fs.readdirSync(dir).length) return { error: `${dir} already exists and isn't empty. Use "Add existing folder" for it instead.` };
   fs.mkdirSync(dir, { recursive: true });
-  const created = setupBrain(dir, { name, hookCommand: HOOK, template, templatesDir: TEMPLATES });
+  const created = setupBrain(dir, { name, hookCommand: HOOK, memoryServer, template, templatesDir: TEMPLATES });
   const brain = brains.add({ id: crypto.randomUUID(), name, path: dir, created: Date.now(), allClaudeMemories: false });
   return { ...switchTo(brain), created };
 }
@@ -265,9 +278,43 @@ function addBrain({ folder }) {
   const dir = path.resolve(folder);
   const existing = brains.byPath(dir);
   if (existing) return { ...switchTo(existing), created: [] };
-  const created = setupBrain(dir, { hookCommand: HOOK, templatesDir: TEMPLATES });
+  const created = setupBrain(dir, { hookCommand: HOOK, memoryServer, templatesDir: TEMPLATES });
   const brain = brains.add({ id: crypto.randomUUID(), name: path.basename(dir) || dir, path: dir, created: Date.now(), allClaudeMemories: false });
   return { ...switchTo(brain), created };
+}
+
+// Called (long-poll) by approval-mcp.mjs when the active brain's Claude uses ask_brain.
+async function handoff(active, { brain: target, task }, req) {
+  task = String(task || '').trim();
+  const want = String(target || '').trim().toLowerCase();
+  const b = brains.linksOf(active).find(x => x.name.toLowerCase() === want || x.id === target);
+  if (!b) return { error: `"${target}" isn't linked to ${active.name}. Linked brains: ${brains.linksOf(active).map(x => x.name).join(', ') || 'none'}.` };
+  if (!task) return { error: 'Say what the linked brain should do.' };
+  if (handoffs.has(b.id)) return { error: `${b.name} is already working on a hand-off. Wait for it to finish.` };
+  const mcpServers = {
+    memory: memoryServer(memoryFileOf(b)),
+    claudeos: { ...helper('approval-mcp'), env: { CLAUDEOS_PORT: String(PORT), CLAUDEOS_TOKEN: TOKEN } },
+  };
+  const run = runHandoff({ brain: b, task, mcpServers, onExit: () => { handoffs.delete(b.id); refresh(); } });
+  handoffs.set(b.id, run);
+  refresh();
+  // if the asking Claude goes away (Stop, crash), stop the linked brain too
+  req.on('close', () => { if (handoffs.get(b.id) === run) run.stop(); });
+  const r = await run.done;
+  return r.error ? { error: `${b.name}: ${r.error}` } : { brain: b.name, result: r.result };
+}
+
+// Copies a skill folder from a linked brain's team into the active brain's team.
+function copySkill(active, { from, skill }) {
+  const b = brains.linksOf(active).find(x => x.id === from);
+  if (!b) return { error: 'Link that brain first.' };
+  const s = skillsIn(path.join(b.path, '.claude', 'skills'), 'project').find(x => x.name === skill);
+  if (!s) return { error: `${b.name} has no skill called ${skill}.` };
+  const dest = path.join(active.path, '.claude', 'skills', s.folder);
+  if (fs.existsSync(dest)) return { error: `${active.name} already has a .claude/skills/${s.folder} folder.` };
+  fs.cpSync(path.join(b.path, '.claude', 'skills', s.folder), dest, { recursive: true, filter: src => !src.includes('__pycache__') });
+  refresh();
+  return { ok: true, folder: s.folder };
 }
 
 // Is Claude Code installed? The setup screen warns new users if it isn't.
@@ -304,6 +351,11 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/health' && req.method === 'GET') return json(res, 200, await health());
   const active = brains.active();
   const chat = active ? chatFor(active) : null;
+  if (url.pathname === '/api/memory' && req.method === 'GET') {
+    const m = active && memoryById(active, url.searchParams.get('id'));
+    if (!m) return json(res, 200, { error: 'That memory is gone.' });
+    try { return json(res, 200, memoryEditor.read(active, m)); } catch (err) { return json(res, 200, { error: err.message }); }
+  }
   if (url.pathname === '/api/chat' && req.method === 'GET') return json(res, 200, chat ? chat.snapshot() : { messages: [], busy: false, approvals: [] });
   if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
   const body = await readJson(req);
@@ -313,6 +365,11 @@ async function handleApi(req, res, url) {
       if (url.pathname === '/api/brains/switch') { const b = brains.find(body.id); return json(res, 200, b ? switchTo(b) : { error: 'Unknown brain.' }); }
       if (url.pathname === '/api/brains/create') return json(res, 200, createBrain(body));
       if (url.pathname === '/api/brains/add') return json(res, 200, addBrain(body));
+      if (url.pathname === '/api/brains/links') {
+        const b = brains.setLinks(String(body.id || ''), Array.isArray(body.links) ? body.links.map(String) : []);
+        refresh();
+        return json(res, 200, b ? { ok: true, links: b.links } : { error: 'Unknown brain.' });
+      }
       if (url.pathname === '/api/brains/remove') {
         const b = brains.find(body.id);
         if (!b) return json(res, 200, { error: 'Unknown brain.' });
@@ -325,9 +382,29 @@ async function handleApi(req, res, url) {
       }
     } catch (err) { return json(res, 200, { error: err.message }); }
   }
-  if (!chat && (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval'))) return json(res, 200, { error: 'Set up a brain first.' });
+  if (url.pathname.startsWith('/api/memory/')) {
+    if (!active) return json(res, 200, { error: 'Set up a brain first.' });
+    // the memory server rewrites brain/memory.jsonl while Claude works, so don't edit under it
+    if (anyBusy()) return json(res, 200, { error: 'Claude is still answering. Wait for it, or press Stop, before changing memories.' });
+    try {
+      let r;
+      if (url.pathname === '/api/memory/restore') r = memoryEditor.restore(String(body.trashId || ''));
+      else {
+        const m = memoryById(active, body.id);
+        if (!m) return json(res, 200, { error: 'That memory is gone.' });
+        if (url.pathname === '/api/memory/save') r = memoryEditor.save(active, m, body.text);
+        else if (url.pathname === '/api/memory/delete') r = memoryEditor.remove(active, m);
+        else return json(res, 404, { error: 'not found' });
+      }
+      refresh();
+      return json(res, 200, r);
+    } catch (err) { return json(res, 200, { error: err.message }); }
+  }
+  if (!chat && (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/handoff') || url.pathname.startsWith('/api/skills'))) return json(res, 200, { error: 'Set up a brain first.' });
   if (url.pathname === '/api/chat') return json(res, 200, chat.send(body.text));
-  if (url.pathname === '/api/chat/stop') { chat.stop(); return json(res, 200, { ok: true }); }
+  if (url.pathname === '/api/chat/stop') { chat.stop(); for (const h of handoffs.values()) h.stop(); return json(res, 200, { ok: true }); }
+  if (url.pathname === '/api/handoff') return json(res, 200, await handoff(active, body, req));
+  if (url.pathname === '/api/skills/copy') return json(res, 200, copySkill(active, body));
   if (url.pathname === '/api/chat/new') return json(res, 200, chat.reset());
   if (url.pathname === '/api/approval') return json(res, 200, await chat.requestApproval(body));
   if (url.pathname === '/api/approval/answer') return json(res, 200, chat.answerApproval(body.id, body.allow));
@@ -337,7 +414,7 @@ async function handleApi(req, res, url) {
 const server = http.createServer((req, res) => {
   if (!LOCAL_HOSTS.has(req.headers.host)) { res.writeHead(421); return res.end('wrong host'); }
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname === '/api/fs' || url.pathname === '/api/health') {
+  if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname === '/api/skills/copy' || url.pathname === '/api/fs' || url.pathname === '/api/health') {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));
   }
   if (url.pathname === '/api/state') {
@@ -354,33 +431,42 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/' || url.pathname === '/index.html') {
     // hand the page its token
-    return fs.readFile(path.join(ROOT, 'public', 'index.html'), 'utf8', (err, html) => {
-      if (err) { res.writeHead(500); return res.end(); }
-      res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store' });
-      res.end(html.replace('__CLAUDEOS_TOKEN__', TOKEN));
-    });
+    const html = pageFile('/index.html');
+    if (!html) { res.writeHead(500); return res.end(); }
+    res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store' });
+    return res.end(html.toString('utf8').replace('__CLAUDEOS_TOKEN__', TOKEN));
   }
-  let rel = url.pathname;
-  let base = path.join(ROOT, 'public');
-  if (rel.startsWith('/vendor/three/')) { base = path.join(ROOT, 'node_modules', 'three'); rel = rel.slice('/vendor/three'.length); }
-  const file = path.normalize(path.join(base, decodeURIComponent(rel)));
-  if (!file.startsWith(base)) { res.writeHead(403); return res.end(); }
-  fs.readFile(file, (err, buf) => {
-    if (err) { res.writeHead(404); return res.end('not found'); }
-    res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
-    res.end(buf);
-  });
+  const buf = pageFile(url.pathname);
+  if (!buf) { res.writeHead(404); return res.end('not found'); }
+  res.writeHead(200, { 'content-type': MIME[path.extname(url.pathname)] || 'application/octet-stream' });
+  res.end(buf);
 });
 
 server.listen(PORT, '127.0.0.1', () => {
   const url = `http://localhost:${PORT}`;
   console.log(`ClaudeOS running at ${url}  (data: ${DATA})`);
-  if (process.argv.includes('--open')) {
-    const [cmd, args] = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : [process.platform === 'darwin' ? 'open' : 'xdg-open', [url]];
-    spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-  }
+  if (process.argv.includes('--open')) openPage(url);
+  if (process.argv.includes('--tray')) startTray({ url, onQuit: quit });
 });
 server.on('error', err => {
-  if (err.code === 'EADDRINUSE') { console.log(`ClaudeOS is already running at http://localhost:${PORT}`); process.exit(0); }
+  if (err.code === 'EADDRINUSE') {
+    console.log(`ClaudeOS is already running at http://localhost:${PORT}`);
+    // double-clicking ClaudeOS.exe again just brings the page back
+    if (IS_EXE) openPage(`http://localhost:${PORT}`);
+    setTimeout(() => process.exit(0), 500);
+    return;
+  }
   throw err;
 });
+
+function openPage(url) {
+  const [cmd, args] = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : [process.platform === 'darwin' ? 'open' : 'xdg-open', [url]];
+  spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+}
+
+// Quit from the tray: stop anything Claude is doing for us first.
+function quit() {
+  for (const c of chats.values()) c.stop();
+  for (const h of handoffs.values()) h.stop();
+  setTimeout(() => process.exit(0), 800);
+}

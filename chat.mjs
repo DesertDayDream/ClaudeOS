@@ -9,8 +9,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const MAX_MESSAGES = 300;
+const READ_TOOLS = ['search_nodes', 'open_nodes', 'read_graph'];
+const WRITE_TOOLS = ['create_entities', 'create_relations', 'add_observations', 'delete_entities', 'delete_observations', 'delete_relations'];
 
-export function createChat({ cwd, memoryFile, stateFile, appDir, port, token, broadcast }) {
+export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, memoryServer, port, token, broadcast, links = () => [] }) {
   let state = { sessionId: null, messages: [] };
   try { state = { ...state, ...JSON.parse(fs.readFileSync(stateFile, 'utf8')) }; } catch { /* first run */ }
 
@@ -32,6 +34,9 @@ export function createChat({ cwd, memoryFile, stateFile, appDir, port, token, br
 
   function toolSummary(name, input = {}) {
     if (name === 'Skill') return `Handing off to ${input.skill || input.command || 'a skill'}`;
+    if (name === 'mcp__claudeos__ask_brain') return `Asking ${input.brain || 'a linked brain'}: ${String(input.task || '').slice(0, 100)}`;
+    const linked = name.match(/^mcp__brain_\d+__(.*)$/);
+    if (linked) return `Linked brain: ${linked[1].replace(/_/g, ' ')}${input.query ? ` "${input.query}"` : ''}`;
     if (name.startsWith('mcp__memory__')) return `Brain: ${name.slice('mcp__memory__'.length).replace(/_/g, ' ')}${input.query ? ` "${input.query}"` : ''}`;
     const target = input.file_path || input.path || input.pattern || input.command || input.url || input.description || '';
     return `${name}${target ? ': ' + String(target).slice(0, 120) : ''}`;
@@ -45,17 +50,31 @@ export function createChat({ cwd, memoryFile, stateFile, appDir, port, token, br
 
     const reply = push({ role: 'assistant', text: '', tools: [], streaming: true });
     // the memory server is passed here too, so a brain's memory works before its folder is trusted
-    const mcpConfig = JSON.stringify({ mcpServers: {
-      memory: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-memory'], env: { MEMORY_FILE_PATH: memoryFile } },
+    const linked = links();
+    const mcpServers = {
+      memory: memoryServer(memoryFile),
       claudeos: {
-      command: process.execPath,
-      args: [path.join(appDir, 'approval-mcp.mjs')],
-      env: { CLAUDEOS_PORT: String(port), CLAUDEOS_TOKEN: token },
-    } } });
+        ...helper('approval-mcp'),
+        env: { CLAUDEOS_PORT: String(port), CLAUDEOS_TOKEN: token, CLAUDEOS_LINKS: linked.map(b => b.name).join('\n') },
+      },
+    };
+    // each linked brain's shared brain, readable but never writable from here
+    const allowed = ['mcp__memory'], denied = [];
+    linked.forEach((b, i) => {
+      mcpServers[`brain_${i + 1}`] = memoryServer(b.memoryFile);
+      for (const t of READ_TOOLS) allowed.push(`mcp__brain_${i + 1}__${t}`);
+      for (const t of WRITE_TOOLS) denied.push(`mcp__brain_${i + 1}__${t}`);
+    });
+    if (linked.length) allowed.push('mcp__claudeos__ask_brain');
     const args = ['-p', text, '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
-      '--mcp-config', mcpConfig, '--permission-prompt-tool', 'mcp__claudeos__approve',
+      '--mcp-config', JSON.stringify({ mcpServers }), '--permission-prompt-tool', 'mcp__claudeos__approve',
       // the brain's own memory never needs a prompt, even in a folder Claude Code hasn't trusted yet
-      '--allowedTools', 'mcp__memory'];
+      '--allowedTools', allowed.join(','), ...(denied.length ? ['--disallowedTools', denied.join(',')] : [])];
+    if (linked.length) {
+      args.push('--append-system-prompt', `Linked brains (other ClaudeOS brains the user connected to this one):\n${linked.map((b, i) =>
+        `- ${b.name}: read its shared brain with mcp__brain_${i + 1}__search_nodes / open_nodes / read_graph (read-only).`).join('\n')}\n` +
+        'When a question is about what a linked brain knows, search it. When a task belongs to a linked brain\'s team, hand it over with mcp__claudeos__ask_brain (brain, task) and report its answer. Save new facts only in this brain\'s own memory.');
+    }
     if (state.sessionId) args.push('--resume', state.sessionId);
 
     const proc = spawn('claude', args, {
@@ -132,6 +151,12 @@ export function createChat({ cwd, memoryFile, stateFile, appDir, port, token, br
     if (run.stopped) fields.note = 'Stopped.';
     if (error && !run.reply.error) fields.error = error;
     update(fields);
+    // a killed or failed run never reaches Claude's Stop hook, so close the task in the log here
+    if ((run.stopped || run.reply.error) && state.sessionId) {
+      const ev = { ts: Date.now(), session: state.sessionId, cwd, type: 'stop', outcome: run.stopped ? 'stopped' : 'error',
+        result: run.stopped ? 'Stopped from the chat.' : String(run.reply.error).slice(0, 600) };
+      try { fs.appendFileSync(activityFile, JSON.stringify(ev) + '\n'); } catch { /* the board just shows it as unfinished */ }
+    }
     run = null;
     save();
     emit({ kind: 'busy', busy: false });

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const MEMORY_SERVER = { command: 'npx', args: ['-y', '@modelcontextprotocol/server-memory'] };
+import { isOurMemoryServer } from './runtime.mjs';
 const HOOK_EVENTS = [['UserPromptSubmit'], ['PreToolUse', 'Skill'], ['Stop']];
 
 const BRAIN_SECTION = `## The shared brain
@@ -42,11 +42,6 @@ function writeJsonFile(file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
 }
 
-// The command each brain's hooks run. It names the data folder so the log lands in the right place.
-export function hookCommand(hookScript, dataDir) {
-  return `node "${hookScript.replace(/\\/g, '/')}" "${dataDir.replace(/\\/g, '/')}"`;
-}
-
 // Adds missing ClaudeOS hooks and points existing ones at this copy of the app, so moving the
 // app folder heals itself. Returns true if the settings changed.
 function ensureHooks(s, command) {
@@ -67,16 +62,22 @@ function ensureHooks(s, command) {
   return changed;
 }
 
-export function repairHooks(dir, command) {
+export function repairHooks(dir, command, memoryServer) {
   const file = path.join(dir, '.claude', 'settings.json');
   const s = readJsonFile(file);
-  if (!s || !ensureHooks(s, command)) return false;
-  writeJsonFile(file, s);
-  return true;
+  if (s && ensureHooks(s, command)) writeJsonFile(file, s);
+  // a brain set up by ClaudeOS.exe runs the exe's memory server: follow the exe if it moved
+  const mcpFile = path.join(dir, '.mcp.json');
+  const mcp = readJsonFile(mcpFile);
+  const mem = mcp?.mcpServers?.memory;
+  if (isOurMemoryServer(mem) && isOurMemoryServer(memoryServer) && mem.command !== memoryServer.command) {
+    mem.command = memoryServer.command;
+    writeJsonFile(mcpFile, mcp);
+  }
 }
 
 // Adds the ClaudeOS pieces a folder is missing. Returns a list of what it did, for the page.
-export function setupBrain(dir, { name, hookCommand: command, template, templatesDir }) {
+export function setupBrain(dir, { name, hookCommand: command, memoryServer, template, templatesDir }) {
   const done = [];
   const creative = template === 'creative' ? path.join(templatesDir, 'creative') : null;
   fs.mkdirSync(path.join(dir, 'brain'), { recursive: true });
@@ -96,7 +97,7 @@ export function setupBrain(dir, { name, hookCommand: command, template, template
     const cfg = mcp || {};
     cfg.mcpServers ||= {};
     if (!cfg.mcpServers.memory) {
-      cfg.mcpServers.memory = { ...MEMORY_SERVER, env: { MEMORY_FILE_PATH: memFile.replace(/\\/g, '/') } };
+      cfg.mcpServers.memory = memoryServer(memFile);
       writeJsonFile(mcpFile, cfg);
       done.push(mcp ? 'added the memory server to .mcp.json' : '.mcp.json');
     }
@@ -166,8 +167,17 @@ export function createRegistry({ file }) {
     find: id => reg.brains.find(b => b.id === id),
     byPath: p => reg.brains.find(b => samePath(b.path, p)),
     add(brain) { reg.brains.push(brain); save(); return brain; },
-    remove(id) { reg.brains = reg.brains.filter(b => b.id !== id); if (reg.active === id) reg.active = reg.brains[0]?.id ?? null; save(); },
+    remove(id) { reg.brains = reg.brains.filter(b => b.id !== id); for (const b of reg.brains) if (b.links) b.links = b.links.filter(l => l !== id); if (reg.active === id) reg.active = reg.brains[0]?.id ?? null; save(); },
     activate(id) { reg.active = id; save(); },
+    // a link lets this brain read the other's shared brain, hand its team work and copy its skills
+    setLinks(id, links) {
+      const b = reg.brains.find(x => x.id === id);
+      if (!b) return null;
+      b.links = [...new Set(links)].filter(l => l !== id && reg.brains.some(x => x.id === l));
+      save();
+      return b;
+    },
+    linksOf: b => (b.links || []).map(l => reg.brains.find(x => x.id === l)).filter(Boolean),
   };
 }
 
