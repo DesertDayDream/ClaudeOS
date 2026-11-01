@@ -379,12 +379,13 @@ function employeeView(brain, skillId) {
     work: own ? managerFor(brain).workOf(e.skill) : [] };
 }
 function employeeApi(brain, what, body) {
+  // the chat box shows this employee's chat (their desk's Chat tab), or the Manager's again
+  if (what === 'view' && !body.id) return chatFor(brain).view(null);
   const e = employeeOf(brain, String(body.id || ''));
   if (!e) return { error: 'That employee is gone.' };
   const cabinet = ensureCabinet(brain.path, e);
   const c = chatFor(brain).employeeChat({ ...e, cabinet });
-  if (what === 'send') return c.send(body.text, { files: body.files });
-  if (what === 'stop') { c.stop(); return { ok: true }; }
+  if (what === 'view') return chatFor(brain).view(c.id);
   if (what === 'open') {
     const target = path.resolve(cabinet, String(body.path || ''));
     const rel = path.relative(cabinet, target);

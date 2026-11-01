@@ -986,7 +986,12 @@ function renderPanel() {
 function renderDetail() {
   const el = document.getElementById('detail');
   // an employee's desk takes over the whole side panel; everything else is the Manager's panel
-  document.querySelector('aside').classList.toggle('emp', employees.has(selected));
+  const aside = document.querySelector('aside');
+  aside.classList.toggle('emp', employees.has(selected));
+  // an employee's Chat tab is the chat box itself, showing their conversation
+  const chatWith = employees.has(selected) && employees.get(selected).data.source !== 'contractor' && deskView === 'chat' ? selected : null;
+  aside.classList.toggle('emp-chat', !!chatWith);
+  if (chatWith !== chatFocus) { chatFocus = chatWith; api('/api/employee/view', { id: chatWith }).then(r => { if (r.error) toast(r.error); }); }
   // choosing something else closes the skill form
   if (skillForm.id && skillForm.id !== selected) skillForm = { id: null, mode: 'board', data: null, err: '' };
   if (!selected) { el.classList.remove('on', 'editing', 'deskv'); delete el.dataset.mode; return; }
@@ -1083,6 +1088,7 @@ function runsHtml(s) {
 // ---------- an employee's desk (office.js) ----------
 // Clicking someone opens their chat box; their monitor opens their computer, their cabinet their files.
 let deskView = 'chat';
+let chatFocus; // the employee whose chat the chat box shows (null: the Manager's); unset until the first render
 office.onChange(() => { if (employees.has(selected)) renderDetail(); });
 office.onError(msg => toast(msg));
 function backToManager() { if (employees.has(selected)) { selected = null; renderPanel(); } }
@@ -1095,7 +1101,6 @@ document.getElementById('detail').addEventListener('click', async e => {
   if (t) { deskView = t.dataset.deskView; return renderDetail(); }
   if (employees.has(selected)) office.click(e);
 });
-document.getElementById('detail').addEventListener('keydown', e => { if (employees.has(selected)) office.key(e); });
 
 // ---------- departments and their projects ----------
 // A department is a room in the building: its people, what it's for, and its projects. The Manager gives

@@ -121,11 +121,15 @@
   aside.emp #detail > *, .desk-body > *, .ed-msg, .ed-job, .ed-f, .ed-path { min-width: 0; max-width: 100%; }
   .ed-path code { min-width: 0; }
   .ed-job .top b, .ed-f span { min-width: 0; overflow-wrap: anywhere; }
-  .ed-msg pre, .ed-msg table { max-width: 100%; overflow-x: auto; }
-  .ed-msg code { overflow-wrap: anywhere; }
   .desk-body { overflow-x: hidden; }
   aside.emp #detail.deskv { overflow: hidden; }
   aside.emp .desk-body { min-height: 0; }
+  /* an employee's Chat tab: the desk header on top, the chat box itself (showing their chat) below it */
+  aside.emp.emp-chat > #chat { display: flex !important; flex-direction: column; padding: 0; flex: 1; min-height: 0; order: 2; }
+  aside.emp.emp-chat > #detail.on { flex: none; order: 1; padding-bottom: 0; }
+  #chat.employee #chatsBtn, #chat.employee #chatsDot, #chat.employee #chatTitle, #chat.employee #chatFolder, #chat.employee #chatList,
+  #chat.employee #queueBtn, #chat.employee #queue, #chat.employee #newChat, #chat.employee #wrapChat { display: none !important; }
+  #chat.employee .chatbar { justify-content: flex-end; }
   .desk-top { display: flex; margin-bottom: 8px; }
   .desk-tabs { display: flex; gap: 4px; margin: -2px 0 10px; border-bottom: 1px solid var(--line); }
   .desk-tabs button { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--dim); font: inherit; font-size: 12px; padding: 4px 8px 6px; cursor: pointer; }
@@ -133,18 +137,7 @@
   #detail.deskv { max-height: 72%; display: flex; flex-direction: column; }
   #detail.deskv.on { display: flex; }
   .desk-body { flex: 1; overflow-y: auto; min-height: 120px; }
-  .ed-msg { margin: 8px 0; font-size: 13px; }
-  .ed-msg.you { background: rgba(217,119,87,0.14); border-radius: 10px; padding: 7px 10px; margin-left: 30px; white-space: pre-wrap; }
-  .ed-msg.them .body { overflow-wrap: anywhere; }
-  .ed-msg .body p { margin: 4px 0; }
-  .ed-msg .err { color: #ff8a8a; font-size: 12px; }
   .dim { color: var(--dim); }
-  .ed-tools { font-size: 11.5px; color: var(--dim); margin-bottom: 4px; }
-  .ed-tools summary { cursor: pointer; }
-  .ed-ask { border: 1px solid rgba(255,211,138,0.5); border-radius: 10px; padding: 8px 10px; font-size: 12.5px; margin: 8px 0; overflow-wrap: anywhere; }
-  .ed-ask div { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; }
-  .ed-compose { display: flex; gap: 8px; margin-top: 8px; align-items: flex-end; }
-  .ed-compose textarea { flex: 1; min-height: 44px !important; max-height: 140px; }
   .ed-path { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
   .ed-path code { flex: 1; font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
   .ed-f { display: flex; gap: 6px; align-items: baseline; font-size: 12.5px; padding: 3px 6px; border-radius: 6px; cursor: pointer; }

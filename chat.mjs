@@ -145,9 +145,18 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     return convs.get(id);
   }
   // the chat the page shows; a fresh one when there's none yet
-  function current() {
+  // the Manager's open chat; the page shows it unless it's showing an employee's (view)
+  function managerChat() {
     if (!index.current) { index.current = newId(); saveIndex(); }
     return conv(index.current);
+  }
+  let viewing = null; // an employee's chat shown in the chat box for now (not saved: a restart shows the Manager's)
+  function current() { return viewing && convs.has(viewing) ? convs.get(viewing) : managerChat(); }
+  // show an employee's chat in the chat box (their desk), or null for the Manager's again
+  function view(id) {
+    viewing = id && convs.get(id)?.employee() ? id : null;
+    emit({ kind: 'open', id: current().id });
+    return { ok: true };
   }
 
   // too many idle processes: quit the ones idle longest
@@ -279,8 +288,10 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       // a fresh chat after Wrap up carries the handover in its system prompt
       if (state.carryOver) extra.push(`Handover from the previous chat in this brain (its details are in the brain's memory; search it if you need more):\n${state.carryOver}`);
       if (extra.length) args.push('--append-system-prompt', extra.join('\n\n'));
-      if (index.options?.model) args.push('--model', index.options.model);
-      if (index.options?.effort) args.push('--effort', index.options.effort);
+      // an employee runs on their own model and effort; the Manager's chats on the brain's
+      const opts = emp ? state.options || {} : index.options || {};
+      if (opts.model) args.push('--model', opts.model);
+      if (opts.effort) args.push('--effort', opts.effort);
       if (state.mode) args.push('--permission-mode', state.mode);
       return { args, key: JSON.stringify(args) };
     }
@@ -505,6 +516,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     }
     function wrapUp() {
       if (run) return { error: 'Claude is still answering. Wait for it, or press Stop.' };
+      if (state.employee) return { error: 'Wrap up is only for the Manager chats.' };
       if (!state.sessionId) return { ok: true }; // nothing said yet, so nothing to keep
       return send(WRAP_PROMPT, { wrap: true });
     }
@@ -530,16 +542,30 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
 
     function snapshot() {
       return { id, title: index.chats[id]?.title || 'New chat', messages: state.messages, busy: !!run, context: state.context, folder: state.folder,
-        tools: state.tools || {}, parent: state.parent || null, mode: state.mode || '' };
+        tools: state.tools || {}, parent: state.parent || null, mode: state.mode || '', options: state.options || {} };
+    }
+    // an employee's own model and effort (the Manager's chats share the brain's, set with setOptions)
+    function setOwnOptions({ model = '', effort = '' } = {}) {
+      if (run) return { error: 'Claude is still answering. Wait for it, or press Stop.' };
+      if (model && !MODELS.includes(model)) return { error: `Unknown model "${model}".` };
+      if (effort && !EFFORTS.includes(effort)) return { error: `Unknown effort "${effort}".` };
+      state.options = { ...(model ? { model } : {}), ...(effort ? { effort } : {}) };
+      if (state.messages.length) save();
+      cool();
+      send1({ kind: 'options', options: state.options });
+      return { ok: true, options: state.options };
     }
     // how much Claude asks first; like the tools, a change starts a new process (resuming the session)
     function setMode(mode = '') {
       if (run) return { error: 'Claude is still answering. Wait for it, or press Stop.' };
       if (mode && !MODES.includes(mode)) return { error: `Unknown mode "${mode}".` };
       state.mode = mode;
-      index.options = { ...index.options, mode };
-      if (!mode) delete index.options.mode;
-      saveIndex();
+      // the last pick is where the Manager's next chat starts; an employee's pick is theirs alone
+      if (!state.employee) {
+        index.options = { ...index.options, mode };
+        if (!mode) delete index.options.mode;
+        saveIndex();
+      }
       if (state.messages.length) save();
       cool();
       send1({ kind: 'mode', mode });
@@ -562,7 +588,10 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     }
     const parentOf = () => state.parent || null;
     // a chat with one employee: who they are and where their cabinet is now (a move restarts its process)
-    function setEmployee(e) { state.employee = e; }
+    function setEmployee(e) {
+      if (!state.employee && !state.messages.length) state.mode = '';
+      state.employee = e;
+    }
     // the folder a chat works in is picked before it starts: its Claude session lives under that folder
     function setFolder(folder) {
       if (run) return { error: 'Claude is still answering. Wait for it, or press Stop.' };
@@ -578,15 +607,16 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     }
     // the text a search looks through
     const text = () => state.messages.map(m => m.text).join('\n');
-    return { id, send, stop, wrapUp, report, startWith, snapshot, text, setFolder, setTools, setMode, setupSession, setEmployee, parentOf, warm, cool, file,
+    return { id, send, stop, wrapUp, report, startWith, snapshot, text, setFolder, setTools, setMode, setupSession, setEmployee, setOwnOptions, parentOf, warm, cool, file,
       folder: () => state.folder || cwd, tools: () => state.tools || {},
-      busy: () => !!run, empty: () => !state.messages.length,
+      busy: () => !!run, empty: () => !state.messages.length, employee: () => state.employee,
       idleSince: () => (live && !run ? live.since : null) };
   }
 
   // ---------- the brain's chats ----------
   function open(id) {
     if (!index.chats[id] && !convs.has(id)) return { error: 'That chat is gone.' };
+    viewing = null;
     index.current = id;
     saveIndex();
     emit({ kind: 'open', id });
@@ -679,12 +709,14 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
 
   // A finished brief reports to the chat that sent it (or the open one, if that chat was deleted).
   function report(chatId, title, text) {
-    const c = chatId && (index.chats[chatId] || convs.has(chatId)) ? conv(chatId) : current();
+    const c = chatId && (index.chats[chatId] || convs.has(chatId)) ? conv(chatId) : managerChat();
     c.report(title, text);
   }
 
   // takes effect from the next message (one already being answered keeps what it started with)
   function setOptions({ model = '', effort = '' } = {}) {
+    // an employee's chat box sets their own
+    if (current().employee()) return current().setOwnOptions({ model, effort });
     if (model && !MODELS.includes(model)) return { error: `Unknown model "${model}".`, options: index.options };
     if (effort && !EFFORTS.includes(effort)) return { error: `Unknown effort "${effort}".`, options: index.options };
     index.options = { ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(index.options?.mode ? { mode: index.options.mode } : {}) };
@@ -726,7 +758,9 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
 
   // the open chat, with every approval waiting anywhere (the page marks the other chats' ones)
   function snapshot() {
-    return { ...current().snapshot(), approvals: [...approvals.values()].map(a => a.card), options: index.options || {}, any: anyBusy() };
+    const c = current(), own = c.employee();
+    return { ...c.snapshot(), approvals: [...approvals.values()].map(a => a.card), options: own ? c.snapshot().options : index.options || {}, any: anyBusy(),
+      employee: own ? { name: own.name, skill: own.skill, dept: own.dept } : null };
   }
 
   return {
@@ -735,7 +769,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     busy: () => current().busy(), currentId: () => current().id,
     // all of them
     setFolder: f => current().setFolder(f), setTools: t => current().setTools(t), setMode: m => current().setMode(m), warm: () => current().warm(), upload, attachmentFile,
-    startSession, messageSession, chatFolder, employeeChat, empChatId, owns: chatId => convs.has(chatId),
+    startSession, messageSession, chatFolder, employeeChat, empChatId, view, owns: chatId => convs.has(chatId),
     open, newChat, rename, remove, list, report, anyBusy, stopAll: () => { for (const c of convs.values()) { c.stop(); c.cool(); } },
     setOptions, requestApproval, answerApproval, dropOthersApprovals, snapshot,
   };

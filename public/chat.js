@@ -198,8 +198,12 @@ function setBusy(b) {
   showContext();
 }
 
+// the chat box shows the Manager's chat, or an employee's when their desk is open (s.employee)
+const MANAGER_HINT = input.placeholder;
+let employee = null;
 function showEmpty() {
   if (log.children.length) return;
+  if (employee) { log.innerHTML = `<div class="empty">Talk to ${esc(employee.name)} directly. They work as the ${esc(employee.skill)} employee and file what they make in their file cabinet.</div>`; return; }
   log.innerHTML = `<div class="empty">Ask anything. Claude works in this brain's folder with its shared brain and team,
     and you can watch the employees it hands work to. Anything not already allowed asks you first, right here.</div>`;
 }
@@ -217,7 +221,10 @@ async function load() {
   const [s, l] = await Promise.all([api('/api/chat'), api('/api/chats')]);
   if (!l.error) showList(l);
   currentId = s.id || null;
-  titleEl.textContent = s.title || 'New chat';
+  employee = s.employee || null;
+  document.getElementById('chat').classList.toggle('employee', !!employee);
+  input.placeholder = employee ? `Message ${employee.name} directly…` : MANAGER_HINT;
+  titleEl.textContent = employee ? `${employee.name} · ${employee.skill}` : s.title || 'New chat';
   log.innerHTML = '';
   messages.clear();
   dismissed.clear();

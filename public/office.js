@@ -1,9 +1,8 @@
-// An employee's desk in the side panel: their own chat box (you talk to them, not the Manager), their
-// file cabinet (the real folder in the brain's Office folder where their work is filed), and their
+// An employee's desk in the side panel: their chat (the same chat box as the Manager's, showing their own
+// conversation: chat.js draws it, app.js asks the server to show it), their file cabinet (the real folder in the brain's Office folder where their work is filed), and their
 // computer (what they're doing right now, step by step, and the logs of what they did before).
 // app.js owns the selection and calls render(); this module fetches the employee's data and keeps it live.
 import { events } from '/events.js';
-import { markdown } from '/markdown.js';
 
 const TOKEN = window.CLAUDEOS_TOKEN;
 async function api(path, body) {
@@ -20,7 +19,7 @@ const size = n => n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : n > 1024 ? Math.ceil(
 const STATUS = { working: 'working', waiting: 'waiting', done: 'done', error: 'failed', stopped: 'stopped', skipped: 'skipped' };
 
 export const VIEWS = [['chat', 'Chat'], ['cabinet', 'File cabinet'], ['computer', 'Computer'], ['profile', 'Profile']];
-let desk = { id: null, data: null, err: '', approvals: [], open: new Set(), draft: '' };
+let desk = { id: null, data: null, err: '', open: new Set() };
 let rerender = () => {};
 export function onChange(fn) { rerender = fn; }
 
@@ -43,20 +42,14 @@ function load(id, now) {
     rerender();
   }, now ? 0 : 300);
 }
-async function loadApprovals() {
-  const r = await api('/api/chat');
-  desk.approvals = (r.approvals || []).filter(c => c.chat);
-}
 export function select(id) {
   if (desk.id === id) return;
-  desk = { id, data: null, err: '', approvals: desk.approvals, open: new Set(), draft: '' };
+  desk = { id, data: null, err: '', open: new Set() };
   load(id, true);
-  loadApprovals().then(rerender);
 }
 events.addEventListener('chat', e => {
   const ev = JSON.parse(e.data);
-  if (ev.kind === 'approval' && ev.card.chat) { desk.approvals.push(ev.card); if (ev.card.chat === desk.data?.chat?.id) rerender(); }
-  if (ev.kind === 'approval-done') desk.approvals = desk.approvals.filter(c => c.id !== ev.id);
+  // their chat moved on: the computer's "Chat work" follows
   if (desk.id && ev.chat && ev.chat === desk.data?.chat?.id) load(desk.id);
 });
 events.addEventListener('tasklog', e => {
@@ -67,49 +60,25 @@ events.addEventListener('tasklog', e => {
 });
 events.addEventListener('manager', () => { if (desk.id) load(desk.id); });
 
-// ---------- the three views ----------
+// ---------- the cabinet and the computer (the chat is the chat box itself) ----------
 // runs: app.js's "Working on" card and recent runs from the activity hook, shown on their computer
 export function render(el, s, view, who, runs = '') {
   const key = `${s.id}:${view}`;
   const d = desk.id === s.id ? desk.data : null;
-  // keep the half-typed message and the scroll position through live updates
-  const input = el.querySelector('#edInput');
-  if (input && el.dataset.for === key) desk.draft = input.value;
+  // the Chat tab is only the desk's header: the chat box sits under it
+  if (view === 'chat') { el.innerHTML = tabs(view, who); el.dataset.for = key; return; }
+  // keep the scroll position through live updates
   const box = el.querySelector('.desk-body');
   const scroll = box && el.dataset.for === key ? { top: box.scrollTop, bottom: box.scrollHeight - box.scrollTop - box.clientHeight < 30 } : null;
-  const focused = document.activeElement?.id === 'edInput';
   let body;
   if (!d) body = `<div class="empty">${esc(desk.err || 'Opening their desk…')}</div>`;
-  else if (view === 'chat') body = chatView(d, who);
   else if (view === 'cabinet') body = cabinetView(d);
   else body = computerView(d, runs);
-  const foot = view === 'chat' && d ? `<div class="ed-compose"><textarea id="edInput" rows="2" placeholder="Message ${esc(stripTags(who))} directly…"></textarea>
-    ${d.chat.busy ? '<button class="btn" data-ed="stop">Stop</button>' : '<button class="btn primary" data-ed="send">Send</button>'}</div>` : '';
-  el.innerHTML = `${tabs(view, who)}<div class="desk-body">${body}</div>${foot}`;
+  el.innerHTML = `${tabs(view, who)}<div class="desk-body">${body}</div>`;
   el.dataset.for = key;
-  const ta = el.querySelector('#edInput');
-  if (ta) { ta.value = desk.draft; if (focused) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } }
   const nb = el.querySelector('.desk-body');
-  if (nb) nb.scrollTop = view !== 'chat' ? (scroll ? scroll.top : 0) : scroll && !scroll.bottom ? scroll.top : nb.scrollHeight;
+  if (nb) nb.scrollTop = scroll ? scroll.top : 0;
 }
-const stripTags = s => String(s).replace(/<[^>]*>/g, '').replace(/&amp;/g, '&');
-
-function chatView(d, who) {
-  const msgs = d.chat.messages || [];
-  const cards = desk.approvals.filter(c => c.chat === d.chat.id);
-  let html = `<div class="k">Talk to ${esc(stripTags(who))} directly. What they make goes in their file cabinet.</div>`;
-  if (!msgs.length) html += `<div class="empty">No messages yet. Ask them something in their line of work.</div>`;
-  for (const m of msgs) {
-    if (m.role === 'user') { html += `<div class="ed-msg you">${esc(m.text)}</div>`; continue; }
-    const tools = (m.tools || []).map(t => typeof t === 'string' ? t : t.text);
-    html += `<div class="ed-msg them">${tools.length ? `<details class="ed-tools"><summary>${tools.length} step${tools.length > 1 ? 's' : ''}</summary>${tools.map(t => `<div>${esc(t)}</div>`).join('')}</details>` : ''}
-      ${m.text ? `<div class="body">${markdown(m.text)}</div>` : m.streaming ? '<div class="body dim">working…</div>' : ''}
-      ${m.error ? `<div class="err">${esc(m.error)}</div>` : ''}${m.note ? `<div class="dim">${esc(m.note)}</div>` : ''}</div>`;
-  }
-  for (const c of cards) html += `<div class="ed-ask"><b>Wants to:</b> ${esc(c.summary)}<div><button class="btn" data-ed-allow="0" data-card="${esc(c.id)}">Deny</button><button class="btn primary" data-ed-allow="1" data-card="${esc(c.id)}">Allow</button></div></div>`;
-  return html;
-}
-
 function cabinetView(d) {
   const files = d.files || [];
   let html = `<div class="ed-path"><code title="${esc(d.cabinet)}">${esc(d.cabinet)}</code><button class="btn mini" data-ed-open="">Open folder</button></div>`;
@@ -162,9 +131,8 @@ function job(w, open) {
 // ---------- clicks ----------
 export async function click(e) {
   if (!desk.id) return false;
-  const b = e.target.closest('[data-ed], [data-ed-allow], [data-ed-open], [data-ed-abs], [data-ed-job]');
+  const b = e.target.closest('[data-ed-open], [data-ed-abs], [data-ed-job]');
   if (!b) return false;
-  if (b.dataset.edAllow !== undefined) { api('/api/approval/answer', { id: b.dataset.card, allow: b.dataset.edAllow === '1' }); desk.approvals = desk.approvals.filter(c => c.id !== b.dataset.card); rerender(); return true; }
   if (b.dataset.edOpen !== undefined) { const r = await api('/api/employee/open', { id: desk.id, path: b.dataset.edOpen }); if (r.error) alertErr(r.error); return true; }
   if (b.dataset.edAbs) {
     const rel = desk.data?.cabinet && b.dataset.edAbs.startsWith(desk.data.cabinet) ? b.dataset.edAbs.slice(desk.data.cabinet.length).replace(/^[\\/]/, '') : null;
@@ -178,22 +146,6 @@ export async function click(e) {
     rerender();
     return true;
   }
-  if (b.dataset.ed === 'send') return send(), true;
-  if (b.dataset.ed === 'stop') { api('/api/employee/stop', { id: desk.id }); return true; }
-  return false;
-}
-async function send() {
-  const ta = document.getElementById('edInput');
-  const text = ta?.value.trim();
-  if (!text) return;
-  desk.draft = '';
-  ta.value = '';
-  const r = await api('/api/employee/send', { id: desk.id, text });
-  if (r.error) { desk.draft = text; alertErr(r.error); }
-  load(desk.id, true);
-}
-export function key(e) {
-  if (e.target.id === 'edInput' && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); return true; }
   return false;
 }
 let toastFn = msg => console.warn(msg);
