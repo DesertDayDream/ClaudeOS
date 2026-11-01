@@ -1,5 +1,6 @@
 import { events } from '/events.js';
 import { markdown } from '/markdown.js';
+import { preview, loadLocalImages } from '/preview.js';
 // ClaudeOS chat panel: send requests to Claude in the active brain's folder, stream replies,
 // and answer tool approvals with Allow/Deny.
 const TOKEN = window.CLAUDEOS_TOKEN;
@@ -89,6 +90,7 @@ function render(msg) {
       (msg.error ? `<div class="err">${esc(msg.error)}</div>` : '') +
       (msg.note ? `<div class="note">${esc(msg.note)}</div>` : '') +
       (msg.usage && !msg.streaming ? usageLine(msg.usage) : '');
+    if (!msg.streaming) loadLocalImages(entry.el);
   }
   scrollDown(stick);
 }
@@ -140,10 +142,12 @@ function toolRow(t) {
     .map(diffHtml).join('<div class="gap">⋯</div>');
   const name = t.file.split(/[\\/]/).pop();
   return `<details><summary title="${esc(t.text)}">${esc(t.text.replace(t.file, name))}<span class="n"><span class="a">+${add}</span> <span class="d">-${del}</span></span></summary>
-    <div class="diff"><div class="hd"><span>${esc(t.file)}</span><a class="file" href="#" data-file="${esc(t.file)}">Open</a></div>${body}</div></details>`;
+    <div class="diff"><div class="hd"><span>${esc(t.file)}</span><a class="file" href="#" data-edit="${esc(t.file)}">Open</a></div>${body}</div></details>`;
 }
-// Copy on code blocks; file links and diff headers open the file in the editor
+// Copy and Preview on code blocks; file links open the preview panel, diff headers the editor
 log.addEventListener('click', async e => {
+  const pv = e.target.closest('.code .pv');
+  if (pv) return preview({ content: pv.parentElement.querySelector('code').textContent, type: pv.dataset.pv });
   const copy = e.target.closest('.code .copy');
   if (copy) {
     await navigator.clipboard.writeText(copy.parentElement.querySelector('code').textContent).catch(() => {});
@@ -152,9 +156,11 @@ log.addEventListener('click', async e => {
     return;
   }
   const file = e.target.closest('a[data-file]');
-  if (file) {
+  if (file) { e.preventDefault(); return preview({ path: file.dataset.file }); }
+  const edit = e.target.closest('a[data-edit]');
+  if (edit) {
     e.preventDefault();
-    const r = await api('/api/open-file', { path: file.dataset.file });
+    const r = await api('/api/open-file', { path: edit.dataset.edit });
     if (r.error) alert(r.error);
   }
 });

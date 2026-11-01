@@ -64,7 +64,8 @@ const DESK_ALLOWED = ['terminal_read', 'terminal_list', 'terminal_stop', 'publis
 const DESK_PROMPT = `ClaudeOS desk tools (mcp__claudeos__*):
 - terminal_run / terminal_read / terminal_stop: long-running commands (dev servers, watchers, builds) in the user's Terminal tab, where they can watch and stop them. Short commands stay in Bash.
 - publish_artifact: when a page would be clearer than chat text (a report, dashboard, comparison, mock-up, small tool), write one self-contained .html file and publish it; give the user the link it returns.
-- start_session / message_session: hand a task of its own (a separate fix, a long investigation, work in another folder) to a side session that runs in parallel; its report comes back here. Quick things stay here.`;
+- start_session / message_session: hand a task of its own (a separate fix, a long investigation, work in another folder) to a side session that runs in parallel; its report comes back here. Quick things stay here.
+The chat renders markdown: a link to a file ([report](out/report.html)) opens it rendered in a preview panel (HTML, SVG, PDF, images, Markdown, CSV, code), ![alt](path/to/image.png) shows an image inline, and \`\`\`html / \`\`\`svg / \`\`\`mermaid blocks get a Preview button. Link the files you make.`;
 const TOOL_NAMES = ['browser', 'chrome', 'computer'];
 // a tool call as the chat lists it: a line, plus what changed for file edits
 function toolEntry(name, input = {}) {

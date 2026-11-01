@@ -14,6 +14,7 @@ import { runHandoff } from './handoff.mjs';
 import { createManager } from './manager.mjs';
 import { createTerminals } from './terminals.mjs';
 import { createArtifacts } from './artifacts.mjs';
+import { createPreviews } from './previews.mjs';
 import { openFile } from './openfile.mjs';
 import { createMemoryEditor, observationId } from './memory-edit.mjs';
 import { createSkillEditor } from './skill-edit.mjs';
@@ -301,7 +302,8 @@ const LOCAL_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`]);
 // (served on their own port, so a page can never reach this one's token or API).
 const terminals = createTerminals({ broadcast });
 const ARTIFACT_PORT = Number(process.env.ARTIFACT_PORT || PORT + 10);
-const artifacts = createArtifacts({ dir: path.join(DATA, 'artifacts'), port: ARTIFACT_PORT, broadcast });
+const previews = createPreviews({ port: () => ARTIFACT_PORT, broadcast });
+const artifacts = createArtifacts({ dir: path.join(DATA, 'artifacts'), port: ARTIFACT_PORT, broadcast, extra: previews.handle });
 // a browser of Claude's own (Playwright's MCP server), with sign-ins kept in the data folder
 const browserServer = () => ({ command: 'npx', args: ['-y', '@playwright/mcp@latest', '--user-data-dir', path.join(DATA, 'browser')] });
 // the brain whose chats include this one (a desk tool call names its chat)
@@ -613,6 +615,14 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/terminal/stop') return json(res, 200, terminals.stop(String(body.tab || '')));
   if (url.pathname === '/api/terminal/close') return json(res, 200, terminals.close(String(body.tab || '')));
   // a file Claude linked in the chat, in the user's editor (relative paths are from the open chat's folder)
+  // a file or code block, rendered in the preview panel (relative paths from the open chat's folder)
+  if (url.pathname === '/api/preview') {
+    if (body.content != null) return json(res, 200, previews.ofContent(body.content, body.type));
+    let file = String(body.path || '').trim().replace(/^file:\/\/\/?/i, '').replace(/:\d+(:\d+)?$/, '');
+    try { file = decodeURIComponent(file); } catch { /* as is */ }
+    if (!file) return json(res, 200, { error: 'No file.' });
+    return json(res, 200, previews.ofFile(path.resolve(chat ? chat.chatFolder(chat.currentId()) : HOME, file)));
+  }
   if (url.pathname === '/api/open-file') return json(res, 200, await openFile(body.path, chat ? chat.chatFolder(chat.currentId()) : HOME));
   if (url.pathname === '/api/artifacts/delete') return json(res, 200, artifacts.remove(String(body.id || '')));
   if (url.pathname.startsWith('/api/brains/')) {
@@ -724,7 +734,7 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health'
     || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief' || url.pathname === '/api/org' || url.pathname.startsWith('/api/employee')
-    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file' || url.pathname === '/api/settings') {
+    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file' || url.pathname === '/api/preview' || url.pathname === '/api/settings') {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));
   }
   if (url.pathname === '/api/state') {

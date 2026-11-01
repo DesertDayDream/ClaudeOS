@@ -1,6 +1,7 @@
 // Markdown for chat replies: code fences (language label, Copy), headings, nested and numbered lists
 // that keep their numbers, tables, quotes, rules, and inline code/bold/italics/strike/links.
-// Links to files (anything not http/https/mailto) open in the editor: data-file holds the path.
+// Links to files (anything not http/https/mailto) open in the preview panel: data-file holds the path.
+// html / svg / mermaid code blocks get a Preview button (data-pv); ![alt](src) shows the image.
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 function inline(src) {
@@ -8,6 +9,7 @@ function inline(src) {
   const codes = [];
   let s = String(src).replace(/(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g, (_, __, c) => { codes.push(c.trim()); return `\u0000${codes.length - 1}\u0000`; });
   s = esc(s)
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^)]*&quot;)?\)/g, (_, alt, src) => image(alt, src))
     .replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+&quot;[^)]*&quot;)?\)/g, (_, text, href) => link(text, href))
     .replace(/(^|[\s(])(https?:\/\/[^\s<)]+[^\s<).,;:!?'"])/g, (_, pre, url) => `${pre}<a href="${url}" target="_blank" rel="noopener">${url}</a>`)
     .replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<b>$1</b>')
@@ -17,11 +19,17 @@ function inline(src) {
     .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '<s>$1</s>');
   return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${esc(codes[i])}</code>`);
 }
+// ![alt](src): web images as they are; a file on this PC loads through the preview server (chat.js)
+function image(alt, src) {
+  if (/^https?:/i.test(src)) return `<img class="md-img" src="${src}" alt="${alt}" loading="lazy">`;
+  if (/^(javascript|data|vbscript):/i.test(src)) return alt;
+  return `<img class="md-img" data-local="${src}" alt="${alt}" title="${src}">`;
+}
 function link(text, href) {
   // href and text arrive escaped already
   if (/^(https?:|mailto:)/i.test(href)) return `<a href="${href}" target="_blank" rel="noopener">${text}</a>`;
   if (/^(javascript|data|vbscript):/i.test(href) || href.startsWith('#')) return text;
-  return `<a href="#" class="file" data-file="${href}" title="Open ${href} in your editor">${text}</a>`;
+  return `<a href="#" class="file" data-file="${href}" title="Preview ${href}">${text}</a>`;
 }
 
 const FENCE = /^\s{0,3}(`{3,}|~{3,})\s*([\w+#.-]*)/;
@@ -58,7 +66,8 @@ function blocks(lines) {
       for (i++; i < lines.length && !close.test(lines[i]); i++) body.push(lines[i]);
       i++; // the closing fence (or the end, while it's still streaming)
       const lang = fence[2];
-      html += `<div class="code">${lang ? `<span class="lang">${esc(lang)}</span>` : ''}<button type="button" class="copy" title="Copy">Copy</button><pre><code>${esc(body.join('\n'))}</code></pre></div>`;
+      const pv = /^(html|svg|mermaid)$/i.test(lang) ? `<button type="button" class="copy pv" data-pv="${esc(lang.toLowerCase())}" title="Show it rendered">Preview</button>` : '';
+      html += `<div class="code">${lang ? `<span class="lang">${esc(lang)}</span>` : ''}${pv}<button type="button" class="copy" title="Copy">Copy</button><pre><code>${esc(body.join('\n'))}</code></pre></div>`;
       continue;
     }
     const h = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/);

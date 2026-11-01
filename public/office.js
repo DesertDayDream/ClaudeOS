@@ -3,6 +3,7 @@
 // computer (what they're doing right now, step by step, and the logs of what they did before).
 // app.js owns the selection and calls render(); this module fetches the employee's data and keeps it live.
 import { events } from '/events.js';
+import { preview } from '/preview.js';
 
 const TOKEN = window.CLAUDEOS_TOKEN;
 async function api(path, body) {
@@ -133,6 +134,10 @@ export async function click(e) {
   if (!desk.id) return false;
   const b = e.target.closest('[data-ed-open], [data-ed-abs], [data-ed-job]');
   if (!b) return false;
+  // a file in the cabinet (or its log) shows in the preview panel; folders open in Explorer
+  const sep = desk.data?.cabinet?.includes('\\') ? '\\' : '/';
+  if (b.dataset.edOpen && !b.classList.contains('dir') && desk.data?.cabinet) { preview({ path: desk.data.cabinet + sep + b.dataset.edOpen }); return true; }
+  if (b.dataset.edAbs && /\.\w+$/.test(b.dataset.edAbs)) { preview({ path: b.dataset.edAbs }); return true; }
   if (b.dataset.edOpen !== undefined) { const r = await api('/api/employee/open', { id: desk.id, path: b.dataset.edOpen }); if (r.error) alertErr(r.error); return true; }
   if (b.dataset.edAbs) {
     const rel = desk.data?.cabinet && b.dataset.edAbs.startsWith(desk.data.cabinet) ? b.dataset.edAbs.slice(desk.data.cabinet.length).replace(/^[\\/]/, '') : null;

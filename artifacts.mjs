@@ -10,7 +10,7 @@ import path from 'node:path';
 const MAX_SIZE = 16 * 1024 * 1024;
 const TYPES = { '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.svg': 'image/svg+xml', '.md': 'text/plain; charset=utf-8' };
 
-export function createArtifacts({ dir, port, broadcast }) {
+export function createArtifacts({ dir, port, broadcast, extra = () => false }) {
   const indexFile = path.join(dir, 'index.json');
   let index = {};
   try { index = JSON.parse(fs.readFileSync(indexFile, 'utf8')); } catch { /* none yet */ }
@@ -49,6 +49,7 @@ export function createArtifacts({ dir, port, broadcast }) {
 
   // the artifacts' own server: GET only, nothing but the published pages
   const server = http.createServer((req, res) => {
+    if (extra(req, res)) return; // previews (previews.mjs) share this port
     const m = req.url.match(/^\/a\/([0-9a-f]{10})\/?(?:\?.*)?$/);
     const a = m && index[m[1]];
     if (req.method !== 'GET' || !a) { res.writeHead(404, { 'content-type': 'text/plain' }); return res.end('Not found'); }

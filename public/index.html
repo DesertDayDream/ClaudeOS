@@ -375,7 +375,26 @@
   .msg.assistant .body .code { position: relative; margin: 0 0 8px; }
   .msg.assistant .body .code pre { margin: 0; }
   .msg.assistant .body .code .lang { position: absolute; top: 4px; left: 10px; font-size: 10.5px; color: var(--dim); pointer-events: none; }
-  .msg.assistant .body .code .lang + .copy + pre { padding-top: 20px; }
+  .msg.assistant .body .code .lang + .copy + pre, .msg.assistant .body .code .lang + .pv + .copy + pre { padding-top: 20px; }
+  .code .copy.pv { right: 56px; opacity: 1; color: var(--accent); border-color: rgba(95,212,255,0.4); }
+  .md-img { max-width: 100%; max-height: 320px; border-radius: 8px; border: 1px solid var(--line); display: block; margin: 6px 0; cursor: zoom-in; }
+  .md-img-missing { color: var(--dim); font-style: italic; }
+  #preview { position: fixed; top: 16px; bottom: 16px; right: 412px; width: min(820px, calc(100vw - 444px)); z-index: 6; display: flex; flex-direction: column;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px; backdrop-filter: blur(12px); overflow: hidden; box-shadow: 0 12px 40px rgba(0,0,0,0.45); }
+  #preview[hidden] { display: none; }
+  #preview .pv-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  #preview .pv-head b { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+  #pvBody { flex: 1; overflow: auto; position: relative; }
+  #pvBody iframe { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
+  #pvBody .pv-img { min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box;
+    background: repeating-conic-gradient(rgba(255,255,255,0.04) 0 25%, transparent 0 50%) 0 0 / 20px 20px; }
+  #pvBody .pv-img img, #pvBody .pv-img video { max-width: 100%; max-height: calc(100vh - 120px); }
+  #pvBody .pv-doc { padding: 14px 18px; background: none; border: 0; max-width: none; }
+  #pvBody .pv-text { margin: 0; padding: 12px 14px; font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre; tab-size: 4; }
+  #pvBody .pv-table table { border-collapse: collapse; font-size: 12px; }
+  #pvBody .pv-table th, #pvBody .pv-table td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; white-space: nowrap; }
+  #pvBody .pv-table th { position: sticky; top: 0; background: #1a1f36; }
+  @media (max-width: 900px) { #preview { left: 16px; right: 16px; width: auto; bottom: calc(42% + 24px); } }
   .code .copy { position: absolute; top: 4px; right: 6px; font: 11px inherit; color: var(--dim); background: rgba(20,24,41,0.9); border: 1px solid var(--line); border-radius: 5px; padding: 1px 7px; cursor: pointer; opacity: 0; transition: opacity .15s; }
   .code:hover .copy, .code .copy:focus { opacity: 1; }
   .code .copy.done { color: #7be0a0; opacity: 1; }
@@ -580,6 +599,15 @@
   <div class="tab" id="arts"></div>
   <div id="detail"></div>
 </aside>
+<section id="preview" hidden>
+  <div class="pv-head">
+    <b id="pvName">Preview</b>
+    <button type="button" class="btn mini" data-pv-act="reload" title="Load it again">Reload</button>
+    <button type="button" class="btn mini" data-pv-act="editor" title="Open the file in your editor">Editor</button>
+    <button type="button" class="btn mini" data-pv-act="close" title="Close (Esc)">✕</button>
+  </div>
+  <div id="pvBody"></div>
+</section>
 <div id="tip"></div>
 <div id="conn">connecting…</div>
 <script>window.CLAUDEOS_TOKEN = "__CLAUDEOS_TOKEN__";</script>
