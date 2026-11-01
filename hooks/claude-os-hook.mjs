@@ -36,7 +36,8 @@ function taskStart(session) {
   return 0;
 }
 
-// What the task produced: Claude's last words, how many tools it used, and the files each skill wrote.
+// What the task produced: Claude's last words, how many tools it used, and the files and integrations
+// (MCP servers) each skill used.
 function results(h) {
   const out = { result: '', tools: 0, files: [], bySkill: {} };
   if (!h.transcript_path) return out;
@@ -51,8 +52,10 @@ function results(h) {
       if (b.type === 'text' && b.text.trim()) out.result = b.text;
       if (b.type !== 'tool_use') continue;
       out.tools++;
-      if (b.name === 'Skill') { skill = b.input?.skill || b.input?.command; out.bySkill[skill] ||= { files: [], tools: 0 }; continue; }
+      if (b.name === 'Skill') { skill = b.input?.skill || b.input?.command; out.bySkill[skill] ||= { files: [], tools: 0, mcp: [] }; continue; }
       if (skill) out.bySkill[skill].tools++;
+      const server = b.name.startsWith('mcp__') && b.name.split('__')[1];
+      if (skill && server && !out.bySkill[skill].mcp.includes(server)) out.bySkill[skill].mcp.push(server);
       const f = WRITE_TOOLS.has(b.name) && (b.input?.file_path || b.input?.notebook_path);
       if (!f) continue;
       const r = rel(f);

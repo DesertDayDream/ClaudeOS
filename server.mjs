@@ -13,6 +13,8 @@ import { createChat } from './chat.mjs';
 import { runHandoff } from './handoff.mjs';
 import { createMemoryEditor, observationId } from './memory-edit.mjs';
 import { createSkillEditor } from './skill-edit.mjs';
+import { appsInText, appForServer } from './public/apps.js';
+import { CATALOG, CONNECTORS_URL, addIntegration, removeIntegration, loginIntegration, isSigningIn } from './integrations.mjs';
 import { createRegistry, setupBrain, repairHooks, listFolder, slugFor, samePath, inside } from './brains.mjs';
 import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile } from './runtime.mjs';
 import { startTray } from './tray.mjs';
@@ -128,6 +130,8 @@ function skillsIn(dir, source, owner) {
     const fm = readFrontmatter(file);
     if (!fm) continue;
     const st = statSafe(file);
+    let text = '';
+    try { text = fs.readFileSync(file, 'utf8'); } catch { /* read above, gone now */ }
     out.push({
       id: `${source}:${owner ? owner + ':' : ''}${fm.name || name}`,
       folder: name,
@@ -135,6 +139,7 @@ function skillsIn(dir, source, owner) {
       invokeAs: owner ? `${owner}:${fm.name || name}` : (fm.name || name),
       description: fm.description || '',
       source, owner: owner || null, file,
+      apps: appsInText(text), // integrations its SKILL.md uses or names
       created: st ? Math.round(st.birthtimeMs || st.mtimeMs) : 0,
     });
   }
@@ -207,7 +212,48 @@ function snapshot() {
     linked: brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, path: b.path, busy: handoffs.has(b.id),
       memories: collectBrain(b), skills: skillsIn(path.join(b.path, '.claude', 'skills'), 'project', path.basename(b.path)) })),
     activity: collectActivity(brain), at: Date.now(),
+    integrations: integrations.brainId === brain.id ? integrations.list : [],
   };
+}
+
+// The integrations (MCP servers) Claude has in the active brain, from `claude mcp list`. It starts
+// every server to check it, so it runs in the background now and then, never per page update.
+// ClaudeOS's own servers (memory, claudeos, brain_N) aren't integrations.
+const INTEGRATIONS_TTL = 10 * 60 * 1000;
+let integrations = { brainId: null, at: 0, list: [], running: false };
+function checkIntegrations(brain, force) {
+  if (!brain || integrations.running) return;
+  if (!force && integrations.brainId === brain.id && Date.now() - integrations.at < INTEGRATIONS_TTL) return;
+  integrations.running = true;
+  broadcast('integrations', integrationsView(brain));
+  exec('claude mcp list', { cwd: brain.path, windowsHide: true, timeout: 90000, maxBuffer: 1 << 20 }, (err, out) => {
+    const list = [];
+    for (const line of String(out || '').split(/\r?\n/)) {
+      const at = line.indexOf(': '), dash = line.lastIndexOf(' - ');
+      if (at < 1 || dash < at) continue;
+      const server = line.slice(0, at).trim();
+      if (/^(memory|claudeos|brain_\d+)$/.test(server)) continue;
+      const tail = line.slice(dash + 3);
+      const status = /✔|connected/i.test(tail) && !/fail|not connected/i.test(tail) ? 'connected'
+        : /approv/i.test(tail) ? 'needs approval' : /auth/i.test(tail) ? 'needs sign-in' : 'failed';
+      list.push({ server, key: appForServer(server), status, detail: tail.replace(/^[^\w]+/, '').slice(0, 200) });
+    }
+    const again = integrations.again;
+    integrations = { brainId: brain.id, at: Date.now(), list: err && !list.length ? integrations.list : list, running: false };
+    if (again) setTimeout(() => checkIntegrations(brains.active(), true), 0);
+    refresh();
+    broadcast('integrations', integrationsView(brain));
+  });
+}
+function integrationsView(brain) {
+  const list = integrations.brainId === brain?.id ? integrations.list : [];
+  return { list: list.map(i => ({ ...i, signingIn: isSigningIn(i.server) })), checking: integrations.running,
+    checked: integrations.brainId === brain?.id ? integrations.at : 0, catalog: CATALOG, connectorsUrl: CONNECTORS_URL };
+}
+// the page asks for a fresh check after changing something; a check already running counts
+function recheck(brain) {
+  if (integrations.running) { integrations.again = true; return; }
+  checkIntegrations(brain, true);
 }
 
 // Tasks handed to linked brains that are running now: brain id -> { stop }.
@@ -218,9 +264,10 @@ let last = snapshot();
 let lastKey = keyOf(last);
 const clients = new Set();
 function keyOf(s) {
-  return JSON.stringify([s.brain?.id, s.brains, s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id), s.activity.length && s.activity[s.activity.length - 1]]);
+  return JSON.stringify([s.brain?.id, s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id), s.activity.length && s.activity[s.activity.length - 1]]);
 }
 function refresh() {
+  checkIntegrations(brains.active());
   const next = snapshot();
   const k = keyOf(next);
   if (k === lastKey) return;
@@ -393,6 +440,7 @@ async function handleApi(req, res, url) {
       return json(res, 200, { ...r, editable: !!teamSkill(active, s.id) });
     } catch (err) { return json(res, 200, { error: err.message }); }
   }
+  if (url.pathname === '/api/integrations' && req.method === 'GET') return json(res, 200, integrationsView(active));
   if (url.pathname === '/api/chat' && req.method === 'GET') return json(res, 200, chat ? chat.snapshot() : { messages: [], busy: false, approvals: [] });
   if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
   const body = await readJson(req);
@@ -446,6 +494,24 @@ async function handleApi(req, res, url) {
     try { const r = skillApi(active, url.pathname.split('/').pop(), body); refresh(); return json(res, 200, r); }
     catch (err) { return json(res, 200, { error: err.message }); }
   }
+  if (url.pathname.startsWith('/api/integrations/')) {
+    if (!active) return json(res, 200, { error: 'Set up a brain first.' });
+    const what = url.pathname.split('/').pop();
+    let r;
+    if (what === 'refresh') r = { ok: true };
+    else if (what === 'add') r = await addIntegration(active, body);
+    else if (what === 'remove') r = await removeIntegration(active, String(body.server || ''));
+    else if (what === 'login') {
+      const server = String(body.server || '');
+      if (!/^[\w.: -]{1,80}$/.test(server)) return json(res, 200, { error: 'Unknown integration.' });
+      r = loginIntegration(active, server, done => { broadcast('integration-login', { server, ...done }); recheck(active); });
+      broadcast('integrations', integrationsView(active));
+      return json(res, 200, r);
+    } else return json(res, 404, { error: 'not found' });
+    if (!r.error) recheck(active);
+    broadcast('integrations', integrationsView(active));
+    return json(res, 200, r);
+  }
   if (url.pathname === '/api/chat/new') return json(res, 200, chat.reset());
   if (url.pathname === '/api/chat/wrap') return json(res, 200, chat.wrapUp());
   if (url.pathname === '/api/approval') return json(res, 200, await chat.requestApproval(body));
@@ -456,7 +522,7 @@ async function handleApi(req, res, url) {
 const server = http.createServer((req, res) => {
   if (!LOCAL_HOSTS.has(req.headers.host)) { res.writeHead(421); return res.end('wrong host'); }
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname === '/api/fs' || url.pathname === '/api/health') {
+  if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health') {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));
   }
   if (url.pathname === '/api/state') {

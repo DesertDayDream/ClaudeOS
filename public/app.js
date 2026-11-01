@@ -6,6 +6,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { events } from '/events.js';
+import { APPS, appForServer, normServer } from './apps.js';
 
 const TOKEN = window.CLAUDEOS_TOKEN;
 async function api(path, body) {
@@ -324,6 +325,76 @@ function setBubble(s, text, color) {
   s.material.map.needsUpdate = true;
 }
 
+// ---------- apps an employee is connected to ----------
+// From its SKILL.md (integration tools it calls, or apps it names) and from the integrations
+// (MCP servers) it really used in its runs. Each is matched to the integrations Claude has here.
+const OWN_SERVERS = /^(memory|claudeos|brain_\d+)$/;
+function appsOf(s) {
+  const by = new Map();
+  for (const a of s.apps || []) if (!OWN_SERVERS.test(a.key.replace(/^mcp:/, ''))) by.set(a.key, { key: a.key, why: a.why, runs: 0 });
+  for (const r of work.runs.get(s.id) || []) {
+    for (const server of r.bySkill[r.calledAs[s.id]]?.mcp || []) {
+      if (OWN_SERVERS.test(server)) continue;
+      const key = appForServer(server) || 'mcp:' + server;
+      const a = by.get(key) || { key, why: 'used', runs: 0 };
+      a.runs++;
+      by.set(key, a);
+    }
+  }
+  return [...by.values()].map(a => {
+    const server = a.key.startsWith('mcp:') ? a.key.slice(4) : null;
+    const integ = (state.integrations || []).find(i => server ? normServer(i.server) === normServer(server) : i.key === a.key);
+    const app = APPS[a.key];
+    return { ...a, title: app?.title || integ?.server || server || a.key, hex: app?.hex || '8a8fa8', path: app?.path || null,
+      status: integ ? integ.status : 'not set up', server: integ?.server || server };
+  }).sort((x, y) => (y.status === 'connected') - (x.status === 'connected') || y.runs - x.runs || x.title.localeCompare(y.title));
+}
+function appBadge(a) {
+  const tip = `${a.title} · ${a.runs ? `used in ${a.runs} run${a.runs > 1 ? 's' : ''}` : a.why === 'tools' ? 'its SKILL.md calls it' : 'named in its SKILL.md'} · ${a.status}`;
+  const inner = a.path ? `<svg viewBox="0 0 24 24"><path fill="#${a.hex}" d="${a.path}"/></svg>` : esc(a.title[0].toUpperCase());
+  return `<span class="app ${a.status === 'connected' ? '' : 'off'}" title="${esc(tip)}" style="${a.path ? '' : `background:#${a.hex}`}">${inner}</span>`;
+}
+
+// the same logos as a strip under the employee's sphere
+function appsSprite() {
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = 80;
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false, opacity: 0.9 }));
+  s.scale.set(4.2, 0.66, 1);
+  s.position.y = -1.15;
+  s.userData = { canvas: c, key: null };
+  return s;
+}
+function drawApps(sprite, apps) {
+  const shown = apps.slice(0, 6);
+  const key = shown.map(a => a.key + a.status).join();
+  if (sprite.userData.key === key) return;
+  sprite.userData.key = key;
+  const c = sprite.userData.canvas, g = c.getContext('2d');
+  g.clearRect(0, 0, c.width, c.height);
+  const size = 64, gap = 12, x0 = (c.width - (shown.length * size + (shown.length - 1) * gap)) / 2;
+  shown.forEach((a, i) => {
+    const x = x0 + i * (size + gap), cx = x + size / 2, cy = c.height / 2;
+    g.globalAlpha = a.status === 'connected' ? 1 : 0.55;
+    g.fillStyle = a.path ? '#f4f5fb' : '#' + a.hex;
+    g.beginPath(); g.arc(cx, cy, size / 2, 0, Math.PI * 2); g.fill();
+    if (a.path) {
+      g.save();
+      g.translate(cx - 20, cy - 20); g.scale(40 / 24, 40 / 24);
+      g.fillStyle = '#' + a.hex;
+      g.fill(new Path2D(a.path));
+      g.restore();
+    } else {
+      g.fillStyle = '#fff'; g.font = '700 34px system-ui, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText(a.title[0].toUpperCase(), cx, cy + 2);
+    }
+  });
+  g.globalAlpha = 1;
+  sprite.material.map.needsUpdate = true;
+}
+
 function addEmployee(skill, delay) {
   const color = SOURCE_COLORS[skill.source] ?? SOURCE_COLORS.plugin;
   const root = new THREE.Group();
@@ -348,6 +419,8 @@ function addEmployee(skill, delay) {
   root.add(label);
   const bubble = bubbleSprite();
   root.add(bubble);
+  const appStrip = appsSprite();
+  root.add(appStrip);
   const aura = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color, transparent: true, opacity: 0,
     depthWrite: false, blending: THREE.AdditiveBlending }));
   aura.scale.setScalar(3.4);
@@ -366,7 +439,7 @@ function addEmployee(skill, delay) {
   }
   root.scale.setScalar(0.0001);
   empGroup.add(root);
-  employees.set(skill.id, { root, body, sphere, eyes, label, bubble, color, aura, beam, sparks, data: skill, born: performance.now() + delay,
+  employees.set(skill.id, { root, body, sphere, eyes, label, bubble, appStrip, color, aura, beam, sparks, data: skill, born: performance.now() + delay,
     slot: 0, busyAmt: 0, blinkAt: performance.now() + 1500 + Math.random() * 4000, phase: Math.random() * 6 });
 }
 
@@ -502,6 +575,7 @@ function apply(next) {
   layoutEmployees();
 
   state = { ...next, skills: allSkills };
+  for (const e of employees.values()) drawApps(e.appStrip, appsOf(e.data));
   firstLoad = false;
   if (selectWhenHired && employees.has(selectWhenHired)) { selected = selectWhenHired; selectWhenHired = null; }
   renderPanel();
@@ -519,7 +593,7 @@ function renderPanel() {
 
   const team = document.getElementById('team');
   const groups = ['project', 'personal', 'plugin', 'contractor'];
-  let html = state.brain ? `<button class="btn hire" data-hire title="Write a new SKILL.md in ${esc(state.brain.name)}/.claude/skills">+ Hire an employee</button>` : '';
+  let html = state.brain ? `<div class="team-acts"><button class="btn" data-hire title="Write a new SKILL.md in ${esc(state.brain.name)}/.claude/skills">+ Hire an employee</button><button class="btn" data-apps title="Connect Claude to Gmail, Notion, Blender and more">+ Add an app</button></div>` : '';
   for (const g of groups) {
     const list = state.skills.filter(s => s.source === g)
       .sort((a, b) => (work.busy.has(b.id) - work.busy.has(a.id)) || ((work.load.get(b.id) || 0) - (work.load.get(a.id) || 0)) || a.name.localeCompare(b.name));
@@ -533,7 +607,7 @@ function renderPanel() {
         : lastRun ? `<div class="now ${lastRun.status}">${esc(lastRun.prompt || 'a task')} · ${ago(lastRun.end || lastRun.last)}</div>` : '';
       html += `<div class="emp ${busy ? 'busy' : ''} ${selected === s.id ? 'sel' : ''}" data-id="${esc(s.id)}">
         <div class="dot" style="background:${hex(SOURCE_COLORS[s.source] ?? SOURCE_COLORS.plugin)}"></div>
-        <div class="who">${esc(employeeName(s))}</div>
+        <div class="who">${esc(employeeName(s))}${appsOf(s).slice(0, 5).map(appBadge).join('')}</div>
         <div class="load">${busy ? 'working' : n ? `${n} job${n > 1 ? 's' : ''}` : 'idle'}</div>
         <div class="role">${esc(s.name)}</div>${now}</div>`;
     }
@@ -578,6 +652,7 @@ function renderDetail() {
   if (skillForm.id && skillForm.id !== selected) skillForm = { id: null, mode: 'board', data: null, err: '' };
   if (!selected) { el.classList.remove('on', 'editing'); delete el.dataset.mode; return; }
   if (selected === HIRE) { el.classList.remove('board'); renderSkillForm(el, null); el.classList.add('on'); return; }
+  if (selected === APPS_PANEL) { el.classList.remove('board', 'editing'); renderAppsPanel(el); el.classList.add('on'); return; }
   const emp = employees.get(selected);
   const mem = memories.get(selected);
   const ld = linkedDot(selected);
@@ -612,6 +687,13 @@ function renderBoard(el, s) {
   let html = `<h3>${esc(employeeName(s))} · ${esc(s.name)}</h3>
     <div class="k">${esc(SOURCE_TITLES[s.source] || s.source)}${s.owner ? ' · ' + esc(s.owner) : ''} · ${work.load.get(s.id) || 0} jobs${runs.length ? ` · ${done}/${runs.length} recent runs done` : ''}</div>
     <div class="desc">${esc(s.description)}</div>`;
+  const apps = appsOf(s);
+  if (apps.length) {
+    html += `<div class="runs-h">Apps</div><div class="apps-l">${apps.map(a => `<div class="row">${appBadge(a)}
+      <div><b>${esc(a.title)}</b><span>${a.runs ? `used in ${a.runs} run${a.runs > 1 ? 's' : ''}` : a.why === 'tools' ? 'its SKILL.md calls it' : 'named in its SKILL.md'}</span></div>
+      ${a.status === 'connected' ? `<em class="connected" title="${esc(`integration: ${a.server}`)}">connected</em>`
+        : `<button class="btn mini" data-fixapp="${esc(a.key)}" title="${esc(a.server ? `integration: ${a.server}` : 'No integration for this app in Claude yet')}">${a.status === 'needs sign-in' ? 'Sign in' : a.status === 'not set up' ? 'Add' : 'Fix'}</button>`}</div>`).join('')}</div>`;
+  }
   if (busy) html += `<div class="nowcard"><b>Working on</b>${esc(busy.prompt || 'a task')}<span>started ${ago(busy.start)}</span></div>`;
   html += `<div class="runs-h">Recent runs</div>`;
   if (!runs.length) html += `<div class="empty">No runs yet. When Claude hands ${esc(employeeName(s))} work, each task shows up here with how it went.</div>`;
@@ -732,6 +814,119 @@ document.getElementById('detail').addEventListener('click', async e => {
       if (u.error) return toast(u.error);
       showWhenHired(u.id);
     });
+  }
+});
+
+// ---------- apps (integrations) ----------
+// Add Claude's integrations from the page: pick an app with a known address, turn on a claude.ai
+// connector, or paste any MCP address or command. Remote apps then sign in once in the browser.
+const APPS_PANEL = '__apps__';
+let appsPanel = { data: null, open: null, err: '', busy: false, scope: 'local', drawn: '' };
+
+async function openApps(key) {
+  selected = APPS_PANEL;
+  appsPanel = { ...appsPanel, open: key || null, err: '', busy: false };
+  renderPanel();
+  const r = await api('/api/integrations');
+  if (!r.error) appsPanel.data = r;
+  renderDetail();
+}
+events.addEventListener('integrations', e => {
+  appsPanel.data = JSON.parse(e.data);
+  if (selected === APPS_PANEL) renderDetail();
+});
+events.addEventListener('integration-login', e => {
+  const r = JSON.parse(e.data);
+  toast(r.ok ? `Signed in: ${r.server}` : `Sign-in didn't finish for ${r.server}`, null, null, r.ok ? 'Its employees can use it from your next message.' : r.text);
+});
+
+const appMeta = (key, fallback) => APPS[key] ? { title: APPS[key].title, hex: APPS[key].hex, path: APPS[key].path } : { title: fallback || key, hex: '8a8fa8', path: null };
+function logo(key, fallback, off) {
+  return appBadge({ ...appMeta(key, fallback), key, status: off ? 'off' : 'connected', runs: 0, why: '' }).replace(/title="[^"]*"/, '');
+}
+
+function renderAppsPanel(el) {
+  const d = appsPanel.data;
+  // live updates re-render the panel; keep a half-filled form as it is
+  const sig = JSON.stringify([d?.list, d?.checking, appsPanel.open, appsPanel.err, appsPanel.busy, appsPanel.scope]);
+  if (el.dataset.mode === 'apps' && appsPanel.drawn === sig) return;
+  const typing = el.querySelector('#apName, #apTarget, #apExtra');
+  const keep = typing && { name: el.querySelector('#apName')?.value, target: el.querySelector('#apTarget')?.value, extra: el.querySelector('#apExtra')?.value };
+  appsPanel.drawn = sig;
+  el.dataset.mode = 'apps';
+  delete el.dataset.for;
+  if (!d) { el.innerHTML = '<h3>Apps</h3><div class="empty">Loading…</div>'; return; }
+  const have = new Set(d.list.map(i => i.key).filter(Boolean));
+  let html = `<h3>Apps</h3><div class="k">What Claude can reach from ${esc(state.brain?.name || 'this brain')}. Employees use these through their skills.
+    <button class="btn mini" data-ap="refresh" ${d.checking ? 'disabled' : ''}>${d.checking ? 'Checking…' : 'Refresh'}</button></div>`;
+  html += `<div class="runs-h">Connected to Claude · ${d.list.length}</div><div class="apps-l">`;
+  if (!d.list.length) html += `<div class="empty">${d.checking ? 'Checking your integrations…' : 'None yet. Add one below.'}</div>`;
+  for (const i of d.list) {
+    const m = appMeta(i.key, i.server);
+    const fixed = /^(claude\.ai |plugin:)/.test(i.server);
+    const act = i.signingIn ? `<em>signing in…</em>`
+      : i.status === 'needs sign-in' ? `<button class="btn mini primary" data-ap="login" data-server="${esc(i.server)}">Sign in</button>` : '';
+    html += `<div class="row">${logo(i.key, i.server, i.status !== 'connected')}
+      <div><b>${esc(m.title)}</b><span title="${esc(i.detail)}">${esc(i.server)}${i.status === 'connected' ? '' : ' · ' + esc(i.detail)}</span></div>
+      <div class="acts"><em class="${i.status.split(' ')[0]}">${esc(i.status)}</em>${act}${fixed ? '' : `<button class="btn mini danger" data-ap="remove" data-server="${esc(i.server)}" title="Remove from Claude Code">×</button>`}</div></div>`;
+  }
+  html += `</div><div class="runs-h">Add an app</div><div class="ap-grid">`;
+  for (const c of d.catalog.filter(c => !have.has(c.key))) {
+    const m = appMeta(c.key);
+    html += `<button class="ap-tile ${appsPanel.open === c.key ? 'on' : ''}" data-ap="open" data-key="${esc(c.key)}">${logo(c.key)}<span>${esc(m.title)}</span></button>`;
+  }
+  html += `<button class="ap-tile ${appsPanel.open === 'custom' ? 'on' : ''}" data-ap="open" data-key="custom"><span class="app" style="background:#5b6080">+</span><span>Other app</span></button></div>`;
+  const c = d.catalog.find(x => x.key === appsPanel.open);
+  const scope = `<select id="apScope" title="Where Claude can use it"><option value="local" ${appsPanel.scope === 'local' ? 'selected' : ''}>This brain only</option><option value="user" ${appsPanel.scope === 'user' ? 'selected' : ''}>All my projects</option></select>`;
+  const err = `<span class="msg-err">${esc(appsPanel.err)}</span>`;
+  if (c?.how === 'connector') {
+    html += `<div class="ap-box"><b>${esc(appMeta(c.key).title)}</b> connects through your claude.ai account. Turn it on there, sign in, then press Refresh here. It shows up in every brain.
+      <div class="bar">${err}<a class="btn primary" href="${esc(d.connectorsUrl)}" target="_blank" rel="noopener">Open claude.ai connectors</a></div></div>`;
+  } else if (c) {
+    html += `<div class="ap-box"><b>${esc(appMeta(c.key).title)}</b> · ${c.how === 'stdio' ? `runs <code>${esc(c.command.join(' '))}</code> on this PC.` : `adds <code>${esc(c.url)}</code>. Your browser opens once so you can sign in.`}
+      ${c.note ? `<div class="note">${esc(c.note)}</div>` : ''}
+      <div class="bar">${err}${scope}<button class="btn primary" data-ap="add" ${appsPanel.busy ? 'disabled' : ''}>${appsPanel.busy ? 'Adding…' : 'Add'}</button></div></div>`;
+  } else if (appsPanel.open === 'custom') {
+    html += `<div class="ap-box"><b>Any other app</b> with an MCP server. Its website or GitHub page gives the address or command.
+      <label for="apName">Name</label><input class="f" id="apName" placeholder="unreal" spellcheck="false">
+      <label for="apTarget">Address or command</label><input class="f" id="apTarget" placeholder="https://… or npx -y some-mcp-server" spellcheck="false">
+      <label for="apExtra">Keys <small>optional, one per line: API_KEY=… for a command, Authorization: Bearer … for an address</small></label>
+      <textarea class="desc-f" id="apExtra" spellcheck="false"></textarea>
+      <div class="bar">${err}${scope}<button class="btn primary" data-ap="add" ${appsPanel.busy ? 'disabled' : ''}>${appsPanel.busy ? 'Adding…' : 'Add'}</button></div></div>`;
+  }
+  el.innerHTML = html;
+  if (keep) for (const [id, v] of [['#apName', keep.name], ['#apTarget', keep.target], ['#apExtra', keep.extra]]) if (el.querySelector(id) && v != null) el.querySelector(id).value = v;
+}
+
+document.getElementById('detail').addEventListener('change', e => { if (e.target.id === 'apScope') appsPanel.scope = e.target.value; });
+document.getElementById('detail').addEventListener('click', async e => {
+  const fix = e.target.closest('[data-fixapp]');
+  if (fix) return openApps(fix.dataset.fixapp.startsWith('mcp:') ? 'custom' : fix.dataset.fixapp);
+  const btn = e.target.closest('[data-ap]');
+  if (!btn || selected !== APPS_PANEL) return;
+  const act = btn.dataset.ap;
+  const redraw = () => { appsPanel.drawn = ''; renderDetail(); };
+  if (act === 'open') { appsPanel.open = appsPanel.open === btn.dataset.key ? null : btn.dataset.key; appsPanel.err = ''; return redraw(); }
+  if (act === 'refresh') return api('/api/integrations/refresh', {});
+  if (act === 'login') { const r = await api('/api/integrations/login', { server: btn.dataset.server }); if (r.error) toast(r.error); return; }
+  if (act === 'remove') {
+    if (!confirm(`Remove ${btn.dataset.server} from Claude Code? Employees that use it stop reaching it.`)) return;
+    const r = await api('/api/integrations/remove', { server: btn.dataset.server });
+    return r.error ? toast(r.error) : toast(`Removed: ${btn.dataset.server}`);
+  }
+  if (act === 'add') {
+    const c = appsPanel.data.catalog.find(x => x.key === appsPanel.open);
+    const body = c ? { key: c.key, scope: appsPanel.scope }
+      : { name: document.getElementById('apName').value, target: document.getElementById('apTarget').value, extra: document.getElementById('apExtra').value, scope: appsPanel.scope };
+    appsPanel.busy = true; appsPanel.err = ''; redraw();
+    const r = await api('/api/integrations/add', body);
+    appsPanel.busy = false;
+    if (r.error) { appsPanel.err = r.error; return redraw(); }
+    appsPanel.open = null;
+    redraw();
+    toast(`Added: ${r.name}`, null, null, c && c.how !== 'stdio' ? 'Your browser opens so you can sign in.' : 'Checking that it connects…');
+    // a remote app signs in right away, so it's ready for the next message
+    if (c && c.how !== 'stdio') api('/api/integrations/login', { server: r.name });
   }
 });
 
@@ -881,6 +1076,7 @@ document.querySelector('aside header').addEventListener('click', e => {
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.id === b.dataset.tab);
 });
 document.getElementById('team').addEventListener('click', async e => {
+  if (e.target.closest('[data-apps]')) return openApps();
   if (e.target.closest('[data-hire]')) {
     skillForm = { id: null, mode: 'hire', data: null, err: '' };
     selected = HIRE;
