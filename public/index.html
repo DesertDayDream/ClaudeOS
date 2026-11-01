@@ -89,6 +89,14 @@
   #detail textarea { width: 100%; flex: 1; min-height: 140px; resize: vertical; background: rgba(0,0,0,0.3); border: 1px solid var(--line);
     border-radius: 9px; color: var(--text); font: 12px/1.5 ui-monospace, Consolas, monospace; padding: 8px 10px; outline: none; }
   #detail textarea:focus { border-color: rgba(201,167,255,0.6); }
+  #detail label { display: block; color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; margin: 10px 0 4px; }
+  #detail label small { text-transform: none; letter-spacing: 0; font-size: 11px; opacity: 0.8; }
+  #detail input.f { width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--line); border-radius: 9px;
+    color: var(--text); font: 12px ui-monospace, Consolas, monospace; padding: 7px 10px; outline: none; }
+  #detail input.f:focus { border-color: rgba(201,167,255,0.6); }
+  #detail textarea.desc-f { flex: 0 0 auto; min-height: 54px; font-family: inherit; }
+  #detail textarea[readonly] { opacity: 0.8; }
+  .hire { margin: 10px 8px 2px; width: calc(100% - 16px); }
   .btn.danger { border-color: rgba(255,138,138,0.45); color: #ffb0b0; }
   .btn.danger.primary { background: #e0645f; border-color: #e0645f; color: #1b0a0a; }
   #memory.on { display: flex; flex-direction: column; padding: 0; }

@@ -503,6 +503,7 @@ function apply(next) {
 
   state = { ...next, skills: allSkills };
   firstLoad = false;
+  if (selectWhenHired && employees.has(selectWhenHired)) { selected = selectWhenHired; selectWhenHired = null; }
   renderPanel();
 }
 
@@ -518,7 +519,7 @@ function renderPanel() {
 
   const team = document.getElementById('team');
   const groups = ['project', 'personal', 'plugin', 'contractor'];
-  let html = '';
+  let html = state.brain ? `<button class="btn hire" data-hire title="Write a new SKILL.md in ${esc(state.brain.name)}/.claude/skills">+ Hire an employee</button>` : '';
   for (const g of groups) {
     const list = state.skills.filter(s => s.source === g)
       .sort((a, b) => (work.busy.has(b.id) - work.busy.has(a.id)) || ((work.load.get(b.id) || 0) - (work.load.get(a.id) || 0)) || a.name.localeCompare(b.name));
@@ -549,7 +550,7 @@ function renderPanel() {
     }
   }
   renderMemList();
-  if (!state.skills.length && !state.linked?.length) html = '<div class="empty">No SKILL.md files found yet. Every skill you create appears here as a new employee.</div>';
+  if (!state.skills.length && !state.linked?.length) html += '<div class="empty">No SKILL.md files found yet. Hire someone above, or ask Claude to write a skill. Every skill appears here as a new employee.</div>';
   team.innerHTML = html;
 
   const feed = document.getElementById('feed');
@@ -573,7 +574,10 @@ function renderPanel() {
 
 function renderDetail() {
   const el = document.getElementById('detail');
-  if (!selected) { el.classList.remove('on'); return; }
+  // choosing something else closes the skill form
+  if (skillForm.id && skillForm.id !== selected) skillForm = { id: null, mode: 'board', data: null, err: '' };
+  if (!selected) { el.classList.remove('on', 'editing'); delete el.dataset.mode; return; }
+  if (selected === HIRE) { el.classList.remove('board'); renderSkillForm(el, null); el.classList.add('on'); return; }
   const emp = employees.get(selected);
   const mem = memories.get(selected);
   const ld = linkedDot(selected);
@@ -583,6 +587,9 @@ function renderDetail() {
     delete el.dataset.mode;
     el.innerHTML = `<h3>${esc(m.name)}</h3><div class="k">shared brain of ${esc(brain.name)} · linked, read-only here</div>
       <div class="full">${esc(m.description)}</div><div class="file">Switch to ${esc(brain.name)} to edit it.</div>`;
+  } else if (emp && skillForm.id === selected && skillForm.mode !== 'board') {
+    el.classList.remove('board');
+    renderSkillForm(el, emp.data);
   } else if (emp) {
     renderBoard(el, emp.data);
     el.classList.remove('editing');
@@ -590,7 +597,7 @@ function renderDetail() {
   } else if (mem) {
     el.classList.remove('board');
     renderMemoryDetail(el, mem.data);
-  } else { selected = null; el.classList.remove('on'); return; }
+  } else { selected = null; el.classList.remove('on', 'editing'); delete el.dataset.mode; return; }
   el.classList.add('on');
 }
 
@@ -620,8 +627,118 @@ function renderBoard(el, s) {
       ${others.length ? `<div class="with">with ${esc(others.join(', '))}</div>` : ''}
     </div>`;
   }
+  if (s.source !== 'contractor') {
+    const editable = s.source === 'project' && s.owner === brainFolder();
+    html += `<div class="bar"><span class="msg-err"></span>${editable
+      ? `<button class="btn danger" data-skill="ask">Fire</button><button class="btn" data-skill="edit">Edit SKILL.md</button>`
+      : `<button class="btn" data-skill="view">View SKILL.md</button>`}</div>`;
+  }
   el.innerHTML = html;
   el.classList.add('board');
+}
+
+// ---------- skill editor ----------
+// Hire (a new SKILL.md in this brain's .claude/skills), edit or fire an employee without asking Claude.
+// Personal and plugin skills open read-only: they belong to every project, not this brain.
+const HIRE = '__hire__';
+let skillForm = { id: null, mode: 'board', data: null, err: '' };
+let selectWhenHired = null; // the new employee's id, until its sphere arrives
+const brainFolder = () => state.brain?.path.split(/[\\/]/).filter(Boolean).pop();
+const HIRE_BODY = `# What this employee does
+
+1. **Read first.** What to look at before starting (files, the shared brain).
+2. **Do the work.** The steps, in order.
+3. **Hand it back.** Where the result goes and what to say when done.
+`;
+
+async function openSkill(id, mode) {
+  skillForm = { id, mode, data: null, err: '' };
+  renderDetail();
+  const r = await api(`/api/skill?id=${encodeURIComponent(id)}`);
+  if (skillForm.id !== id) return;
+  if (r.error) { skillForm.mode = 'board'; renderDetail(); return toast(r.error); }
+  skillForm.data = r;
+  if (!r.editable) skillForm.mode = 'view';
+  renderDetail();
+}
+
+function renderSkillForm(el, s) {
+  const key = s ? s.id : HIRE;
+  const mode = s ? skillForm.mode : 'hire';
+  // live updates re-render the panel; keep what is being typed
+  if ((mode === 'edit' || mode === 'hire') && el.dataset.mode === mode && el.dataset.for === key && el.querySelector('#skBody')) return;
+  el.dataset.for = key;
+  el.dataset.mode = mode;
+  el.classList.add('editing');
+  if (s && !skillForm.data) { el.innerHTML = `<h3>${esc(employeeName(s))} · ${esc(s.name)}</h3><div class="empty">Opening SKILL.md…</div>`; return; }
+  const err = `<span class="msg-err">${esc(skillForm.err)}</span>`;
+  const d = s ? skillForm.data : { name: '', description: '', body: HIRE_BODY };
+  const ro = mode === 'view' || mode === 'confirm' ? 'readonly' : '';
+  const head = !s
+    ? `<h3>Hire an employee</h3><div class="k">Writes a new skill into ${esc(state.brain?.name || 'this brain')}/.claude/skills. Claude can hand it work from your next message.</div>`
+    : `<h3>${esc(employeeName(s))} · ${esc(s.name)}</h3><div class="k">${mode !== 'view' ? 'Claude picks this employee by its description, then follows the instructions.'
+      : s.source === 'project' ? `Only ${esc(state.brain?.name || 'this brain')}'s own team can be edited here.`
+      : `${esc(SOURCE_TITLES[s.source] || s.source)} are shared by every project, so they're read-only here.`}</div>`;
+  const bar = mode === 'confirm'
+    ? `<span class="ask">Fire ${esc(employeeName(s))}? Claude stops using this skill. You can undo right after.</span><button class="btn" data-skill="board">Cancel</button><button class="btn danger primary" data-skill="fire">Fire</button>`
+    : mode === 'view' ? `${err}<button class="btn" data-skill="board">Back</button>`
+    : `${err}<button class="btn" data-skill="board">Cancel</button><button class="btn primary" data-skill="save">${s ? 'Save' : 'Hire'}</button>`;
+  el.innerHTML = `${head}
+    <label for="skName">Skill name <small>lowercase-with-dashes</small></label>
+    <input class="f" id="skName" spellcheck="false" placeholder="proof-reader" ${ro}>
+    <label for="skDesc">Description <small>what it does, and when Claude should use it</small></label>
+    <textarea class="desc-f" id="skDesc" placeholder="Check a script for typos and awkward lines. Use when the user asks to proof-read or polish text." ${ro}></textarea>
+    <label for="skBody">Instructions <small>Markdown, the steps it follows</small></label>
+    <textarea id="skBody" spellcheck="false" ${ro}></textarea>
+    ${d.file ? `<div class="file">${esc(d.file)}</div>` : ''}
+    <div class="bar">${bar}</div>`;
+  el.querySelector('#skName').value = d.name;
+  el.querySelector('#skDesc').value = d.description;
+  el.querySelector('#skBody').value = d.body;
+  if (!ro) el.querySelector(s ? '#skBody' : '#skName').focus();
+}
+
+document.getElementById('detail').addEventListener('click', async e => {
+  const btn = e.target.closest('[data-skill]');
+  if (!btn) return;
+  const act = btn.dataset.skill;
+  const id = selected === HIRE ? null : selected;
+  if (act === 'edit' || act === 'view') return openSkill(id, act);
+  if (act === 'ask') return openSkill(id, 'confirm');
+  if (act === 'board') {
+    skillForm = { id: null, mode: 'board', data: null, err: '' };
+    if (selected === HIRE) selected = null;
+    return renderPanel();
+  }
+  btn.disabled = true;
+  const showErr = msg => { skillForm.err = msg; btn.disabled = false; document.querySelector('#detail .msg-err').textContent = msg; };
+  if (act === 'save') {
+    const r = await api('/api/skills/save', { id, name: document.getElementById('skName').value,
+      description: document.getElementById('skDesc').value, body: document.getElementById('skBody').value });
+    if (r.error) return showErr(r.error);
+    skillForm = { id: null, mode: 'board', data: null, err: '' };
+    toast(id ? `Saved: ${r.name}` : `Hired: ${r.name}`, null, null, `.claude/skills/${r.folder}/SKILL.md`);
+    showWhenHired(r.id);
+  }
+  if (act === 'fire') {
+    const who = employeeName(employees.get(id).data);
+    const r = await api('/api/skills/fire', { id });
+    if (r.error) return showErr(r.error);
+    skillForm = { id: null, mode: 'board', data: null, err: '' };
+    selected = null;
+    renderPanel();
+    toast(`Fired: ${who} (${r.name})`, 'Undo', async () => {
+      const u = await api('/api/skills/restore', { trashId: r.trashId });
+      if (u.error) return toast(u.error);
+      showWhenHired(u.id);
+    });
+  }
+});
+
+// a new or renamed employee's sphere comes with the next live update; select it once it's there
+function showWhenHired(id) {
+  if (employees.has(id)) { selected = id; selectWhenHired = null; } else { selected = null; selectWhenHired = id; }
+  renderPanel();
 }
 document.getElementById('detail').addEventListener('click', e => {
   const run = e.target.closest('.run');
@@ -764,6 +881,11 @@ document.querySelector('aside header').addEventListener('click', e => {
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.id === b.dataset.tab);
 });
 document.getElementById('team').addEventListener('click', async e => {
+  if (e.target.closest('[data-hire]')) {
+    skillForm = { id: null, mode: 'hire', data: null, err: '' };
+    selected = HIRE;
+    return renderPanel();
+  }
   const copy = e.target.closest('[data-copy]');
   if (copy) {
     copy.disabled = true;

@@ -12,6 +12,7 @@ import { exec, spawn } from 'node:child_process';
 import { createChat } from './chat.mjs';
 import { runHandoff } from './handoff.mjs';
 import { createMemoryEditor, observationId } from './memory-edit.mjs';
+import { createSkillEditor } from './skill-edit.mjs';
 import { createRegistry, setupBrain, repairHooks, listFolder, slugFor, samePath, inside } from './brains.mjs';
 import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile } from './runtime.mjs';
 import { startTray } from './tray.mjs';
@@ -39,7 +40,9 @@ function readFrontmatter(file) {
     for (const line of m[1].split(/\r?\n/)) {
       const kv = line.match(/^\s*([\w-]+):\s*(.*)$/);
       if (!kv || kv[2] === '') continue;
-      fm[kv[1]] = kv[2].replace(/^["']|["']$/g, '');
+      let v = kv[2];
+      if (v.startsWith('"')) { try { v = JSON.parse(v); } catch { /* not JSON-style quoting */ } }
+      fm[kv[1]] = String(v).replace(/^["']|["']$/g, '');
     }
   }
   return fm;
@@ -131,7 +134,7 @@ function skillsIn(dir, source, owner) {
       name: fm.name || name,
       invokeAs: owner ? `${owner}:${fm.name || name}` : (fm.name || name),
       description: fm.description || '',
-      source, owner: owner || null,
+      source, owner: owner || null, file,
       created: st ? Math.round(st.birthtimeMs || st.mtimeMs) : 0,
     });
   }
@@ -184,10 +187,11 @@ function nameSkills(skills) {
     used.add(name);
     changed = true;
   }
-  if (changed) {
-    try { fs.mkdirSync(path.dirname(NAMES_FILE), { recursive: true }); fs.writeFileSync(NAMES_FILE, JSON.stringify(names, null, 2)); } catch { /* names still work this session */ }
-  }
+  if (changed) saveNames();
   return names;
+}
+function saveNames() {
+  try { fs.mkdirSync(path.dirname(NAMES_FILE), { recursive: true }); fs.writeFileSync(NAMES_FILE, JSON.stringify(names, null, 2)); } catch { /* names still work this session */ }
 }
 
 function snapshot() {
@@ -317,6 +321,31 @@ function copySkill(active, { from, skill }) {
   return { ok: true, folder: s.folder };
 }
 
+// The active brain's own team is editable from the page; personal and plugin skills are read-only.
+const skillEditor = createSkillEditor({ dataDir: DATA });
+const teamDir = brain => path.join(brain.path, '.claude', 'skills');
+const teamSkill = (brain, id) => skillsIn(teamDir(brain), 'project', path.basename(brain.path)).find(s => s.id === id);
+function skillApi(active, route, body) {
+  const team = teamDir(active), owner = path.basename(active.path);
+  const idOf = name => `project:${owner}:${name}`;
+  if (route === 'restore') { const r = skillEditor.restore(String(body.trashId || '')); return r.error ? r : { ...r, id: idOf(r.name) }; }
+  const s = body.id ? teamSkill(active, body.id) : null;
+  if (body.id && !s) return { error: 'That employee is gone, or isn’t on this brain’s team.' };
+  if (route === 'save') {
+    const r = skillEditor.save(team, s?.folder || null, body);
+    if (r.error) return r;
+    // a rename keeps the employee's first name
+    if (s && r.name !== s.name && names[s.id] && !names[idOf(r.name)]) { names[idOf(r.name)] = names[s.id]; delete names[s.id]; saveNames(); }
+    return { ...r, id: idOf(r.name) };
+  }
+  if (route === 'fire') {
+    if (!s) return { error: 'Pick an employee first.' };
+    if (anyBusy()) return { error: 'Claude is still answering. Wait for it, or press Stop, before firing anyone.' };
+    return skillEditor.fire(team, s.folder);
+  }
+  return { error: 'not found' };
+}
+
 // Is Claude Code installed? The setup screen warns new users if it isn't.
 let healthCache = null;
 function health() {
@@ -355,6 +384,14 @@ async function handleApi(req, res, url) {
     const m = active && memoryById(active, url.searchParams.get('id'));
     if (!m) return json(res, 200, { error: 'That memory is gone.' });
     try { return json(res, 200, memoryEditor.read(active, m)); } catch (err) { return json(res, 200, { error: err.message }); }
+  }
+  if (url.pathname === '/api/skill' && req.method === 'GET') {
+    const s = active && collectSkills(active).find(x => x.id === url.searchParams.get('id'));
+    if (!s) return json(res, 200, { error: 'That employee is gone.' });
+    try {
+      const r = skillEditor.read(path.dirname(path.dirname(s.file)), s.folder);
+      return json(res, 200, { ...r, editable: !!teamSkill(active, s.id) });
+    } catch (err) { return json(res, 200, { error: err.message }); }
   }
   if (url.pathname === '/api/chat' && req.method === 'GET') return json(res, 200, chat ? chat.snapshot() : { messages: [], busy: false, approvals: [] });
   if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
@@ -405,6 +442,10 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/chat/stop') { chat.stop(); for (const h of handoffs.values()) h.stop(); return json(res, 200, { ok: true }); }
   if (url.pathname === '/api/handoff') return json(res, 200, await handoff(active, body, req));
   if (url.pathname === '/api/skills/copy') return json(res, 200, copySkill(active, body));
+  if (/^\/api\/skills\/(save|fire|restore)$/.test(url.pathname)) {
+    try { const r = skillApi(active, url.pathname.split('/').pop(), body); refresh(); return json(res, 200, r); }
+    catch (err) { return json(res, 200, { error: err.message }); }
+  }
   if (url.pathname === '/api/chat/new') return json(res, 200, chat.reset());
   if (url.pathname === '/api/chat/wrap') return json(res, 200, chat.wrapUp());
   if (url.pathname === '/api/approval') return json(res, 200, await chat.requestApproval(body));
@@ -415,7 +456,7 @@ async function handleApi(req, res, url) {
 const server = http.createServer((req, res) => {
   if (!LOCAL_HOSTS.has(req.headers.host)) { res.writeHead(421); return res.end('wrong host'); }
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname === '/api/skills/copy' || url.pathname === '/api/fs' || url.pathname === '/api/health') {
+  if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname === '/api/fs' || url.pathname === '/api/health') {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));
   }
   if (url.pathname === '/api/state') {

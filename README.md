@@ -6,6 +6,7 @@ Give Claude a brain you can see.
 - **The Memory tab** lists every memory and searches them; matching dots stay lit. Click a dot or a row to read the whole memory, edit it, or delete it (you can undo, and deleted memories are kept in `~/.claudeos/trash.jsonl`).
 - **The spheres** are employees: one per skill (`SKILL.md`). Each gets a name for good. Write a new skill and a new hire appears.
 - **The Team tab** is a task board: each employee shows what it's working on (also floating over its head) or how its last run went. Click one to see its recent runs: the task, whether it finished, was stopped or failed, how long it took, Claude's answer and the files that employee wrote.
+- **Hire, edit and fire** without asking Claude: *+ Hire an employee* at the top of the Team tab writes a new `SKILL.md` (a name, a description Claude uses to pick it, and its instructions). Click an employee for *Edit SKILL.md* or *Fire*; a fired employee's folder goes to `~/.claudeos/trash/skills` and *Undo* brings it back with the same name. Only the brain's own team can be changed here; your personal and plugin skills open read-only.
 - **Token use:** under the chat, a meter shows how many tokens each message resends and whether the cache is still warm; each reply shows what it read and wrote. **Wrap up** saves what matters to the brain and starts a fresh chat that gets a short handover, and ClaudeOS suggests it when a chat gets big or the cache has expired.
 - **The chat** sends your requests to Claude inside the brain's folder. You watch the employees it hands work to light up and move toward the brain. Anything that needs your OK shows up as an Allow / Deny card.
 - **Linked brains:** from the brain menu, choose *Link brains…* to let this brain use another one. Claude here can read the linked brain's memory (never change it) and hand its team tasks, which run in that brain and send back the answer. Its skills show in the Team tab with a *Copy* button. Linked brains float beside the cloud.
@@ -32,7 +33,7 @@ It installs itself the first time, starts a small local server, and opens http:/
 
 The first time, ClaudeOS asks you to set up your first brain. Give it a name (or keep the suggested **Brain**), choose where the folder goes (your Desktop by default), and pick how it starts:
 
-- **Empty:** a blank cloud with no team of its own. Ask Claude to write skills to hire employees.
+- **Empty:** a blank cloud with no team of its own. Hire employees from the Team tab, or ask Claude to write skills.
 - **Creative team:** six skills for short videos (reel, pixel, quill, radar, relay, pulse) and starter brand rules.
 
 Or choose **Use a folder I already have** to turn an existing project into a brain.
