@@ -4,7 +4,8 @@ Give Claude a brain you can see.
 
 - **The cloud** is Claude's memory. A new brain starts as an empty cloud; every memory Claude saves appears as a glowing dot.
 - **The Memory tab** lists every memory and searches them; matching dots stay lit. Click a dot or a row to read the whole memory, edit it, or delete it (you can undo, and deleted memories are kept in `~/.claudeos/trash.jsonl`).
-- **The spheres** are employees: one per skill (`SKILL.md`). Each gets a name for good. Write a new skill and a new hire appears.
+- **The spheres** are employees: one per skill (`SKILL.md`). Each gets a name for good and sits at its own desk. Idle, it leans back and looks at you over its monitor; working, it leans in and its screen scrolls. Write a new skill and a new hire appears.
+- **The Manager and the Inbox:** the gold Manager at the front desk runs a shared inbox. In the Inbox tab, type requests or drop files (they go into the brain's `inbox/` folder), then press *Brief & assign*. The Manager reads everything waiting, writes one brief and splits it between the brain's employees. Each part runs as its own Claude run, up to 3 at the same time, and a part that needs another's output waits for it and gets its report. The Inbox tab shows the brief, who's on what, each employee's report and what it cost. An employee that needs your OK asks in the Chat tab, which gets a dot. Every parallel part starts its own fresh context, so splitting costs more usage than one run; the Manager only splits work that is really independent.
 - **The Team tab** is a task board: each employee shows what it's working on (also floating over its head) or how its last run went. Click one to see its recent runs: the task, whether it finished, was stopped or failed, how long it took, Claude's answer and the files that employee wrote.
 - **App logos** show which apps each employee works with, in the Team tab, on its board and under its sphere: integrations its `SKILL.md` calls (like `mcp__claude_ai_Gmail__…`), apps it names ("Google Drive"), and integrations it really used in its runs. A bright logo is connected in Claude; a faded one isn't set up, failed or needs approval (the board says which). ClaudeOS checks your integrations with `claude mcp list` every 10 minutes.
 - **Add an app** (Team tab) connects Claude to more apps without the terminal. Pick a logo: Notion, Linear, Asana, HubSpot, Stripe and Sentry are added for you and your browser opens once to sign in; Blender runs a local server (needs uv and the Blender MCP add-on); Gmail, Google Drive, Calendar, Canva and Slack are claude.ai connectors you turn on at claude.ai. *Other app* takes any MCP address or command. Choose *This brain only* or *All my projects*. The same panel shows what's connected, with *Sign in* and remove buttons. It runs `claude mcp add`, `login` and `remove` for you.
@@ -54,7 +55,7 @@ ClaudeOS only ever adds what a folder is missing. It never overwrites or deletes
 
 ## Where your data lives
 
-The app folder holds only code, so you can move it, update it or zip it and give it to someone. Your own data is in `~/.claudeos` (`C:\Users\<you>\.claudeos` on Windows): the list of brains, chat history, employee names and the activity log. Set `CLAUDEOS_HOME` to keep it somewhere else.
+The app folder holds only code, so you can move it, update it or zip it and give it to someone. Your own data is in `~/.claudeos` (`C:\Users\<you>\.claudeos` on Windows): the list of brains, chat history, each brain's inbox and briefs (`manager/`), employee names and the activity log. Set `CLAUDEOS_HOME` to keep it somewhere else.
 
 ## Privacy and safety
 

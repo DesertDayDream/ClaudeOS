@@ -254,6 +254,77 @@ const pupilGeo = new THREE.SphereGeometry(0.06, 12, 12);
 const eyeMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.25 });
 const pupilMat = new THREE.MeshBasicMaterial({ color: 0x11131c });
 
+// ---------- each employee's workstation: desk, chair, keyboard and a monitor facing them ----------
+// Built in the station's own frame: +z points from the employee to the brain.
+const deskMat = new THREE.MeshStandardMaterial({ color: 0x3a3f58, roughness: 0.6, metalness: 0.15 });
+const metalMat = new THREE.MeshStandardMaterial({ color: 0x1c2030, roughness: 0.4, metalness: 0.6 });
+const chairMat = new THREE.MeshStandardMaterial({ color: 0x262a3c, roughness: 0.8 });
+const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+const STATION = {
+  top: box(2.1, 0.08, 0.95), leg: box(0.07, 0.95, 0.07), kb: box(0.8, 0.04, 0.26),
+  bezel: box(1.12, 0.74, 0.06), neck: box(0.08, 0.42, 0.08), foot: box(0.42, 0.03, 0.26),
+  seat: box(0.85, 0.09, 0.75), back: box(0.85, 0.55, 0.08), post: box(0.08, 0.5, 0.08),
+  screen: new THREE.PlaneGeometry(1.02, 0.64),
+};
+function stationMesh(geo, mat, x, y, z, parent) {
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y, z);
+  parent.add(m);
+  return m;
+}
+function buildStation(color) {
+  const g = new THREE.Group();
+  const deskY = -0.38, deskZ = 1.0;
+  stationMesh(STATION.top, deskMat, 0, deskY, deskZ, g);
+  for (const x of [-0.98, 0.98]) for (const z of [0.6, 1.4]) stationMesh(STATION.leg, metalMat, x, deskY - 0.51, z, g);
+  stationMesh(STATION.kb, metalMat, 0, deskY + 0.06, 0.7, g);
+  stationMesh(STATION.foot, metalMat, 0, deskY + 0.055, 1.25, g);
+  stationMesh(STATION.neck, metalMat, 0, deskY + 0.25, 1.3, g);
+  stationMesh(STATION.bezel, metalMat, 0, deskY + 0.74, 1.32, g);
+  // the screen faces the employee; its picture is a canvas redrawn while they work
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 160;
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const screen = stationMesh(STATION.screen, new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }), 0, deskY + 0.74, 1.285, g);
+  screen.rotation.y = Math.PI;
+  screen.userData = { canvas: c, color, drawnAt: 0, busy: null };
+  // a low chair behind the employee, so it doesn't hide them from the back
+  stationMesh(STATION.seat, chairMat, 0, -0.78, -0.05, g);
+  stationMesh(STATION.back, chairMat, 0, -0.45, -0.48, g);
+  stationMesh(STATION.post, metalMat, 0, -1.08, -0.05, g);
+  return { station: g, screen };
+}
+// Idle: a calm screensaver. Busy: lines of code scrolling in the employee's colour.
+function drawScreen(screen, busy, t) {
+  const u = screen.userData, c = u.canvas, g = c.getContext('2d');
+  const col = hex(u.color);
+  g.fillStyle = '#0b0e1c';
+  g.fillRect(0, 0, c.width, c.height);
+  g.fillStyle = col;
+  g.globalAlpha = busy ? 0.9 : 0.35;
+  g.fillRect(0, 0, c.width, 14);
+  if (busy) {
+    const scroll = Math.floor(t * 9);
+    for (let i = 0; i < 11; i++) {
+      const n = scroll + i, r = rng(n * 7919 + 1); r();
+      const indent = Math.floor(r() * 4) * 14, w = 30 + r() * 150;
+      g.globalAlpha = 0.45 + r() * 0.5;
+      g.fillStyle = r() < 0.3 ? col : r() < 0.5 ? '#9aa3d6' : '#e9ecff';
+      g.fillRect(12 + indent, 22 + i * 12.5, Math.min(w, c.width - 24 - indent), 6);
+    }
+    if (Math.floor(t * 2) % 2) { g.globalAlpha = 1; g.fillStyle = '#e9ecff'; g.fillRect(12, 22 + 10 * 12.5, 8, 8); }
+  } else {
+    g.globalAlpha = 0.5;
+    g.fillStyle = col;
+    g.beginPath();
+    g.arc(c.width / 2 + Math.sin(t * 0.5) * 60, 88 + Math.cos(t * 0.7) * 30, 12, 0, Math.PI * 2);
+    g.fill();
+  }
+  g.globalAlpha = 1;
+  screen.material.map.needsUpdate = true;
+}
+
 // Each employee gets a unique first name; oldest skills pick first so names stay stable.
 const names = new Map();
 function assignNames(skills) {
@@ -286,7 +357,7 @@ function labelSprite(first, role, color) {
   t.colorSpace = THREE.SRGBColorSpace;
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false, opacity: 0.62 }));
   s.scale.set(3.2, 0.8, 1);
-  s.position.y = 1.25;
+  s.position.y = 1.55;
   return s;
 }
 
@@ -298,7 +369,7 @@ function bubbleSprite() {
   t.colorSpace = THREE.SRGBColorSpace;
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false, opacity: 0 }));
   s.scale.set(4, 0.6, 1);
-  s.position.y = 1.95;
+  s.position.y = 2.25;
   s.userData = { canvas: c, text: null };
   return s;
 }
@@ -363,7 +434,7 @@ function appsSprite() {
   t.colorSpace = THREE.SRGBColorSpace;
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false, opacity: 0.9 }));
   s.scale.set(4.2, 0.66, 1);
-  s.position.y = -1.15;
+  s.position.y = -1.85;
   s.userData = { canvas: c, key: null };
   return s;
 }
@@ -425,6 +496,11 @@ function addEmployee(skill, delay) {
     depthWrite: false, blending: THREE.AdditiveBlending }));
   aura.scale.setScalar(3.4);
   root.add(aura);
+  const { station, screen } = buildStation(color);
+  root.add(station);
+  screen.userData.kind = 'employee';
+  screen.userData.id = skill.id;
+  drawScreen(screen, false, 0);
   // beam: a faint line plus sparks travelling from the brain to the employee
   const beamGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
   const beam = new THREE.Line(beamGeo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0, depthWrite: false }));
@@ -439,9 +515,60 @@ function addEmployee(skill, delay) {
   }
   root.scale.setScalar(0.0001);
   empGroup.add(root);
-  employees.set(skill.id, { root, body, sphere, eyes, label, bubble, appStrip, color, aura, beam, sparks, data: skill, born: performance.now() + delay,
+  employees.set(skill.id, { root, body, sphere, eyes, label, bubble, appStrip, color, aura, beam, sparks, station, screen, data: skill, born: performance.now() + delay,
     slot: 0, busyAmt: 0, blinkAt: performance.now() + 1500 + Math.random() * 4000, phase: Math.random() * 6 });
 }
+
+// ---------- the Manager: a bigger desk in front of the brain, facing the team and you ----------
+// Reads the shared inbox, writes the brief and splits it between the employees (manager.mjs).
+const MANAGER_COLOR = 0xf2c14e;
+let managerState = { inbox: [], files: [], briefs: [], busy: false };
+const boss = (() => {
+  const root = new THREE.Group(), body = new THREE.Group();
+  root.add(body);
+  const sphere = new THREE.Mesh(bodyGeo, new THREE.MeshStandardMaterial({ color: MANAGER_COLOR, roughness: 0.3, metalness: 0.25,
+    emissive: MANAGER_COLOR, emissiveIntensity: 0.1 }));
+  sphere.userData = { kind: 'manager' };
+  body.add(sphere);
+  const eyes = new THREE.Group();
+  for (const x of [-0.2, 0.2]) {
+    const eye = new THREE.Mesh(eyeGeo, eyeMat);
+    eye.position.set(x, 0.12, 0.55);
+    const pupil = new THREE.Mesh(pupilGeo, pupilMat);
+    pupil.position.z = 0.08;
+    eye.add(pupil);
+    eyes.add(eye);
+  }
+  body.add(eyes);
+  const label = labelSprite('Manager', 'briefs & splits the work', MANAGER_COLOR);
+  const bubble = bubbleSprite();
+  const { station, screen } = buildStation(MANAGER_COLOR);
+  screen.userData.kind = 'manager';
+  drawScreen(screen, false, 0);
+  root.add(label, bubble, station);
+  // station +z (its desk) points at the camera side, so the Manager faces the room
+  root.position.set(0, -0.4, 5.2);
+  root.scale.setScalar(1.1);
+  scene.add(root);
+  return { root, body, sphere, eyes, label, bubble, screen, busyAmt: 0, phase: 1.3, blinkAt: 0 };
+})();
+function bossBrief() { return managerState.briefs.find(b => b.status === 'briefing' || b.status === 'working'); }
+function bossLine() {
+  const b = bossBrief();
+  if (b?.status === 'briefing') return 'Writing the brief…';
+  if (b) return `${b.title} · ${b.tasks.filter(t => t.status === 'done').length}/${b.tasks.length} done`;
+  const waiting = managerState.inbox.filter(x => x.status === 'new').length + managerState.files.length;
+  return waiting ? `Inbox: ${waiting} waiting` : '';
+}
+function setManager(next) {
+  managerState = next;
+  work = withBriefWork(hookWork);
+  renderPanel();
+}
+events.addEventListener('manager', e => setManager(JSON.parse(e.data)));
+async function loadManager() { const r = await api('/api/manager'); if (!r.error) setManager(r); }
+events.addEventListener('open', loadManager);
+events.addEventListener('brain', loadManager);
 
 function removeEmployee(id) {
   const e = employees.get(id);
@@ -452,7 +579,7 @@ function removeEmployee(id) {
   employees.delete(id);
 }
 
-// Rings of up to 12 employees, alternating tilt.
+// Each employee is stationed at a desk facing the brain: rows of up to 12, each row a step higher.
 function layoutEmployees() {
   const list = [...employees.values()].sort((a, b) =>
     (a.data.source === b.data.source ? 0 : a.data.source === 'project' ? -1 : b.data.source === 'project' ? 1 : a.data.source.localeCompare(b.data.source))
@@ -463,8 +590,8 @@ function layoutEmployees() {
     const inRing = Math.min(perRing, list.length - ring * perRing);
     e.ring = ring;
     e.angle0 = (i % perRing) / inRing * Math.PI * 2 + ring * 0.4;
-    e.radius = 9.5 + ring * 2.6;
-    e.tilt = (ring % 2 ? -1 : 1) * (0.16 + ring * 0.06);
+    e.radius = 9.5 + ring * 3.2;
+    e.height = -0.6 + ring * 1.1;
   });
 }
 
@@ -534,6 +661,20 @@ function deriveWork(activity, skills) {
 }
 
 let work = { load: new Map(), busy: new Map(), runs: new Map(), contractors: [] };
+let hookWork = work;
+// Employees working the Manager's brief are busy even in a brain whose activity hook isn't set up:
+// the brief itself says who is on what.
+function withBriefWork(base) {
+  const brief = managerState.briefs.find(b => b.status === 'working');
+  if (!brief) return base;
+  const busy = new Map(base.busy);
+  for (const t of brief.tasks) {
+    if (t.status !== 'working') continue;
+    const s = state.skills.find(x => x.source === 'project' && x.name === t.employee);
+    if (s && !busy.has(s.id)) busy.set(s.id, { prompt: t.task.split('\n')[0], start: t.start, last: t.start, skills: [s.id], status: 'working' });
+  }
+  return { ...base, busy };
+}
 
 function duration(ms) {
   const s = Math.round(ms / 1000);
@@ -560,7 +701,8 @@ function apply(next) {
   for (const id of prevMemIds) removeMemory(id);
 
   syncSatellites(next.linked || []);
-  work = deriveWork(next.activity, next.skills);
+  hookWork = deriveWork(next.activity, next.skills);
+  work = withBriefWork(hookWork);
   const allSkills = [...next.skills, ...work.contractors];
   for (const [id, n] of Object.entries(next.names || {})) names.set(id, n);
   assignNames(allSkills); // only contractors are still unnamed here
@@ -1103,7 +1245,7 @@ let downAt = null;
 function pick(ev) {
   mouse.set(ev.clientX / innerWidth * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(mouse, camera);
-  const targets = [...[...employees.values()].map(e => e.sphere), ...[...memories.values()].map(m => m.mesh),
+  const targets = [boss.sphere, boss.screen, ...[...employees.values()].flatMap(e => [e.sphere, e.screen]), ...[...memories.values()].map(m => m.mesh),
     ...[...satellites.values()].flatMap(s => [...s.dots.values()])];
   const hit = ray.intersectObjects(targets, false)[0];
   return hit?.object.userData;
@@ -1114,6 +1256,7 @@ canvas.addEventListener('pointermove', ev => {
   canvas.style.cursor = 'pointer';
   let title, sub;
   if (u.kind === 'employee') { const s = employees.get(u.id).data; title = `${employeeName(s)} · ${s.name}`; const b = work.busy.get(s.id); sub = b ? 'Working on: ' + (b.prompt || 'a task') : `${work.load.get(s.id) || 0} jobs done`; }
+  else if (u.kind === 'manager') { title = 'Manager · briefs & splits the work'; sub = bossLine() || 'Inbox empty. Click to open the Inbox.'; }
   else if (u.kind === 'linked') { title = `${u.memory.name} · ${u.brain.name}`; sub = u.memory.description; }
   else { const m = memories.get(u.id).data; title = m.name; sub = m.description; }
   tip.innerHTML = `<b>${esc(title)}</b><span>${esc(sub)}</span>`;
@@ -1125,6 +1268,7 @@ canvas.addEventListener('pointerdown', ev => { downAt = [ev.clientX, ev.clientY]
 canvas.addEventListener('pointerup', ev => {
   if (!downAt || Math.hypot(ev.clientX - downAt[0], ev.clientY - downAt[1]) > 5) return;
   const u = pick(ev);
+  if (u?.kind === 'manager') return document.querySelector('aside header [data-tab="inbox"]').click();
   selected = u ? u.id : null;
   renderPanel();
 });
@@ -1133,6 +1277,7 @@ canvas.addEventListener('pointerup', ev => {
 const clock = new THREE.Clock();
 const tmp = new THREE.Vector3();
 const brainWorld = new THREE.Vector3();
+const screenWorld = new THREE.Vector3();
 const focus = new THREE.Vector3();
 const HOME = new THREE.Vector3();
 let goHome = false;
@@ -1173,17 +1318,25 @@ function animate() {
     if (age < 0) continue;
     const busy = work.busy.has(e.data.id);
     e.busyAmt += ((busy ? 1 : 0) - e.busyAmt) * Math.min(1, dt * 3);
-    const a = e.angle0 + t * 0.04;
-    const r = e.radius - e.busyAmt * 2.4;
-    tmp.set(Math.cos(a) * r, 0, Math.sin(a) * r);
-    tmp.y = Math.sin(a) * r * e.tilt + Math.sin(t * (1.4 + e.busyAmt * 3) + e.phase) * (0.15 + e.busyAmt * 0.12);
+    tmp.set(Math.cos(e.angle0) * e.radius, e.height, Math.sin(e.angle0) * e.radius);
     e.root.position.copy(tmp);
+    e.station.rotation.y = Math.atan2(-tmp.x, -tmp.z);
+    // idle: leaning back in the chair, face above the monitor, breathing slowly;
+    // busy: leaning in to the screen with a little typing bounce
+    const lean = 0.12 * e.busyAmt - 0.28 * (1 - e.busyAmt);
+    e.body.position.set(-tmp.x / e.radius * lean, 0, -tmp.z / e.radius * lean);
+    e.body.position.y = (0.28 + Math.sin(t * 1.4 + e.phase) * 0.04) * (1 - e.busyAmt) + Math.abs(Math.sin(t * 9 + e.phase)) * 0.05 * e.busyAmt;
     const k = Math.min(1, age / 0.7);
     const sel = selected === e.data.id ? 1.18 : 1;
     e.root.scale.setScalar(Math.max(0.0001, easeOutBack(k) * sel));
-    // idle employees look at you; busy ones look at the brain
-    const look = busy ? brainWorld : camera.position;
+    // idle employees turn round to look at you; busy ones face their screen
+    const look = busy ? e.screen.getWorldPosition(screenWorld) : camera.position;
     e.body.lookAt(look);
+    if (busy !== e.screen.userData.busy || (busy && now - e.screen.userData.drawnAt > 110) || (!busy && now - e.screen.userData.drawnAt > 400)) {
+      drawScreen(e.screen, busy, t);
+      e.screen.userData.busy = busy;
+      e.screen.userData.drawnAt = now;
+    }
     if (now > e.blinkAt) { e.blinkAt = now + 2500 + Math.random() * 5000; e.blinkUntil = now + 140; }
     e.eyes.scale.y = now < (e.blinkUntil || 0) ? 0.1 : 1;
     e.sphere.material.emissiveIntensity = 0.08 + e.busyAmt * (0.6 + Math.sin(t * 6 + e.phase) * 0.25);
@@ -1203,6 +1356,25 @@ function animate() {
       sp.position.copy(tmp).multiplyScalar(f);
       sp.material.opacity = e.busyAmt * Math.sin(f * Math.PI) * 0.9;
     });
+  }
+
+  // the Manager types while it writes the brief, then watches the team; idle it peeks over at you
+  {
+    const brief = bossBrief(), writing = brief?.status === 'briefing';
+    boss.busyAmt += ((writing ? 1 : 0) - boss.busyAmt) * Math.min(1, dt * 3);
+    const lean = 0.12 * boss.busyAmt - 0.28 * (1 - boss.busyAmt);
+    boss.body.position.set(0, (0.28 + Math.sin(t * 1.4 + boss.phase) * 0.04) * (1 - boss.busyAmt) + Math.abs(Math.sin(t * 9)) * 0.05 * boss.busyAmt, lean);
+    boss.body.lookAt(writing ? boss.screen.getWorldPosition(screenWorld) : camera.position);
+    if (now > boss.blinkAt) { boss.blinkAt = now + 2500 + Math.random() * 5000; boss.blinkUntil = now + 140; }
+    boss.eyes.scale.y = now < (boss.blinkUntil || 0) ? 0.1 : 1;
+    boss.sphere.material.emissiveIntensity = 0.1 + (brief ? 0.35 + Math.sin(t * 4) * 0.12 : 0) + boss.busyAmt * 0.3;
+    const line = bossLine();
+    if (line) setBubble(boss.bubble, line, MANAGER_COLOR);
+    boss.bubble.visible = !!line;
+    boss.bubble.material.opacity = brief ? 0.95 : 0.7;
+    boss.label.material.opacity = brief ? 0.95 : 0.6;
+    const su = boss.screen.userData;
+    if (writing !== su.busy || now - su.drawnAt > (writing ? 110 : 400)) { drawScreen(boss.screen, writing, t); su.busy = writing; su.drawnAt = now; }
   }
 
   for (const sat of satellites.values()) {

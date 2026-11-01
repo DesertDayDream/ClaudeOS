@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import { exec, spawn } from 'node:child_process';
 import { createChat } from './chat.mjs';
 import { runHandoff } from './handoff.mjs';
+import { createManager } from './manager.mjs';
 import { createMemoryEditor, observationId } from './memory-edit.mjs';
 import { createSkillEditor } from './skill-edit.mjs';
 import { appsInText, appForServer } from './public/apps.js';
@@ -292,11 +293,31 @@ function chatFor(brain) {
   if (!chats.has(brain.id)) {
     chats.set(brain.id, createChat({ cwd: brain.path, memoryFile: memoryFileOf(brain), helper, memoryServer,
       stateFile: path.join(DATA, 'chats', `${brain.id}.json`), activityFile: ACTIVITY, port: PORT,
-      links: () => brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, memoryFile: memoryFileOf(b) })), token: TOKEN, broadcast }));
+      links: () => brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, memoryFile: memoryFileOf(b) })), token: TOKEN, broadcast,
+      othersWorking: () => managerFor(brain).busy() }));
   }
   return chats.get(brain.id);
 }
-const anyBusy = () => [...chats.values()].some(c => c.snapshot().busy);
+// one Manager (shared inbox + briefs) per brain; it hands tasks to the brain's own team
+const managers = new Map();
+function managerFor(brain) {
+  if (!managers.has(brain.id)) {
+    const team = () => {
+      const skills = skillsIn(teamDir(brain), 'project', path.basename(brain.path));
+      nameSkills(skills);
+      return skills.map(s => ({ skill: s.name, name: names[s.id] || s.name, description: s.description || '' }));
+    };
+    managers.set(brain.id, createManager({ cwd: brain.path, dataFile: path.join(DATA, 'manager', `${brain.id}.json`), activityFile: ACTIVITY,
+      memoryFile: memoryFileOf(brain), helper, memoryServer, port: PORT, token: TOKEN, team,
+      broadcast: (event, data) => {
+        if (brains.active()?.id === brain.id) broadcast(event, data);
+        if (!data.busy) chatFor(brain).dropOthersApprovals();
+        refresh();
+      } }));
+  }
+  return managers.get(brain.id);
+}
+const anyBusy = () => [...chats.values()].some(c => c.snapshot().busy) || [...managers.values()].some(m => m.busy());
 const memoryEditor = createMemoryEditor({ claudeDir: CLAUDE, dataDir: DATA, memoryFileOf });
 // only memories the active brain is showing right now can be opened, so an id can't reach other files
 function memoryById(brain, id) {
@@ -442,7 +463,13 @@ async function handleApi(req, res, url) {
   }
   if (url.pathname === '/api/integrations' && req.method === 'GET') return json(res, 200, integrationsView(active));
   if (url.pathname === '/api/chat' && req.method === 'GET') return json(res, 200, chat ? chat.snapshot() : { messages: [], busy: false, approvals: [] });
+  if (url.pathname === '/api/manager' && req.method === 'GET') return json(res, 200, active ? managerFor(active).snapshot() : { inbox: [], files: [], briefs: [], busy: false });
   if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+  // a file dropped on the Inbox tab streams straight into the brain's inbox/ folder
+  if (url.pathname === '/api/inbox/upload') {
+    if (!active) return json(res, 200, { error: 'Set up a brain first.' });
+    return json(res, 200, await managerFor(active).upload(req, url.searchParams.get('name')));
+  }
   const body = await readJson(req);
   if (url.pathname.startsWith('/api/brains/')) {
     if (anyBusy()) return json(res, 200, { error: 'Claude is still answering. Wait for it, or press Stop, before changing brains.' });
@@ -485,7 +512,7 @@ async function handleApi(req, res, url) {
       return json(res, 200, r);
     } catch (err) { return json(res, 200, { error: err.message }); }
   }
-  if (!chat && (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/handoff') || url.pathname.startsWith('/api/skills'))) return json(res, 200, { error: 'Set up a brain first.' });
+  if (!chat && (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/brief' || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/handoff') || url.pathname.startsWith('/api/skills'))) return json(res, 200, { error: 'Set up a brain first.' });
   if (url.pathname === '/api/chat') return json(res, 200, chat.send(body.text));
   if (url.pathname === '/api/chat/stop') { chat.stop(); for (const h of handoffs.values()) h.stop(); return json(res, 200, { ok: true }); }
   if (url.pathname === '/api/handoff') return json(res, 200, await handoff(active, body, req));
@@ -512,6 +539,18 @@ async function handleApi(req, res, url) {
     broadcast('integrations', integrationsView(active));
     return json(res, 200, r);
   }
+  if (url.pathname.startsWith('/api/inbox/') || url.pathname === '/api/brief') {
+    const m = managerFor(active), what = url.pathname.split('/').pop();
+    if (what === 'brief') return json(res, 200, m.postBrief(body)); // from the Manager's post_brief tool
+    if (what === 'add') return json(res, 200, m.add(body.text));
+    if (what === 'remove') return json(res, 200, m.remove(String(body.id || '')));
+    if (what === 'run') {
+      if (chat.snapshot().busy) return json(res, 200, { error: 'Claude is answering in the chat. Wait for it, or press Stop, then brief the team.' });
+      return json(res, 200, m.start());
+    }
+    if (what === 'stop') return json(res, 200, m.stop());
+    return json(res, 404, { error: 'not found' });
+  }
   if (url.pathname === '/api/chat/new') return json(res, 200, chat.reset());
   if (url.pathname === '/api/chat/wrap') return json(res, 200, chat.wrapUp());
   if (url.pathname === '/api/approval') return json(res, 200, await chat.requestApproval(body));
@@ -522,7 +561,8 @@ async function handleApi(req, res, url) {
 const server = http.createServer((req, res) => {
   if (!LOCAL_HOSTS.has(req.headers.host)) { res.writeHead(421); return res.end('wrong host'); }
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health') {
+  if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health'
+    || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief') {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));
   }
   if (url.pathname === '/api/state') {
@@ -576,5 +616,6 @@ function openPage(url) {
 function quit() {
   for (const c of chats.values()) c.stop();
   for (const h of handoffs.values()) h.stop();
+  for (const m of managers.values()) m.stop();
   setTimeout(() => process.exit(0), 800);
 }

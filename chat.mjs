@@ -19,7 +19,7 @@ const WRAP_PROMPT = `The user is ending this chat to start a fresh one, to save 
 3. Then reply with only a short handover for your next session, under 150 words: what this chat was about, what was decided, what is still open. No preamble.`;
 const sum = (...n) => n.reduce((a, b) => a + (Number(b) || 0), 0);
 
-export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, memoryServer, port, token, broadcast, links = () => [] }) {
+export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, memoryServer, port, token, broadcast, links = () => [], othersWorking = () => false }) {
   // context: how big the conversation is (what each message resends) and how long the cache lasts
   let state = { sessionId: null, messages: [], context: null, carryOver: null };
   try { state = { ...state, ...JSON.parse(fs.readFileSync(stateFile, 'utf8')) }; } catch { /* first run */ }
@@ -162,7 +162,7 @@ export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, m
 
   function finish(error) {
     if (!run) return;
-    for (const [id, a] of approvals) { a.resolve({ behavior: 'deny', message: 'The request ended before you answered.' }); approvals.delete(id); emit({ kind: 'approval-done', id, allowed: false }); }
+    for (const [id, a] of approvals) { if (a.card.who) continue; a.resolve({ behavior: 'deny', message: 'The request ended before you answered.' }); approvals.delete(id); emit({ kind: 'approval-done', id, allowed: false }); }
     const fields = { streaming: false, text: run.reply.text.trim() };
     if (run.stopped) fields.note = 'Stopped.';
     if (error && !run.reply.error) fields.error = error;
@@ -241,11 +241,13 @@ export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, m
   }
 
   // Called (long-poll) by approval-mcp.mjs; resolves when the user clicks Allow or Deny.
-  function requestApproval({ tool_name, input }) {
+  // Employees working a brief from the Inbox ask here too (`who` says which one); their cards stay
+  // until answered, even after the chat's own answer ends.
+  function requestApproval({ tool_name, input, who }) {
     return new Promise(resolve => {
-      if (!run) return resolve({ behavior: 'deny', message: 'No chat request is running.' });
+      if (!run && !(who && othersWorking())) return resolve({ behavior: 'deny', message: 'No chat request is running.' });
       const id = crypto.randomUUID();
-      const card = { id, tool: tool_name, summary: toolSummary(tool_name, input), input };
+      const card = { id, tool: tool_name, summary: toolSummary(tool_name, input), input, ...(who ? { who: String(who).slice(0, 60) } : {}) };
       approvals.set(id, { resolve: allow => resolve(allow), card, input });
       emit({ kind: 'approval', card });
     });
@@ -259,9 +261,19 @@ export function createChat({ cwd, memoryFile, stateFile, activityFile, helper, m
     return { ok: true };
   }
 
+  // the Inbox's runs ended (finished or stopped): their unanswered cards have nobody waiting anymore
+  function dropOthersApprovals() {
+    for (const [id, a] of approvals) {
+      if (!a.card.who) continue;
+      a.resolve({ behavior: 'deny', message: 'The run ended before you answered.' });
+      approvals.delete(id);
+      emit({ kind: 'approval-done', id, allowed: false });
+    }
+  }
+
   function snapshot() {
     return { messages: state.messages, busy: !!run, approvals: [...approvals.values()].map(a => a.card), context: state.context };
   }
 
-  return { send, stop, reset, wrapUp, requestApproval, answerApproval, snapshot };
+  return { send, stop, reset, wrapUp, requestApproval, answerApproval, dropOthersApprovals, snapshot };
 }

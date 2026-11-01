@@ -112,7 +112,7 @@ function renderApproval(card) {
   const el = document.createElement('div');
   el.className = 'approve';
   el.id = 'ap-' + card.id;
-  el.innerHTML = `<b>Claude wants to: ${esc(card.summary)}</b>
+  el.innerHTML = `<b>${esc(card.who || 'Claude')} wants to: ${esc(card.summary)}</b>
     <div class="what">${esc(JSON.stringify(card.input))}</div>
     <button class="btn primary" data-allow="1">Allow</button> <button class="btn" data-allow="0">Deny</button>`;
   el.addEventListener('click', e => {
@@ -123,7 +123,11 @@ function renderApproval(card) {
   });
   log.appendChild(el);
   scrollDown(true);
+  // an employee working a brief may ask while you're on another tab
+  const tab = document.querySelector('aside header [data-tab="chat"]');
+  if (card.who && tab.getAttribute('aria-selected') !== 'true') tab.classList.add('ping');
 }
+document.querySelector('aside header [data-tab="chat"]').addEventListener('click', e => e.currentTarget.classList.remove('ping'));
 
 function approvalDone(id, allowed) {
   const el = document.getElementById('ap-' + id);
