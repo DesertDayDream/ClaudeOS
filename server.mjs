@@ -616,11 +616,11 @@ async function handleApi(req, res, url) {
   if (url.pathname.startsWith('/api/inbox/') || url.pathname === '/api/brief') {
     const m = managerFor(active), what = url.pathname.split('/').pop();
     if (what === 'brief') return json(res, 200, m.postBrief(body)); // from the chat's post_brief tool
-    if (what === 'add') return json(res, 200, m.add(body.text));
+    if (what === 'add') return json(res, 200, m.add(body.text, body.files));
     if (what === 'remove') return json(res, 200, m.remove(String(body.id || '')));
     if (what === 'run') {
-      // "Brief & assign" hands the inbox to the Manager, which is the chat
-      if (chat.busy()) return json(res, 200, { error: 'The Manager is answering in the open chat. Wait for it, press Stop, or start a new chat, then brief the team.' });
+      // "Send to team" hands the queue to the Manager, which is the chat
+      if (chat.busy()) return json(res, 200, { error: 'The Manager is still answering in this chat. Wait for it, press Stop, or start a new chat, then send the queue.' });
       const h = m.handOver();
       if (h.error) return json(res, 200, h);
       const r = chat.send(h.text, { label: h.label, from: 'inbox' });

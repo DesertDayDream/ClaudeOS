@@ -559,7 +559,7 @@ function bossLine() {
   if (managerState.chatting) return 'Answering you in Chat…';
   if (b) return `${b.title} · ${b.tasks.filter(t => t.status === 'done').length}/${b.tasks.length} done`;
   const waiting = managerState.inbox.filter(x => x.status === 'new').length + managerState.files.length;
-  return waiting ? `Inbox: ${waiting} waiting` : '';
+  return waiting ? `${waiting} queued for the team` : '';
 }
 function setManager(next) {
   managerState = next;
@@ -736,7 +736,7 @@ function renderPanel() {
   document.getElementById('nEmp').textContent = state.skills.filter(s => s.source !== 'contractor').length;
   document.getElementById('nBusy').textContent = work.busy.size;
 
-  const team = document.getElementById('team');
+  const team = document.getElementById('teamList'); // the briefs (queue.js) sit above it
   const groups = ['project', 'personal', 'plugin', 'contractor'];
   let html = state.brain ? `<div class="team-acts"><button class="btn" data-hire title="Write a new SKILL.md in ${esc(state.brain.name)}/.claude/skills">+ Hire an employee</button><button class="btn" data-apps title="Connect Claude to Gmail, Notion, Blender and more">+ Add an app</button></div>` : '';
   for (const g of groups) {
@@ -1259,7 +1259,7 @@ canvas.addEventListener('pointermove', ev => {
   canvas.style.cursor = 'pointer';
   let title, sub;
   if (u.kind === 'employee') { const s = employees.get(u.id).data; title = `${employeeName(s)} · ${s.name}`; const b = work.busy.get(s.id); sub = b ? 'Working on: ' + (b.prompt || 'a task') : `${work.load.get(s.id) || 0} jobs done`; }
-  else if (u.kind === 'manager') { title = 'Manager · briefs & splits the work'; sub = bossLine() || 'Talk to the Manager in the Chat tab, or leave work in the Inbox.'; }
+  else if (u.kind === 'manager') { title = 'Manager · briefs & splits the work'; sub = bossLine() || 'Talk to the Manager in the Chat tab. Queue requests there to brief the team on several at once.'; }
   else if (u.kind === 'linked') { title = `${u.memory.name} · ${u.brain.name}`; sub = u.memory.description; }
   else { const m = memories.get(u.id).data; title = m.name; sub = m.description; }
   tip.innerHTML = `<b>${esc(title)}</b><span>${esc(sub)}</span>`;
@@ -1271,7 +1271,7 @@ canvas.addEventListener('pointerdown', ev => { downAt = [ev.clientX, ev.clientY]
 canvas.addEventListener('pointerup', ev => {
   if (!downAt || Math.hypot(ev.clientX - downAt[0], ev.clientY - downAt[1]) > 5) return;
   const u = pick(ev);
-  if (u?.kind === 'manager') return document.querySelector('aside header [data-tab="inbox"]').click();
+  if (u?.kind === 'manager') { document.querySelector('aside header [data-tab="chat"]').click(); return document.getElementById('input').focus(); }
   selected = u ? u.id : null;
   renderPanel();
 });

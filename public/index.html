@@ -89,9 +89,16 @@
   .feed .ev.skill { border-color: var(--project); }
   /* inbox + briefs */
   aside header button.ping::after { content: " \2022"; color: var(--accent); }
-  #inbox.drop { outline: 2px dashed var(--accent); outline-offset: -6px; }
+  #queue { border: 1px solid rgba(242,193,78,0.45); background: rgba(242,193,78,0.06); border-radius: 10px; padding: 6px 8px; max-height: 180px; overflow: auto; }
+  #queue[hidden] { display: none; }
+  #queue .qh { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: #f2c14e; margin-bottom: 4px; }
+  #queue .qh span { flex: 1; }
+  #queue .qi { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; padding: 3px 0; border-top: 1px solid var(--line); }
+  #queue .qi span { flex: 1; white-space: pre-wrap; word-break: break-word; }
+  #queue .qi em { font-style: normal; color: var(--dim); font-size: 11px; }
+  #queue .qi code { font: 11px ui-monospace, Consolas, monospace; color: #9fe3ff; }
+  #briefs:not(:empty) { margin-bottom: 12px; }
   .ib-intro { color: var(--dim); font-size: 12px; margin: 4px 2px 8px; }
-  #inboxText { width: 100%; resize: vertical; background: rgba(255,255,255,0.04); border: 1px solid var(--line); border-radius: 9px; color: var(--text); font: inherit; padding: 8px 10px; }
   .ib-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
   .ib-row .btn.primary, .ib-row .btn.danger { flex: 1; padding: 8px; }
   .ib-err { color: #ffb0b0; font-size: 12px; margin-top: 6px; white-space: pre-wrap; }
@@ -420,7 +427,6 @@
   <header>
     <button data-tab="chat" aria-selected="true">Chat</button>
     <button data-tab="memory" aria-selected="false">Memory</button>
-    <button data-tab="inbox" aria-selected="false">Inbox</button>
     <button data-tab="team" aria-selected="false">Team</button>
     <button data-tab="feed" aria-selected="false">Activity</button>
     <button data-tab="term" aria-selected="false" title="Shell tabs you and Claude share">Terminal</button>
@@ -447,6 +453,7 @@
     <form class="composer" id="composer">
       <div class="nudge" id="nudge" hidden></div>
       <div class="meter" id="meter" hidden></div>
+      <div id="queue" hidden></div>
       <div class="attach" id="attach"></div>
       <textarea id="input" rows="2" placeholder="Ask the Manager anything… e.g. “Write a 45-second script about my island”"></textarea>
       <div class="row">
@@ -459,6 +466,7 @@
         <button type="button" class="btn" id="wrapChat" title="Save what matters to the brain's memory, then start a fresh, cheaper chat that gets a short handover">Wrap up</button>
         <button type="button" class="btn" id="newChat" title="Start a fresh conversation">New chat</button>
         <button type="button" class="btn" id="stop" hidden>Stop</button>
+        <button type="button" class="btn" id="queueBtn" title="Save this request for the team without sending it yet. Queue several, then press Send to team: the Manager briefs them all at once and splits the work.">Queue</button>
         <button type="submit" class="btn primary" id="send" title="Enter to send · Shift+Enter for a new line">Send</button>
       </div>
     </form>
@@ -467,8 +475,7 @@
     <div class="search"><input type="search" id="memSearch" placeholder="Search memories…" autocomplete="off" spellcheck="false"></div>
     <div id="memList"></div>
   </div>
-  <div class="tab" id="inbox"></div>
-  <div class="tab" id="team"></div>
+  <div class="tab" id="team"><div id="briefs"></div><div id="teamList"></div></div>
   <div class="tab feed" id="feed"></div>
   <div class="tab" id="term">
     <div class="termbar"><div id="termTabs"></div><button type="button" class="btn mini" id="termNew" title="A new shell tab in this chat's folder">+</button></div>
@@ -483,7 +490,7 @@
 <script>window.CLAUDEOS_TOKEN = "__CLAUDEOS_TOKEN__";</script>
 <script type="module" src="/app.js"></script>
 <script type="module" src="/chat.js"></script>
-<script type="module" src="/inbox.js"></script>
+<script type="module" src="/queue.js"></script>
 <script type="module" src="/brains.js"></script>
 <script type="module" src="/desk.js"></script>
 </body>

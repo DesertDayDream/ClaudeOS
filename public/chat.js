@@ -518,6 +518,22 @@ async function send() {
   else for (const p of keep) if (p.url) URL.revokeObjectURL(p.url);
 }
 
+// Queue: keep this request (and its attachments) for the team instead of sending it now
+document.getElementById('queueBtn').addEventListener('click', async () => {
+  const text = input.value.trim();
+  if (pending.some(p => !p.file && !p.error)) return; // still uploading
+  const ready = pending.filter(p => p.file);
+  if (!text && !ready.length) return input.focus();
+  const r = await api('/api/inbox/add', { text, files: ready.map(p => p.file.path) });
+  if (r.error) return alert(r.error);
+  for (const p of pending) if (p.url) URL.revokeObjectURL(p.url);
+  input.value = '';
+  pending = [];
+  drawPending();
+  autosize();
+  input.focus();
+});
+
 function autosize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 160) + 'px'; }
 input.addEventListener('input', autosize);
 input.addEventListener('keydown', e => {

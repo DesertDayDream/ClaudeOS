@@ -1,6 +1,6 @@
 // The Manager's team desk: one shared inbox per brain, and the briefs it hands out. The Manager is the
-// chat: talking in the Chat tab is talking to the Manager. You leave requests in the Inbox tab (typed, or
-// files dropped into the brain's inbox/ folder) and "Brief & assign" hands them to the chat; the
+// chat: talking in the Chat tab is talking to the Manager. Requests you Queue in the chat (with their
+// attachments), and files dropped into the brain's inbox/ folder, wait until "Send to team" hands them to the chat; the
 // Manager (or any chat message that is work for the team) splits the work into tasks through the
 // post_brief tool. Each task runs as its own `claude -p` in the brain folder, so employees work at the
 // same time (MAX_PARALLEL at most, across all briefs), a task that needs another's output waits for it
@@ -57,10 +57,12 @@ export function createManager({ cwd, dataFile, activityFile, memoryFile, helper,
     return { inbox: state.inbox, files: inboxFiles(), briefs: state.briefs.slice(-10), busy: busy(), chatting: chatBusy(), max: MAX_PARALLEL };
   }
 
-  function add(text) {
+  // files: chat attachments queued with the request, as paths relative to the brain
+  function add(text, files = []) {
     text = String(text || '').trim();
-    if (!text) return { error: 'Write what you need first.' };
-    const item = { id: crypto.randomBytes(4).toString('hex'), text: clip(text, 4000), ts: Date.now(), status: 'new' };
+    files = (Array.isArray(files) ? files : []).map(String).filter(Boolean).slice(0, 20);
+    if (!text && !files.length) return { error: 'Write what you need first.' };
+    const item = { id: crypto.randomBytes(4).toString('hex'), text: clip(text || 'See the attached files.', 4000), ts: Date.now(), status: 'new', ...(files.length ? { files } : {}) };
     state.inbox.push(item);
     changed();
     return { ok: true, id: item.id };
@@ -74,7 +76,7 @@ export function createManager({ cwd, dataFile, activityFile, memoryFile, helper,
     changed();
     return { ok: true };
   }
-  // Saves a file dropped on the Inbox tab into the brain's inbox/ folder, never over an existing one.
+  // Saves a file dropped into the brain's inbox/ folder, never over an existing one.
   function upload(req, rawName) {
     const name = path.basename(String(rawName || '')).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 120);
     if (!name || /^\.+$/.test(name)) return Promise.resolve({ error: 'That file needs a name.' });
@@ -115,7 +117,7 @@ export function createManager({ cwd, dataFile, activityFile, memoryFile, helper,
       ended = true;
       procs.delete(key);
       // a killed or failed run never reaches Claude's Stop hook, so close its task on the boards here
-      if (run.stopped || r.error) logStop(session, run.stopped ? 'stopped' : 'error', run.stopped ? 'Stopped from the Inbox.' : r.error);
+      if (run.stopped || r.error) logStop(session, run.stopped ? 'stopped' : 'error', run.stopped ? 'Stopped from ClaudeOS.' : r.error);
       onDone(run.stopped ? { stopped: true } : r);
     };
     proc.on('error', e => end({ error: `Could not start Claude Code: ${e.message}` }));
@@ -140,11 +142,11 @@ export function createManager({ cwd, dataFile, activityFile, memoryFile, helper,
   function handOver() {
     const items = state.inbox.filter(x => x.status === 'new');
     const files = inboxFiles();
-    if (!items.length && !files.length) return { error: 'The inbox is empty. Add a request or drop a file first.' };
+    if (!items.length && !files.length) return { error: 'Nothing is queued. Type a request and press Queue first.' };
     if (!team().length) return { error: 'This brain has no employees yet. Hire one in the Team tab first.' };
-    const req = items.length ? items.map(x => `- [${x.id}] ${x.text}`).join('\n') : '(none typed; see the files)';
+    const req = items.length ? items.map(x => `- [${x.id}] ${x.text}${x.files?.length ? `\n  Attached: ${x.files.map(f => path.join(cwd, f)).join(', ')}` : ''}`).join('\n') : '(none typed; see the files)';
     const fileList = files.length ? files.map(f => `- ${f.path} (${f.size > 1e6 ? (f.size / 1e6).toFixed(1) + ' MB' : Math.ceil(f.size / 1024) + ' KB'})`).join('\n') : '(empty)';
-    const text = `Brief the team on what is waiting in the inbox.
+    const text = `Brief the team on the queued requests.
 
 Requests (put their ids in each task's "request"):
 ${req}
@@ -154,7 +156,7 @@ ${fileList}
 
 Files in inbox/ with no typed request are work too when an employee's skill says it takes them (a raw clip for an editor). Brief it all with mcp__claudeos__post_brief, then tell me in a few lines who does what.`;
     const n = (k, w) => `${k} ${w}${k === 1 ? '' : 's'}`;
-    const label = `Brief & assign: ${[items.length && n(items.length, 'request'), files.length && n(files.length, 'file')].filter(Boolean).join(' and ')} from the inbox`;
+    const label = `Send to team: ${[items.length && n(items.length, 'queued request'), files.length && n(files.length, 'file from inbox/')].filter(Boolean).join(' and ')}`;
     return { text, label, ids: items.map(x => x.id) };
   }
   function markSent(ids, chat) { for (const x of state.inbox) if (ids.includes(x.id) && x.status === 'new') { x.status = 'sent'; x.chat = chat; } changed(); }

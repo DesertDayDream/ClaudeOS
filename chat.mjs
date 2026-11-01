@@ -79,7 +79,8 @@ function toolSummary(name, input = {}) {
   const linked = name.match(/^mcp__brain_\d+__(.*)$/);
   if (linked) return `Linked brain: ${linked[1].replace(/_/g, ' ')}${input.query ? ` "${input.query}"` : ''}`;
   if (name.startsWith('mcp__memory__')) return `Brain: ${name.slice('mcp__memory__'.length).replace(/_/g, ' ')}${input.query ? ` "${input.query}"` : ''}`;
-  if (EDIT_TOOLS.has(name)) return `${name === 'Write' ? 'Wrote' : 'Edited'} ${input.file_path || input.notebook_path || 'a file'}`;
+  // reads right both in the chat's list and on an Allow/Deny card ("wants to: Write …")
+  if (EDIT_TOOLS.has(name)) return `${name === 'Write' ? 'Write' : 'Edit'} ${input.file_path || input.notebook_path || 'a file'}`;
   const target = input.file_path || input.path || input.pattern || input.command || input.url || input.description || '';
   return `${name}${target ? ': ' + String(target).slice(0, 120) : ''}`;
 }
