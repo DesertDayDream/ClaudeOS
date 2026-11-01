@@ -17,6 +17,8 @@ import { createArtifacts } from './artifacts.mjs';
 import { openFile } from './openfile.mjs';
 import { createMemoryEditor, observationId } from './memory-edit.mjs';
 import { createSkillEditor } from './skill-edit.mjs';
+import { createOrg } from './org.mjs';
+import { ensureCabinet, findCabinet, cabinetTree } from './cabinets.mjs';
 import { appsInText, appForServer } from './public/apps.js';
 import { CATALOG, CONNECTORS_URL, addIntegration, removeIntegration, loginIntegration, isSigningIn } from './integrations.mjs';
 import { createRegistry, setupBrain, repairHooks, listFolder, slugFor, samePath, inside } from './brains.mjs';
@@ -32,6 +34,8 @@ const TEMPLATES = templatesDir(DATA);
 const HOOK = hookCommand(DATA);
 const brains = createRegistry({ file: path.join(DATA, 'brains.json') });
 // if the app folder moved since a brain was set up, point that brain's hooks at this copy
+// each brain's building: departments, who sits where, and their projects
+const org = createOrg({ dir: path.join(DATA, 'org') });
 const memoryFileOf = brain => path.join(brain.path, 'brain', 'memory.jsonl');
 for (const b of brains.list()) { try { repairHooks(b.path, HOOK, memoryServer(memoryFileOf(b))); } catch { /* folder may be gone */ } }
 
@@ -215,7 +219,7 @@ function snapshot() {
     // linked brains: their shared brain (read-only here), their own team, and whether they're working for us
     linked: brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, path: b.path, busy: handoffs.has(b.id),
       memories: collectBrain(b), skills: skillsIn(path.join(b.path, '.claude', 'skills'), 'project', path.basename(b.path)) })),
-    activity: collectActivity(brain), at: Date.now(),
+    activity: collectActivity(brain), at: Date.now(), org: org.snapshot(brain.id),
     integrations: integrations.brainId === brain.id ? integrations.list : [],
   };
 }
@@ -268,7 +272,7 @@ let last = snapshot();
 let lastKey = keyOf(last);
 const clients = new Set();
 function keyOf(s) {
-  return JSON.stringify([s.brain?.id, s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id), s.activity.length && s.activity[s.activity.length - 1]]);
+  return JSON.stringify([s.brain?.id, s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id), s.activity.length && s.activity[s.activity.length - 1], s.org]);
 }
 function refresh() {
   checkIntegrations(brains.active());
@@ -331,7 +335,7 @@ function chatFor(brain) {
       links: () => brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, memoryFile: memoryFileOf(b) })), token: TOKEN,
       // a brain you switched away from keeps working, out of sight
       broadcast: (event, data) => { if (brains.active()?.id === brain.id) broadcast(event, data); },
-      othersWorking: () => managerFor(brain).busy(), team: () => teamOf(brain),
+      othersWorking: () => managerFor(brain).busy(), team: () => teamOf(brain), projects: () => projectsOf(brain),
       // the chat is the Manager: when it stops, the Manager desk stops typing and unbriefed requests wait again
       onIdle: chatId => managerFor(brain).chatDone(chatId) }));
   }
@@ -341,7 +345,59 @@ function chatFor(brain) {
 function teamOf(brain) {
   const skills = skillsIn(teamDir(brain), 'project', path.basename(brain.path));
   nameSkills(skills);
-  return skills.map(s => ({ skill: s.name, name: names[s.id] || s.name, description: s.description || '' }));
+  return skills.map(s => {
+    const d = org.deptOf(brain.id, s.id);
+    return { skill: s.name, name: names[s.id] || s.name, description: s.description || '', dept: d ? { id: d.id, name: d.name } : null };
+  });
+}
+// ---------- file cabinets ----------
+// An employee as their cabinet and their own chat know them (any skill but a contractor).
+function employeeOf(brain, skillId) {
+  const s = collectSkills(brain).find(x => x.id === skillId);
+  if (!s) return null;
+  nameSkills([s]);
+  return { id: s.id, skill: s.name, name: names[s.id] || s.name, invokeAs: s.invokeAs, dept: org.deptOf(brain.id, s.id)?.name || null };
+}
+function cabinetFor(brain, skillId) {
+  const e = employeeOf(brain, skillId);
+  return e ? ensureCabinet(brain.path, e) : null;
+}
+// after a department change, every cabinet that exists moves to its owner's department folder
+function organizeCabinets(brain) {
+  for (const s of collectSkills(brain)) {
+    if (!findCabinet(brain.path, s.id)) continue;
+    try { cabinetFor(brain, s.id); } catch { /* tried again next time */ }
+  }
+}
+// What clicking an employee shows: their own chat, their cabinet's files, and their brief work with its logs.
+function employeeView(brain, skillId) {
+  const e = employeeOf(brain, skillId);
+  if (!e) return { error: 'That employee is gone.' };
+  const cabinet = ensureCabinet(brain.path, e);
+  const own = skillsIn(teamDir(brain), 'project', path.basename(brain.path)).some(x => x.id === skillId);
+  return { id: e.id, cabinet, files: cabinetTree(cabinet), chat: chatFor(brain).employeeChat({ ...e, cabinet }).snapshot(),
+    work: own ? managerFor(brain).workOf(e.skill) : [] };
+}
+function employeeApi(brain, what, body) {
+  const e = employeeOf(brain, String(body.id || ''));
+  if (!e) return { error: 'That employee is gone.' };
+  const cabinet = ensureCabinet(brain.path, e);
+  const c = chatFor(brain).employeeChat({ ...e, cabinet });
+  if (what === 'send') return c.send(body.text, { files: body.files });
+  if (what === 'stop') { c.stop(); return { ok: true }; }
+  if (what === 'open') {
+    const target = path.resolve(cabinet, String(body.path || ''));
+    const rel = path.relative(cabinet, target);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return Promise.resolve({ error: 'That is not in their cabinet.' });
+    return openFile(target, cabinet);
+  }
+  return { error: 'not found' };
+}
+
+// the brain's active projects, as the Manager may put tasks on them
+function projectsOf(brain) {
+  return org.snapshot(brain.id).departments.flatMap(d => d.projects.filter(p => p.status === 'active')
+    .map(p => ({ id: p.id, name: p.name, goal: p.goal, folder: p.folder, dept: d.name })));
 }
 // one team desk (shared inbox + briefs) per brain; the chat is its Manager
 const managers = new Map();
@@ -349,10 +405,13 @@ function managerFor(brain) {
   if (!managers.has(brain.id)) {
     managers.set(brain.id, createManager({ cwd: brain.path, dataFile: path.join(DATA, 'manager', `${brain.id}.json`), activityFile: ACTIVITY,
       memoryFile: memoryFileOf(brain), helper, memoryServer, port: PORT, token: TOKEN, team: () => teamOf(brain),
+      project: id => org.findProject(brain.id, id),
+      cabinet: skill => { const s = skillsIn(teamDir(brain), 'project', path.basename(brain.path)).find(x => x.name === skill); return s ? cabinetFor(brain, s.id) : null; }, logWork: (id, entry) => { org.logWork(brain.id, id, entry); refresh(); },
       chatBusy: () => chatFor(brain).anyBusy(),
       onBriefDone: (brief, text) => chatFor(brain).report(brief.chat, brief.title, text),
       broadcast: (event, data) => {
         if (brains.active()?.id === brain.id) broadcast(event, data);
+        if (event !== 'manager') return; // a task's log line
         if (!data.busy) chatFor(brain).dropOthersApprovals();
         refresh();
       } }));
@@ -446,6 +505,8 @@ function skillApi(active, route, body) {
     if (r.error) return r;
     // a rename keeps the employee's first name
     if (s && r.name !== s.name && names[s.id] && !names[idOf(r.name)]) { names[idOf(r.name)] = names[s.id]; delete names[s.id]; saveNames(); }
+    // ...and their department
+    if (s && r.name !== s.name) org.rename(active.id, s.id, idOf(r.name));
     return { ...r, id: idOf(r.name) };
   }
   if (route === 'fire') {
@@ -506,6 +567,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/integrations' && req.method === 'GET') return json(res, 200, integrationsView(active));
   if (url.pathname === '/api/chat' && req.method === 'GET') return json(res, 200, chat ? chat.snapshot() : { messages: [], busy: false, approvals: [] });
   if (url.pathname === '/api/chats' && req.method === 'GET') return json(res, 200, chat ? chat.list(url.searchParams.get('q') || '') : { chats: [] });
+  if (url.pathname === '/api/employee' && req.method === 'GET') return json(res, 200, active ? employeeView(active, url.searchParams.get('id') || '') : { error: 'Set up a brain first.' });
   if (url.pathname === '/api/manager' && req.method === 'GET') return json(res, 200, active ? managerFor(active).snapshot() : { inbox: [], files: [], briefs: [], busy: false });
   if (url.pathname === '/api/terminals' && req.method === 'GET') return json(res, 200, terminals.snapshot());
   if (url.pathname === '/api/artifacts' && req.method === 'GET') return json(res, 200, { list: artifacts.list(), port: ARTIFACT_PORT });
@@ -582,7 +644,7 @@ async function handleApi(req, res, url) {
       return json(res, 200, r);
     } catch (err) { return json(res, 200, { error: err.message }); }
   }
-  if (!chat && (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/brief' || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/handoff') || url.pathname.startsWith('/api/skills'))) return json(res, 200, { error: 'Set up a brain first.' });
+  if (!chat && (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/brief' || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/handoff') || url.pathname.startsWith('/api/skills') || url.pathname === '/api/org' || url.pathname.startsWith('/api/employee'))) return json(res, 200, { error: 'Set up a brain first.' });
   if (url.pathname === '/api/chat') return json(res, 200, chat.send(body.text, { files: body.files }));
   if (url.pathname === '/api/chat/warm') { chat.warm(); return json(res, 200, { ok: true }); }
   if (url.pathname === '/api/chat/tools') return json(res, 200, chat.setTools(body.tools || {}));
@@ -590,6 +652,8 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/chat/folder') return json(res, 200, chat.setFolder(body.folder || null));
   if (url.pathname === '/api/chat/stop') { chat.stop(); for (const h of handoffs.values()) h.stop(); return json(res, 200, { ok: true }); }
   if (url.pathname === '/api/handoff') return json(res, 200, await handoff(active, body, req));
+  if (url.pathname === '/api/org') { const r = org.apply(active.id, body); if (r.ok && /^(assign|editDept|removeDept)$/.test(body.op)) organizeCabinets(active); refresh(); return json(res, 200, r); }
+  if (url.pathname.startsWith('/api/employee/')) return json(res, 200, await employeeApi(active, url.pathname.split('/').pop(), body));
   if (url.pathname === '/api/skills/copy') return json(res, 200, copySkill(active, body));
   if (/^\/api\/skills\/(save|fire|restore)$/.test(url.pathname)) {
     try { const r = skillApi(active, url.pathname.split('/').pop(), body); refresh(); return json(res, 200, r); }
@@ -645,7 +709,7 @@ const server = http.createServer((req, res) => {
   if (!LOCAL_HOSTS.has(req.headers.host)) { res.writeHead(421); return res.end('wrong host'); }
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health'
-    || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief'
+    || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief' || url.pathname === '/api/org' || url.pathname.startsWith('/api/employee')
     || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file') {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));
   }

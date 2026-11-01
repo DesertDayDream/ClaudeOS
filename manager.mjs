@@ -9,13 +9,15 @@ import { spawn, execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { toolSummary } from './chat.mjs';
+import { workFolder, logFile } from './cabinets.mjs';
 
 const MAX_PARALLEL = 3;
 const MAX_TASKS = 12;
 const MAX_BRIEFS = 30;
 const clip = (s, n) => (s = String(s || '').trim()).length > n ? s.slice(0, n - 1) + '…' : s;
 
-export function createManager({ cwd, dataFile, activityFile, memoryFile, helper, memoryServer, port, token, broadcast, team, chatBusy = () => false, onBriefDone = () => {} }) {
+export function createManager({ cwd, dataFile, activityFile, memoryFile, helper, memoryServer, port, token, broadcast, team, project = () => null, logWork = () => {}, cabinet = () => null, chatBusy = () => false, onBriefDone = () => {} }) {
   let state = { inbox: [], briefs: [] };
   try { state = { ...state, ...JSON.parse(fs.readFileSync(dataFile, 'utf8')) }; } catch { /* first run */ }
   // runs from before a restart are gone
@@ -26,6 +28,19 @@ export function createManager({ cwd, dataFile, activityFile, memoryFile, helper,
   }
 
   const procs = new Map(); // brief id + task id -> { proc, session, stopped }
+  const logs = new Map();  // brief id + task id -> { employee, entries } since this start
+
+  // an employee's brief tasks, newest first, with their live logs (the page's view of their computer)
+  function workOf(skill) {
+    const out = [];
+    for (const b of [...state.briefs].reverse()) for (const t of b.tasks) {
+      if (t.employee !== skill) continue;
+      out.push({ key: `${b.id}:${t.id}`, brief: b.title, task: t.task, status: t.status, result: t.result, start: t.start, end: t.end,
+        folder: t.folder || null, logFile: t.logFile || null, project: t.projectName || null, log: logs.get(`${b.id}:${t.id}`)?.entries || null });
+      if (out.length >= 15) return out;
+    }
+    return out;
+  }
 
   function save() {
     state.briefs = state.briefs.slice(-MAX_BRIEFS);
@@ -95,21 +110,42 @@ export function createManager({ cwd, dataFile, activityFile, memoryFile, helper,
   }
 
   // ---------- one headless Claude run in the brain folder ----------
-  function runClaude(key, prompt, { who, allowed, denied = [], extraEnv = {} }, onDone) {
+  // onLog gets each step as it happens: { ts, kind: 'tool' | 'text' | 'error', text }
+  function runClaude(key, prompt, { who, allowed, denied = [], extraEnv = {}, addDir, onLog = () => {} }, onDone) {
     const session = crypto.randomUUID();
     const mcpServers = {
       memory: memoryServer(memoryFile),
       claudeos: { ...helper('approval-mcp'), env: { CLAUDEOS_PORT: String(port), CLAUDEOS_TOKEN: token, CLAUDEOS_WHO: who, ...extraEnv } },
     };
-    const args = ['-p', prompt, '--output-format', 'json', '--session-id', session,
+    const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--session-id', session,
       '--mcp-config', JSON.stringify({ mcpServers }), '--permission-prompt-tool', 'mcp__claudeos__approve',
-      '--allowedTools', allowed.join(','), ...(denied.length ? ['--disallowedTools', denied.join(',')] : [])];
+      '--allowedTools', allowed.join(','), ...(denied.length ? ['--disallowedTools', denied.join(',')] : []),
+      // a project's own folder, beside the brain (whose .claude/skills the employee needs)
+      ...(addDir ? ['--add-dir', addDir] : [])];
     const proc = spawn('claude', args, { cwd, windowsHide: true,
       env: { ...process.env, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } });
     const run = { proc, session, stopped: false };
     procs.set(key, run);
-    let out = '', err = '';
-    proc.stdout.on('data', d => { out += d; });
+    let buf = '', err = '', last = null;
+    // the run streams its steps: tool calls and what it says go to the log, the last line is the result
+    proc.stdout.on('data', d => {
+      buf += d;
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === 'result') last = ev;
+        if (ev.type === 'assistant') for (const b of ev.message?.content || []) {
+          if (b.type === 'text' && b.text.trim()) onLog({ ts: Date.now(), kind: 'text', text: clip(b.text, 600) });
+          if (b.type === 'tool_use' && b.name !== 'mcp__claudeos__approve') onLog({ ts: Date.now(), kind: 'tool', text: toolSummary(b.name, b.input) });
+        }
+        if (ev.type === 'user') for (const b of ev.message?.content || []) {
+          if (b.type === 'tool_result' && b.is_error) onLog({ ts: Date.now(), kind: 'error', text: clip(typeof b.content === 'string' ? b.content : (b.content || []).map(x => x.text || '').join(' '), 300) });
+        }
+      }
+    });
     proc.stderr.on('data', d => { err += d; });
     let ended = false;
     const end = r => {
@@ -123,7 +159,8 @@ export function createManager({ cwd, dataFile, activityFile, memoryFile, helper,
     proc.on('error', e => end({ error: `Could not start Claude Code: ${e.message}` }));
     proc.on('close', code => {
       try {
-        const r = JSON.parse(out.trim().split('\n').pop());
+        const r = last;
+        if (!r) throw new Error('no result');
         const usage = { cost: r.total_cost_usd ?? null, turns: r.num_turns || 0,
           sent: ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'].reduce((a, k) => a + (Number(r.usage?.[k]) || 0), 0),
           output: Number(r.usage?.output_tokens) || 0 };
@@ -185,7 +222,10 @@ Files in inbox/ with no typed request are work too when an employee's skill says
       seen.add(id);
       if (!skills.has(t.employee)) problems.push(`Task ${id}: "${t.employee}" isn't on the team. Use one of: ${[...skills].join(', ')}.`);
       if (!String(t.task || '').trim()) problems.push(`Task ${id} says nothing to do.`);
+      const proj = t.project ? project(String(t.project)) : null;
+      if (t.project && (!proj || proj.p.status !== 'active')) problems.push(`Task ${id}: "${t.project}" isn't an active project id. Leave "project" out, or use one from the project list.`);
       return { id, employee: String(t.employee), name: crew.find(c => c.skill === t.employee)?.name || String(t.employee), task: clip(t.task, 6000), after, request: (Array.isArray(t.request) ? t.request : []).map(String),
+        ...(proj ? { project: proj.p.id, projectName: proj.p.name } : {}),
         status: 'waiting', result: '', start: 0, end: 0, usage: null, session: null };
     });
     if (problems.length) return { error: problems.join('\n') };
@@ -244,19 +284,45 @@ Files in inbox/ with no typed request are work too when an employee's skill says
       const who = crew.find(c => c.skill === d.employee);
       return `- ${who?.name || d.employee} (${d.employee}): ${clip(d.result, 1500)}`;
     }).join('\n')}` : '';
+    // the project's goal and what colleagues reported on it lately; the department's other people
+    const proj = t.project ? project(t.project) : null;
+    const projText = proj ? `\n\nThis is work on the project "${proj.p.name}" (${proj.d.name} department).${proj.p.goal ? ` Goal: ${proj.p.goal}` : ''}${proj.p.folder ? `\nThe project's files are in ${proj.p.folder}.` : ''}${proj.p.log.length ? `\nWhat colleagues reported on it lately:\n${proj.p.log.slice(-5).map(l => `- ${l.name} (${l.employee}), ${new Date(l.ts).toISOString().slice(0, 10)}: ${l.task} -> ${l.status}. ${clip(l.result, 400)}`).join('\n')}` : ''}` : '';
+    const mates = me.dept ? crew.filter(c => c.dept?.id === me.dept.id && c.skill !== me.skill) : [];
+    const deptText = me.dept ? ` You work in the ${me.dept.name} department${mates.length ? ` with ${mates.map(c => `${c.name} (${c.skill})`).join(', ')}` : ''}.` : '';
+    // their file cabinet: a folder of its own for this task, and the run's log beside it
+    const title = t.task.split('\n')[0];
+    let cab = null;
+    try {
+      cab = cabinet(t.employee);
+      if (cab) { t.folder = workFolder(cab, proj ? proj.p.name : 'General', title); t.logFile = logFile(cab, title); }
+    } catch { cab = null; /* no cabinet: they work as before */ }
+    const cabText = t.folder ? `\nYour file cabinet is ${cab}. Save everything you make for this task in ${t.folder} (add subfolders there if it helps, and give files clear names). Write somewhere else only when the task names that exact place.` : '';
     // the task comes first: the first line is what the boards and the speech bubble show
-    const prompt = `${t.task}${earlier}
+    const prompt = `${t.task}${earlier}${projText}
 
 ---
-You are ${me.name}, the ${me.skill} employee on this brain's team, working on the Manager's brief "${brief.title}". Start by using the ${me.skill} skill, then do only this task. Other employees may be working in this folder at the same time, so only touch the files your task names or creates. End with a short report: what you did and where the output is.`;
+You are ${me.name}, the ${me.skill} employee on this brain's team, working on the Manager's brief "${brief.title}".${deptText} Start by using the ${me.skill} skill, then do only this task. Other employees may be working in this folder at the same time, so only touch the files your task names or creates.${cabText} End with a short report: what you did and where the output is.`;
     t.status = 'working';
     t.start = Date.now();
-    const run = runClaude(brief.id + ':' + t.id, prompt, { who: `${me.name} (${me.skill})`, allowed: ['mcp__memory'] }, r => {
+    const key = brief.id + ':' + t.id;
+    const log = { employee: t.employee, entries: [] };
+    logs.set(key, log);
+    const note = entry => {
+      log.entries.push(entry);
+      if (log.entries.length > 300) log.entries.shift();
+      broadcast('tasklog', { key, employee: t.employee, entry });
+      if (t.logFile) try { fs.appendFileSync(t.logFile, `- ${new Date(entry.ts).toLocaleTimeString()} ${entry.kind === 'tool' ? '**' + entry.text + '**' : entry.kind === 'error' ? '! ' + entry.text : entry.text.replace(/\n/g, ' ')}\n`); } catch { /* the page still has it */ }
+    };
+    if (t.logFile) try { fs.writeFileSync(t.logFile, `# ${title}\n\n${me.name} (${me.skill}) · brief "${brief.title}"${proj ? ` · project ${proj.p.name}` : ''} · ${new Date().toLocaleString()}\nFolder: ${t.folder}\n\n## Task\n\n${t.task}\n\n## Log\n\n`); } catch { /* fine */ }
+    const run = runClaude(key, prompt, { who: `${me.name} (${me.skill})`, allowed: ['mcp__memory'], addDir: proj?.p.folder, onLog: note }, r => {
       t.end = Date.now();
       t.usage = r.usage || null;
       if (r.stopped) { t.status = 'stopped'; t.result = 'Stopped.'; }
       else if (r.error) { t.status = 'error'; t.result = clip(r.error, 2000); }
       else { t.status = 'done'; t.result = clip(r.result, 4000); }
+      note({ ts: Date.now(), kind: t.status === 'done' ? 'done' : 'error', text: t.status === 'done' ? 'Finished.' : t.result });
+      if (t.logFile) try { fs.appendFileSync(t.logFile, `\n## Report (${t.status})\n\n${t.result}\n`); } catch { /* fine */ }
+      if (proj && !r.stopped) logWork(proj.p.id, { employee: t.employee, name: t.name, task: t.task.split('\n')[0], status: t.status, result: t.result });
       tickAll();
     });
     t.session = run.session;
@@ -277,5 +343,5 @@ You are ${me.name}, the ${me.skill} employee on this brain's team, working on th
     return { ok: true };
   }
 
-  return { snapshot, add, remove, upload, handOver, markSent, chatDone, stop, postBrief, busy };
+  return { snapshot, add, remove, upload, handOver, markSent, chatDone, stop, postBrief, busy, workOf };
 }

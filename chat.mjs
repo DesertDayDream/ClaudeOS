@@ -31,10 +31,25 @@ const MODES = ['acceptEdits', 'auto', 'plan', 'bypassPermissions'];
 // file edits keep what changed, so the chat can show them as diffs
 const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 const MAX_DIFF = 20000; // characters kept per side of an edit
-const managerPrompt = crew => `You are the Manager of this brain's team, and this chat is how the user talks to you.
-The team (employee name, skill: what it does):
-${crew.map(c => `- ${c.name}, ${c.skill}: ${String(c.description || '').slice(0, 200)}`).join('\n')}
-When the user wants work done that fits the team, don't do it yourself: brief them with mcp__claudeos__post_brief. Each employee works in their own run at their desk, at the same time as the others, and can't see this chat, so each task must stand on its own: the goal, the exact input files, where to save the output, and anything from memory they need (search it first when the work depends on the user's preferences or past decisions). Put a task id in "after" only when that task needs the other's output; never chain tasks that don't depend on each other. Fewer, bigger tasks beat many tiny ones. Parts nobody on the team can do, or too unclear to act on, go in "skipped" with the reason. After the brief is accepted, tell the user in a few lines who does what and stop: the team's reports come back in this chat by themselves. Questions and quick things you answer yourself.`;
+// The team as the Manager sees it: grouped by department (the building in the 3D view), then the projects.
+function orgText(crew, projects) {
+  const line = c => `- ${c.name}, ${c.skill}: ${String(c.description || '').slice(0, 200)}`;
+  const depts = [...new Set(crew.filter(c => c.dept).map(c => c.dept.name))];
+  if (!depts.length && !projects.length) return `The team (employee name, skill: what it does):\n${crew.map(line).join('\n')}`;
+  const parts = depts.map(d => `${d} department:\n${crew.filter(c => c.dept?.name === d).map(line).join('\n')}`);
+  const lobby = crew.filter(c => !c.dept);
+  if (lobby.length) parts.push(`No department yet (the Lobby):\n${lobby.map(line).join('\n')}`);
+  let text = `The team works in one building, split into departments (employee name, skill: what it does):\n${parts.join('\n\n')}`;
+  if (projects.length) text += `\n\nActive projects (id: name, department, goal, folder):\n${projects.map(p => `- ${p.id}: ${p.name} (${p.dept})${p.goal ? ` - ${p.goal.slice(0, 240)}` : ''}${p.folder ? ` [folder: ${p.folder}]` : ''}`).join('\n')}`;
+  return text + '\n\nDepartments work together: when a job needs several people, prefer colleagues from the same department, and give work on a project to the department that owns it. Set a task\'s "project" to the project id when it is work on that project: the employee then sees the project\'s goal and what colleagues reported on it before, and their report goes in the project\'s log.';
+}
+const managerPrompt = (crew, projects = []) => `You are the Manager of this brain's team, and this chat is how the user talks to you.
+${orgText(crew, projects)}
+When the user wants work done that fits the team, don't do it yourself: brief them with mcp__claudeos__post_brief. Each employee works in their own run at their desk, at the same time as the others, and can't see this chat, so each task must stand on its own: the goal, the exact input files, and anything from memory they need (search it first when the work depends on the user's preferences or past decisions). Put a task id in "after" only when that task needs the other's output; never chain tasks that don't depend on each other. Fewer, bigger tasks beat many tiny ones. Parts nobody on the team can do, or too unclear to act on, go in "skipped" with the reason. After the brief is accepted, tell the user in a few lines who does what and stop: the team's reports come back in this chat by themselves. Questions and quick things you answer yourself.
+Each employee has a file cabinet (a folder of their own in the brain's Office folder) and saves what they make there, in a new folder per task, filed under the project; their report says where. Don't choose output paths for them: name a path only when the user asked for the result in a specific place, or when a task must change existing files.`;
+// Talking to one employee at their desk: they work in their own role and keep their files in their cabinet.
+const employeePrompt = e => `You are ${e.name}, the ${e.skill} employee on this brain's team${e.dept ? `, in the ${e.dept} department` : ''}. The user is talking to you directly at your desk, not through the Manager. Use the ${e.invokeAs || e.skill} skill for work in its area and stay in that role; for work far outside it, say which colleague or the Manager should take it.
+Your file cabinet is ${e.cabinet}. Save everything you make there, filed in folders: a folder named after the project or topic for real work (make it if it's missing), or ${path.join(e.cabinet, 'Chats')}\\<today's date> for quick things. Give files and folders clear names, and never leave loose files in the brain folder. Tell the user where you saved things.`;
 // Each chat keeps one Claude process running between messages (stdin takes the next message), so a
 // reply starts without launching Claude and reloading the conversation. It quits after a while idle.
 const IDLE_MS = 20 * 60e3;
@@ -65,7 +80,7 @@ function toolEntry(name, input = {}) {
 const killTree = proc => execFile('taskkill', ['/pid', String(proc.pid), '/T', '/F'], () => {});
 const clip = (s, n) => (s = String(s || '').replace(/\s+/g, ' ').trim()).length > n ? s.slice(0, n - 1) + '…' : s;
 
-function toolSummary(name, input = {}) {
+export function toolSummary(name, input = {}) {
   if (name === 'Skill') return `Handing off to ${input.skill || input.command || 'a skill'}`;
   if (name === 'mcp__claudeos__post_brief') return `Briefing the team: ${input.title || 'new brief'} (${(input.tasks || []).map(t => t.employee).join(', ')})`;
   if (name === 'mcp__claudeos__start_session') return `Started a side session: ${input.title || ''}`;
@@ -85,7 +100,7 @@ function toolSummary(name, input = {}) {
   return `${name}${target ? ': ' + String(target).slice(0, 120) : ''}`;
 }
 
-export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, helper, memoryServer, browserServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], onIdle = () => {} }) {
+export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, helper, memoryServer, browserServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], projects = () => [], onIdle = () => {} }) {
   // the brain's chats: which one the page shows, the model/effort picked, and a row per saved chat
   const indexFile = path.join(dir, 'index.json');
   let index = { current: null, options: {}, chats: {} };
@@ -120,7 +135,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
   function emit(ev) { broadcast('chat', ev); }
   const anyBusy = () => [...convs.values()].some(c => c.busy());
   function rows() {
-    return Object.entries(index.chats).map(([id, m]) => ({ id, ...m, busy: !!convs.get(id)?.busy() }))
+    return Object.entries(index.chats).filter(([, m]) => !m.employee).map(([id, m]) => ({ id, ...m, busy: !!convs.get(id)?.busy() }))
       .sort((a, b) => b.updated - a.updated);
   }
   function listChanged() { emit({ kind: 'list', current: index.current, chats: rows(), any: anyBusy() }); }
@@ -188,7 +203,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     // folder: a project folder this chat works in instead of the brain's own (set before the first message)
     // tools: browser / chrome / computer turned on for this chat; parent: the chat that started this side session
     // mode: the permission mode, picked per chat (a new chat starts with the last one picked)
-    let state = { sessionId: null, messages: [], context: null, carryOver: null, folder: null, tools: {}, parent: null, mode: index.options?.mode || '' };
+    let state = { sessionId: null, messages: [], context: null, carryOver: null, folder: null, tools: {}, parent: null, mode: index.options?.mode || '', employee: null };
     try { state = { ...state, ...JSON.parse(fs.readFileSync(file, 'utf8')) }; } catch { /* new chat */ }
     let run = null;      // the message being answered right now
     let live = null;     // the Claude process kept running for this chat: { proc, key, idle, since, stderr }
@@ -200,7 +215,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       state.messages = state.messages.slice(-MAX_MESSAGES);
       try { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(file, JSON.stringify(state)); } catch { /* keep going */ }
       const m = index.chats[id] || { created: state.messages[0]?.ts || Date.now() };
-      index.chats[id] = { ...m, title: m.renamed ? m.title : titleOf(state.messages), updated: state.messages.at(-1)?.ts || Date.now(), count: state.messages.length };
+      index.chats[id] = { ...m, ...(state.employee ? { employee: state.employee.id } : {}), title: m.renamed ? m.title : titleOf(state.messages), updated: state.messages.at(-1)?.ts || Date.now(), count: state.messages.length };
       saveIndex();
     }
     function push(msg) {
@@ -214,7 +229,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     // How this chat's Claude is started. Everything but --resume goes in the key: when it changes
     // (model, effort, linked brains, team), the running process is replaced at the next message.
     function launch() {
-      const linked = links(), crew = team();
+      const emp = state.employee, linked = links(), crew = emp ? [] : team();
       const mcpServers = {
         // the memory server is passed here too, so a brain's memory works before its folder is trusted
         memory: memoryServer(memoryFile),
@@ -222,7 +237,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
           ...helper('approval-mcp'),
           env: { CLAUDEOS_PORT: String(port), CLAUDEOS_TOKEN: token, CLAUDEOS_CHAT: id, CLAUDEOS_LINKS: linked.map(b => b.name).join('\n'),
             // terminal, artifacts and (unless this is a side session) side sessions
-            CLAUDEOS_DESK: '1', CLAUDEOS_SESSIONS: state.parent ? '0' : '1',
+            CLAUDEOS_DESK: '1', CLAUDEOS_SESSIONS: state.parent || emp ? '0' : '1',
             ...(crew.length ? { CLAUDEOS_TEAM: JSON.stringify(crew.map(c => c.skill)) } : {}) },
         },
       };
@@ -254,7 +269,8 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       if (tools.computer) extra.push('Computer use is on: mcp__computer__screenshot / zoom / click / move / drag / type / key / scroll control this PC\'s screen. Take a screenshot before and after acting. Never enter passwords or payment details, never move money, and ask in chat before anything hard to undo.');
       if (state.parent) extra.push('This chat is a side session another chat started. Do the task in the first message and end with a short report of what you did and what is left: that report goes back to the chat that started you.');
       if (state.folder) extra.push(`This chat works in the project folder ${state.folder}. Its CLAUDE.md, settings and Claude Code memory (MEMORY.md) apply exactly as in Claude Desktop: keep knowledge about this project there, as that memory says. The brain (${cwd}) is added beside it; use the brain's shared memory for facts that matter across projects.`);
-      if (crew.length) extra.push(managerPrompt(crew));
+      if (crew.length) extra.push(managerPrompt(crew, projects()));
+      if (emp) extra.push(employeePrompt(emp));
       if (linked.length) {
         extra.push(`Linked brains (other ClaudeOS brains the user connected to this one):\n${linked.map((b, i) =>
           `- ${b.name}: read its shared brain with mcp__brain_${i + 1}__search_nodes / open_nodes / read_graph (read-only).`).join('\n')}\n` +
@@ -545,6 +561,8 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       state.tools = tools || {};
     }
     const parentOf = () => state.parent || null;
+    // a chat with one employee: who they are and where their cabinet is now (a move restarts its process)
+    function setEmployee(e) { state.employee = e; }
     // the folder a chat works in is picked before it starts: its Claude session lives under that folder
     function setFolder(folder) {
       if (run) return { error: 'Claude is still answering. Wait for it, or press Stop.' };
@@ -560,7 +578,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     }
     // the text a search looks through
     const text = () => state.messages.map(m => m.text).join('\n');
-    return { id, send, stop, wrapUp, report, startWith, snapshot, text, setFolder, setTools, setMode, setupSession, parentOf, warm, cool, file,
+    return { id, send, stop, wrapUp, report, startWith, snapshot, text, setFolder, setTools, setMode, setupSession, setEmployee, parentOf, warm, cool, file,
       folder: () => state.folder || cwd, tools: () => state.tools || {},
       busy: () => !!run, empty: () => !state.messages.length,
       idleSince: () => (live && !run ? live.since : null) };
@@ -649,6 +667,14 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     const r = c.send(String(message || ''), { from: 'session', fromParent: true });
     return r.error ? r : { ok: true, text: 'Sent. Its answer will come back here.' };
   }
+  // ---------- an employee's own chat box ----------
+  // One chat per employee, kept out of the Chats list. emp: { id, skill, name, invokeAs, dept, cabinet }
+  const empChatId = skillId => 'emp-' + crypto.createHash('sha1').update(String(skillId)).digest('hex').slice(0, 12);
+  function employeeChat(emp) {
+    const c = conv(empChatId(emp.id));
+    c.setEmployee(emp);
+    return c;
+  }
   const chatFolder = chatId => convs.get(chatId)?.folder() || cwd;
 
   // A finished brief reports to the chat that sent it (or the open one, if that chat was deleted).
@@ -709,7 +735,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     busy: () => current().busy(), currentId: () => current().id,
     // all of them
     setFolder: f => current().setFolder(f), setTools: t => current().setTools(t), setMode: m => current().setMode(m), warm: () => current().warm(), upload, attachmentFile,
-    startSession, messageSession, chatFolder, owns: chatId => convs.has(chatId),
+    startSession, messageSession, chatFolder, employeeChat, empChatId, owns: chatId => convs.has(chatId),
     open, newChat, rename, remove, list, report, anyBusy, stopAll: () => { for (const c of convs.values()) { c.stop(); c.cool(); } },
     setOptions, requestApproval, answerApproval, dropOthersApprovals, snapshot,
   };

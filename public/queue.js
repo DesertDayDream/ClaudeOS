@@ -1,7 +1,7 @@
 import { events } from '/events.js';
 // The team queue and briefs. Requests you Queue in the chat (and files dropped into the brain's inbox/
 // folder) wait above the message box; "Send to team" hands them all to the Manager (the open chat),
-// which briefs the employees. The Team tab shows each brief: who does what, what waits for what, and
+// which briefs the employees. The Activity tab shows each brief: who does what, what waits for what, and
 // how each part ended. The Queue button itself lives in chat.js, beside Send.
 const TOKEN = window.CLAUDEOS_TOKEN;
 const queueEl = document.getElementById('queue');
@@ -52,7 +52,7 @@ function briefCard(b) {
     const took = t.end && t.start ? ` · ${Math.max(1, Math.round((t.end - t.start) / 1000))}s` : '';
     html += `<div class="run ${RUN_CLASS[t.status] ?? ''} ${open.has(key) ? 'open' : ''}" data-key="${key}">
       <div class="top"><i></i><b>${esc(t.name || t.employee)} · ${esc(t.task.split('\n')[0])}</b></div>
-      <div class="meta">${t.employee} · ${STATUS[t.status] || t.status}${waits}${took}${t.usage?.cost ? ` · ≈$${t.usage.cost.toFixed(2)}` : ''}</div>
+      <div class="meta">${t.employee}${t.projectName ? ` · ${esc(t.projectName)}` : ""} · ${STATUS[t.status] || t.status}${waits}${took}${t.usage?.cost ? ` · ≈$${t.usage.cost.toFixed(2)}` : ''}</div>
       ${t.result ? `<div class="res">${esc(t.result)}</div>` : ''}</div>`;
   }
   for (const k of b.skipped || []) html += `<div class="ib-skip">Set aside: ${esc(k.reason)}</div>`;

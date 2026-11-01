@@ -90,6 +90,7 @@ rl.on('line', async line => {
           task: { type: 'string', description: 'Everything the employee needs: goal, input files, where to save output, relevant facts from memory. They can\'t see this chat or the inbox.' },
           after: { type: 'array', items: { type: 'string' }, description: 'Ids of earlier tasks whose output this one needs. Leave empty to run at once.' },
           request: { type: 'array', items: { type: 'string' }, description: 'Ids of the inbox requests this task works on.' },
+          project: { type: 'string', description: 'Id of the active project this task is work on, if any.' },
         } } },
         skipped: { type: 'array', items: { type: 'object', properties: { request: { type: 'string' }, reason: { type: 'string' } } }, description: 'Requests nobody on the team can do, or too unclear to act on.' },
         notes: { type: 'string', description: 'Anything the user should know.' },

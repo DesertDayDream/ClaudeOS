@@ -7,6 +7,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { events } from '/events.js';
 import { APPS, appForServer, normServer } from './apps.js';
+import * as office from './office.js';
 
 const TOKEN = window.CLAUDEOS_TOKEN;
 async function api(path, body) {
@@ -265,14 +266,17 @@ const STATION = {
   bezel: box(1.12, 0.74, 0.06), neck: box(0.08, 0.42, 0.08), foot: box(0.42, 0.03, 0.26),
   seat: box(0.85, 0.09, 0.75), back: box(0.85, 0.55, 0.08), post: box(0.08, 0.5, 0.08),
   screen: new THREE.PlaneGeometry(1.02, 0.64),
+  cabinet: box(0.55, 0.9, 0.7), drawer: box(0.47, 0.03, 0.02), handle: box(0.16, 0.035, 0.04),
 };
+const cabinetMat = new THREE.MeshStandardMaterial({ color: 0x4a5070, roughness: 0.5, metalness: 0.35 });
 function stationMesh(geo, mat, x, y, z, parent) {
   const m = new THREE.Mesh(geo, mat);
   m.position.set(x, y, z);
   parent.add(m);
   return m;
 }
-function buildStation(color) {
+// withCabinet: an employee's file cabinet beside the desk (the Manager has none)
+function buildStation(color, withCabinet) {
   const g = new THREE.Group();
   const deskY = -0.38, deskZ = 1.0;
   stationMesh(STATION.top, deskMat, 0, deskY, deskZ, g);
@@ -293,7 +297,18 @@ function buildStation(color) {
   stationMesh(STATION.seat, chairMat, 0, -0.78, -0.05, g);
   stationMesh(STATION.back, chairMat, 0, -0.45, -0.48, g);
   stationMesh(STATION.post, metalMat, 0, -1.08, -0.05, g);
-  return { station: g, screen };
+  let cabinet = null;
+  if (withCabinet) {
+    // two drawers, their fronts toward the chair; a stripe in the employee's colour on each
+    cabinet = stationMesh(STATION.cabinet, cabinetMat, 1.5, -0.88, 0.75, g);
+    const stripe = new THREE.MeshBasicMaterial({ color, toneMapped: false });
+    for (const y of [0.2, -0.2]) {
+      const dz = -0.36;
+      stationMesh(STATION.drawer, metalMat, 0, y + 0.19, dz, cabinet);
+      stationMesh(STATION.handle, stripe, 0, y, dz, cabinet);
+    }
+  }
+  return { station: g, screen, cabinet };
 }
 // Idle: a calm screensaver. Busy: lines of code scrolling in the employee's colour.
 function drawScreen(screen, busy, t) {
@@ -496,10 +511,13 @@ function addEmployee(skill, delay) {
     depthWrite: false, blending: THREE.AdditiveBlending }));
   aura.scale.setScalar(3.4);
   root.add(aura);
-  const { station, screen } = buildStation(color);
+  const { station, screen, cabinet } = buildStation(color, skill.source !== 'contractor');
   root.add(station);
+  // the monitor opens their computer (activity and logs), the cabinet their files
   screen.userData.kind = 'employee';
   screen.userData.id = skill.id;
+  screen.userData.view = 'computer';
+  if (cabinet) cabinet.userData = { kind: 'employee', id: skill.id, view: 'cabinet' };
   drawScreen(screen, false, 0);
   // beam: a faint line plus sparks travelling from the brain to the employee
   const beamGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
@@ -515,7 +533,7 @@ function addEmployee(skill, delay) {
   }
   root.scale.setScalar(0.0001);
   empGroup.add(root);
-  employees.set(skill.id, { root, body, sphere, eyes, label, bubble, appStrip, color, aura, beam, sparks, station, screen, data: skill, born: performance.now() + delay,
+  employees.set(skill.id, { root, body, sphere, eyes, label, bubble, appStrip, color, aura, beam, sparks, station, screen, cabinet, data: skill, born: performance.now() + delay,
     slot: 0, busyAmt: 0, blinkAt: performance.now() + 1500 + Math.random() * 4000, phase: Math.random() * 6 });
 }
 
@@ -561,8 +579,12 @@ function bossLine() {
   const waiting = managerState.inbox.filter(x => x.status === 'new').length + managerState.files.length;
   return waiting ? `${waiting} queued for the team` : '';
 }
+let managerSeen = false;
 function setManager(next) {
   managerState = next;
+  // hand-offs that happened before the page opened aren't replayed
+  handoffVisits(next.briefs || [], managerSeen);
+  managerSeen = true;
   work = withBriefWork(hookWork);
   renderPanel();
 }
@@ -582,20 +604,178 @@ function removeEmployee(id) {
   employees.delete(id);
 }
 
-// Each employee is stationed at a desk facing the brain: rows of up to 12, each row a step higher.
-function layoutEmployees() {
-  const list = [...employees.values()].sort((a, b) =>
-    (a.data.source === b.data.source ? 0 : a.data.source === 'project' ? -1 : b.data.source === 'project' ? 1 : a.data.source.localeCompare(b.data.source))
-    || a.data.name.localeCompare(b.data.name));
-  const perRing = 12;
-  list.forEach((e, i) => {
-    const ring = Math.floor(i / perRing);
-    const inRing = Math.min(perRing, list.length - ring * perRing);
-    e.ring = ring;
-    e.angle0 = (i % perRing) / inRing * Math.PI * 2 + ring * 0.4;
-    e.radius = 9.5 + ring * 3.2;
-    e.height = -0.6 + ring * 1.1;
+// ---------- the building: each department is a glass room round the brain, all desks facing it ----------
+// Employees with no department work on the Lobby's open floor: rings outside the rooms, each a step
+// higher (with no departments at all, that's the whole office, as before).
+const building = new THREE.Group();
+scene.add(building);
+const FLOOR_Y = -2.0, DESK_X = 3.3, DESK_Z = 3.0;
+const ENTRANCE = 0.55; // the gap in the ring of rooms, in front of the Manager's desk
+const rooms = new Map(); // dept id -> { group, center, pickables }
+let roomsKey = '', ground = null;
+const sourceOrder = (a, b) => (a.data.source === b.data.source ? 0 : a.data.source === 'project' ? -1 : b.data.source === 'project' ? 1 : a.data.source.localeCompare(b.data.source))
+  || a.data.name.localeCompare(b.data.name);
+function layoutEmployees(org) {
+  const depts = org?.departments || [];
+  const where = new Map();
+  for (const d of depts) for (const id of d.employees) where.set(id, d.id);
+  const all = [...employees.values()].sort(sourceOrder);
+  const plan = depts.map(d => {
+    const members = all.filter(e => where.get(e.data.id) === d.id && e.data.source !== 'contractor');
+    const n = members.length, cols = Math.max(2, Math.ceil(Math.sqrt(n * 1.5))), rows = Math.max(1, Math.ceil(n / cols));
+    return { d, members, cols, rows, w: cols * DESK_X + 1.6, depth: rows * DESK_Z + 1.4 };
   });
+  // the rooms' fronts sit on one circle, big enough for all of them; the set is centred at the back
+  const spanAt = (p, r) => 2 * Math.atan((p.w / 2 + 0.8) / r);
+  let r0 = 9;
+  while (plan.reduce((s, p) => s + spanAt(p, r0), 0) > Math.PI * 2 - ENTRANCE && r0 < 80) r0 += 0.5;
+  let a = Math.PI * 1.5 - plan.reduce((s, p) => s + spanAt(p, r0), 0) / 2;
+  for (const p of plan) {
+    const span = spanAt(p, r0);
+    p.angle = a + span / 2;
+    a += span;
+    p.r = r0 + p.depth / 2;
+    p.cx = Math.cos(p.angle) * p.r;
+    p.cz = Math.sin(p.angle) * p.r;
+    const th = p.facing = Math.atan2(-p.cx, -p.cz); // the room's +z points at the brain
+    p.members.forEach((e, i) => {
+      const col = i % p.cols, row = Math.floor(i / p.cols), inRow = Math.min(p.cols, p.members.length - row * p.cols);
+      const lx = (col - (inRow - 1) / 2) * DESK_X, lz = ((p.rows - 1) / 2 - row) * DESK_Z - 0.3;
+      e.home = new THREE.Vector3(p.cx + lx * Math.cos(th) + lz * Math.sin(th), -0.6, p.cz - lx * Math.sin(th) + lz * Math.cos(th));
+      e.facing = th;
+      e.dept = p.d.id;
+    });
+  }
+  const outer = plan.length ? Math.max(...plan.map(p => p.r + p.depth / 2)) + 2.5 : 9.5;
+  const lobby = all.filter(e => !plan.some(p => p.members.includes(e)));
+  for (let i = 0, ring = 0; i < lobby.length; ring++) {
+    const radius = outer + ring * 3.2;
+    const per = plan.length ? Math.max(12, Math.floor(Math.PI * 2 * radius / 3.4)) : 12;
+    const inRing = Math.min(per, lobby.length - i);
+    for (let k = 0; k < inRing; k++, i++) {
+      const e = lobby[i], ang = k / inRing * Math.PI * 2 + ring * 0.4;
+      e.home = new THREE.Vector3(Math.cos(ang) * radius, -0.6 + ring * 1.1 + (plan.length ? 0.6 : 0), Math.sin(ang) * radius);
+      e.facing = Math.atan2(-e.home.x, -e.home.z);
+      e.dept = '';
+    }
+  }
+  const key = JSON.stringify(plan.map(p => [p.d.id, p.d.name, p.d.color, p.w, p.depth, p.angle.toFixed(3), p.members.length,
+    p.d.projects.filter(x => x.status === 'active').map(x => x.name)]));
+  if (key !== roomsKey) { roomsKey = key; buildRooms(plan, outer); }
+}
+
+function disposeTree(o) {
+  o.traverse(x => { x.geometry?.dispose(); x.material?.map?.dispose(); x.material?.dispose(); });
+}
+function buildRooms(plan, outer) {
+  for (const r of rooms.values()) { building.remove(r.group); disposeTree(r.group); }
+  rooms.clear();
+  if (ground) { building.remove(ground); disposeTree(ground); ground = null; }
+  if (!plan.length) return;
+  // the building's floor: a dark disc with a faint polar grid
+  ground = new THREE.Group();
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(outer - 0.8, 96), new THREE.MeshStandardMaterial({ color: 0x0b0e1c, roughness: 0.9, transparent: true, opacity: 0.85 }));
+  disc.rotation.x = -Math.PI / 2;
+  const grid = new THREE.PolarGridHelper(outer - 0.8, 16, 6, 96, 0x2a3156, 0x1a1f38);
+  grid.position.y = 0.01;
+  for (const m of [grid.material].flat()) { m.transparent = true; m.opacity = 0.5; }
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(outer - 0.8, 0.05, 6, 160), new THREE.MeshBasicMaterial({ color: 0x5a64a8, transparent: true, opacity: 0.6 }));
+  rim.rotation.x = Math.PI / 2;
+  ground.add(disc, grid, rim);
+  ground.position.y = FLOOR_Y - 0.03;
+  building.add(ground);
+  for (const p of plan) {
+    const col = new THREE.Color(p.d.color), g = new THREE.Group();
+    g.position.set(p.cx, FLOOR_Y, p.cz);
+    g.rotation.y = p.facing;
+    const pickId = 'dept:' + p.d.id;
+    const floor = new THREE.Mesh(new THREE.BoxGeometry(p.w, 0.05, p.depth), new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.25,
+      transparent: true, opacity: 0.16, depthWrite: false }));
+    floor.userData = { kind: 'dept', id: pickId };
+    const H = 2.4;
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(p.w, H, p.depth)), new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.4 }));
+    edges.position.y = H / 2;
+    // glass on three sides; the side facing the brain stays open
+    const glass = new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.05, side: THREE.DoubleSide, depthWrite: false });
+    const back = new THREE.Mesh(new THREE.PlaneGeometry(p.w, H), glass);
+    back.position.set(0, H / 2, -p.depth / 2);
+    g.add(floor, edges, back);
+    for (const x of [-p.w / 2, p.w / 2]) {
+      const side = new THREE.Mesh(new THREE.PlaneGeometry(p.depth, H), glass);
+      side.position.set(x, H / 2, 0);
+      side.rotation.y = Math.PI / 2;
+      g.add(side);
+    }
+    const sign = roomSign(p);
+    sign.position.set(0, H + 1.1, -p.depth / 2);
+    sign.userData = { kind: 'dept', id: pickId };
+    g.add(sign);
+    building.add(g);
+    rooms.set(p.d.id, { group: g, center: new THREE.Vector3(p.cx, -0.5, p.cz), pickables: [floor, sign], color: col });
+  }
+}
+// the name over a room's back wall, with its active projects
+function roomSign(p) {
+  const projects = p.d.projects.filter(x => x.status === 'active');
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = 220;
+  const g = c.getContext('2d');
+  g.textAlign = 'center';
+  g.font = '700 54px system-ui, Segoe UI, sans-serif';
+  g.fillStyle = p.d.color;
+  g.fillText(p.d.name.length > 18 ? p.d.name.slice(0, 17) + '…' : p.d.name, 256, 58);
+  g.font = '28px system-ui, Segoe UI, sans-serif';
+  g.fillStyle = '#8c93b8';
+  const n = p.members.length;
+  g.fillText(`${n} ${n === 1 ? 'person' : 'people'} · ${projects.length} project${projects.length === 1 ? '' : 's'}`, 256, 98);
+  g.font = '500 30px system-ui, Segoe UI, sans-serif';
+  g.fillStyle = '#e9ecff';
+  projects.slice(0, 3).forEach((x, i) => g.fillText('▸ ' + (x.name.length > 26 ? x.name.slice(0, 25) + '…' : x.name), 256, 142 + i * 36));
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false, opacity: 0.85 }));
+  s.scale.set(4.6, 1.98, 1);
+  return s;
+}
+
+// ---------- colleagues stopping by ----------
+// Now and then an idle employee floats over to a colleague's desk for a chat: mostly someone in their own
+// department, sometimes a neighbouring one; on the Lobby's open floor, the people nearby. When a brief's
+// task starts on another's output, the one who finished walks over to hand it over.
+const MAX_VISITS = 3;
+function startVisit(e, host, reason) {
+  if (!e || !host || e === host || e.visit) return;
+  const dist = e.home.distanceTo(host.home);
+  e.visit = { to: host.data.id, start: performance.now(), walk: 1.2 + dist / 10, stay: reason === 'handoff' ? 4.5 : 3 + Math.random() * 4, reason };
+}
+function planVisits() {
+  const now = performance.now(), list = [...employees.values()];
+  if (list.filter(e => e.visit).length >= MAX_VISITS) return;
+  const people = list.filter(e => e.data.source !== 'contractor' && e.home && now - e.born > 3000);
+  for (const e of people) {
+    if (e.visit || work.busy.has(e.data.id)) continue;
+    if (Math.random() > (e.dept ? 1 / 60 : 1 / 600)) continue;
+    const near = pool => pool.sort((x, y) => x.home.distanceTo(e.home) - y.home.distanceTo(e.home)).slice(0, 4);
+    const same = people.filter(o => o !== e && o.dept === e.dept && !o.visit);
+    const others = near(people.filter(o => o !== e && o.dept !== e.dept && !o.visit));
+    const pool = same.length && (Math.random() < 0.85 || !others.length) ? (e.dept ? same : near(same)) : others;
+    if (!pool.length) continue;
+    return startVisit(e, pool[Math.floor(Math.random() * pool.length)], 'chat');
+  }
+}
+setInterval(planVisits, 1000);
+const empBySkill = name => [...employees.values()].find(e => e.data.source === 'project' && e.data.name === name);
+const handoffsSeen = new Set();
+function handoffVisits(briefs, replay) {
+  for (const b of briefs) for (const t of b.tasks) {
+    if (t.status !== 'working' || !t.after?.length) continue;
+    for (const dep of b.tasks.filter(x => t.after.includes(x.id))) {
+      const k = `${b.id}:${dep.id}>${t.id}`;
+      if (handoffsSeen.has(k)) continue;
+      handoffsSeen.add(k);
+      if (replay && Date.now() - t.start < 30000) startVisit(empBySkill(dep.employee), empBySkill(t.employee), 'handoff');
+    }
+  }
 }
 
 // ---------- state from server ----------
@@ -717,7 +897,7 @@ function apply(next) {
     if (!firstLoad && s.source !== 'contractor') pushFeed({ type: 'skill', text: `New hire: ${employeeName(s)} (${s.name})`, ts: Date.now() });
   }
   for (const id of prevEmp) removeEmployee(id);
-  layoutEmployees();
+  layoutEmployees(next.org);
 
   state = { ...next, skills: allSkills };
   for (const e of employees.values()) drawApps(e.appStrip, appsOf(e.data));
@@ -736,26 +916,38 @@ function renderPanel() {
   document.getElementById('nEmp').textContent = state.skills.filter(s => s.source !== 'contractor').length;
   document.getElementById('nBusy').textContent = work.busy.size;
 
-  const team = document.getElementById('teamList'); // the briefs (queue.js) sit above it
+  const team = document.getElementById('teamList'); // the briefs (queue.js) are on the Activity tab
   const groups = ['project', 'personal', 'plugin', 'contractor'];
-  let html = state.brain ? `<div class="team-acts"><button class="btn" data-hire title="Write a new SKILL.md in ${esc(state.brain.name)}/.claude/skills">+ Hire an employee</button><button class="btn" data-apps title="Connect Claude to Gmail, Notion, Blender and more">+ Add an app</button></div>` : '';
+  let html = state.brain ? `<div class="team-acts"><button class="btn" data-hire title="Write a new SKILL.md in ${esc(state.brain.name)}/.claude/skills">+ Hire</button><button class="btn" data-newdept title="A room in the building for a group of employees and their projects">+ Department</button><button class="btn" data-apps title="Connect Claude to Gmail, Notion, Blender and more">+ App</button></div>` : '';
+  const byWork = (a, b) => (work.busy.has(b.id) - work.busy.has(a.id)) || ((work.load.get(b.id) || 0) - (work.load.get(a.id) || 0)) || a.name.localeCompare(b.name);
+  const row = s => {
+    const n = work.load.get(s.id) || 0;
+    const busy = work.busy.get(s.id);
+    const lastRun = work.runs.get(s.id)?.[0];
+    const now = busy ? `<div class="now working">${esc(busy.prompt || 'working')}</div>`
+      : lastRun ? `<div class="now ${lastRun.status}">${esc(lastRun.prompt || 'a task')} · ${ago(lastRun.end || lastRun.last)}</div>` : '';
+    return `<div class="emp ${busy ? 'busy' : ''} ${selected === s.id ? 'sel' : ''}" data-id="${esc(s.id)}"${s.source !== 'contractor' ? ' draggable="true"' : ''}>
+      <div class="dot" style="background:${hex(SOURCE_COLORS[s.source] ?? SOURCE_COLORS.plugin)}"></div>
+      <div class="who">${esc(employeeName(s))}${appsOf(s).slice(0, 5).map(appBadge).join('')}</div>
+      <div class="load">${busy ? 'working' : n ? `${n} job${n > 1 ? 's' : ''}` : 'idle'}</div>
+      <div class="role">${esc(s.name)}</div>${now}</div>`;
+  };
+  // the building: each department with its people, then the Lobby (everyone else, by where their skill lives)
+  const depts = state.org?.departments || [];
+  const placed = new Set(depts.flatMap(d => d.employees));
+  for (const d of depts) {
+    const list = state.skills.filter(s => d.employees.includes(s.id)).sort(byWork);
+    const projects = d.projects.filter(p => p.status === 'active').length;
+    html += `<div class="group dept ${selected === 'dept:' + d.id ? 'sel' : ''}" data-dept="${esc(d.id)}" data-drop="${esc(d.id)}" title="Open the ${esc(d.name)} department">
+      <i style="background:${esc(d.color)}"></i>${esc(d.name)} · ${list.length}${projects ? ` · ${projects} project${projects > 1 ? 's' : ''}` : ''}</div>`;
+    if (!list.length) html += `<div class="empty drop" data-drop="${esc(d.id)}">Drag people here, or pick this department on their board.</div>`;
+    html += list.map(row).join('');
+  }
   for (const g of groups) {
-    const list = state.skills.filter(s => s.source === g)
-      .sort((a, b) => (work.busy.has(b.id) - work.busy.has(a.id)) || ((work.load.get(b.id) || 0) - (work.load.get(a.id) || 0)) || a.name.localeCompare(b.name));
+    const list = state.skills.filter(s => s.source === g && !placed.has(s.id)).sort(byWork);
     if (!list.length) continue;
-    html += `<div class="group">${SOURCE_TITLES[g]} · ${list.length}</div>`;
-    for (const s of list) {
-      const n = work.load.get(s.id) || 0;
-      const busy = work.busy.get(s.id);
-      const lastRun = work.runs.get(s.id)?.[0];
-      const now = busy ? `<div class="now working">${esc(busy.prompt || 'working')}</div>`
-        : lastRun ? `<div class="now ${lastRun.status}">${esc(lastRun.prompt || 'a task')} · ${ago(lastRun.end || lastRun.last)}</div>` : '';
-      html += `<div class="emp ${busy ? 'busy' : ''} ${selected === s.id ? 'sel' : ''}" data-id="${esc(s.id)}">
-        <div class="dot" style="background:${hex(SOURCE_COLORS[s.source] ?? SOURCE_COLORS.plugin)}"></div>
-        <div class="who">${esc(employeeName(s))}${appsOf(s).slice(0, 5).map(appBadge).join('')}</div>
-        <div class="load">${busy ? 'working' : n ? `${n} job${n > 1 ? 's' : ''}` : 'idle'}</div>
-        <div class="role">${esc(s.name)}</div>${now}</div>`;
-    }
+    html += `<div class="group" data-drop="">${depts.length ? 'Lobby · ' : ''}${SOURCE_TITLES[g]} · ${list.length}</div>`;
+    html += list.map(row).join('');
   }
   // the teams of linked brains: copy a skill over to hire the same employee here
   const have = new Set(state.skills.filter(s => s.source === 'project').map(s => s.name));
@@ -772,7 +964,7 @@ function renderPanel() {
   if (!state.skills.length && !state.linked?.length) html += '<div class="empty">No SKILL.md files found yet. Hire someone above, or ask Claude to write a skill. Every skill appears here as a new employee.</div>';
   team.innerHTML = html;
 
-  const feed = document.getElementById('feed');
+  const feed = document.getElementById('feedList');
   const evs = [
     ...state.activity.map(ev => {
       if (ev.type === 'task') return { type: 'task', text: ev.prompt ? `Task: ${ev.prompt}` : 'New task', ts: ev.ts };
@@ -793,11 +985,20 @@ function renderPanel() {
 
 function renderDetail() {
   const el = document.getElementById('detail');
+  // an employee's desk takes over the whole side panel; everything else is the Manager's panel
+  document.querySelector('aside').classList.toggle('emp', employees.has(selected));
   // choosing something else closes the skill form
   if (skillForm.id && skillForm.id !== selected) skillForm = { id: null, mode: 'board', data: null, err: '' };
-  if (!selected) { el.classList.remove('on', 'editing'); delete el.dataset.mode; return; }
+  if (!selected) { el.classList.remove('on', 'editing', 'deskv'); delete el.dataset.mode; return; }
+  if (!employees.has(selected)) el.classList.remove('deskv');
   if (selected === HIRE) { el.classList.remove('board'); renderSkillForm(el, null); el.classList.add('on'); return; }
   if (selected === APPS_PANEL) { el.classList.remove('board', 'editing'); renderAppsPanel(el); el.classList.add('on'); return; }
+  if (selected === NEW_DEPT || String(selected).startsWith('dept:')) {
+    el.classList.remove('editing');
+    if (!renderDeptPanel(el)) { selected = null; el.classList.remove('on', 'board'); return; }
+    el.classList.add('on', 'board');
+    return;
+  }
   const emp = employees.get(selected);
   const mem = memories.get(selected);
   const ld = linkedDot(selected);
@@ -811,9 +1012,13 @@ function renderDetail() {
     el.classList.remove('board');
     renderSkillForm(el, emp.data);
   } else if (emp) {
-    renderBoard(el, emp.data);
     el.classList.remove('editing');
     delete el.dataset.mode;
+    // their desk: chat box, file cabinet and computer; contractors only have a profile
+    const view = emp.data.source === 'contractor' ? 'profile' : deskView;
+    el.classList.toggle('deskv', view !== 'profile');
+    if (view === 'profile') renderBoard(el, emp.data);
+    else { office.select(emp.data.id); office.render(el, emp.data, view, `${esc(employeeName(emp.data))} · ${esc(emp.data.name)}`, runsHtml(emp.data)); el.classList.add("board"); }
   } else if (mem) {
     el.classList.remove('board');
     renderMemoryDetail(el, mem.data);
@@ -826,11 +1031,8 @@ function renderDetail() {
 // and the files this employee wrote in it.
 const openRuns = new Set(); // runs whose full answer is showing
 function renderBoard(el, s) {
-  const busy = work.busy.get(s.id);
-  const runs = (work.runs.get(s.id) || []).slice(0, 20);
-  const done = runs.filter(r => r.status === 'done').length;
-  let html = `<h3>${esc(employeeName(s))} · ${esc(s.name)}</h3>
-    <div class="k">${esc(SOURCE_TITLES[s.source] || s.source)}${s.owner ? ' · ' + esc(s.owner) : ''} · ${work.load.get(s.id) || 0} jobs${runs.length ? ` · ${done}/${runs.length} recent runs done` : ''}</div>
+  let html = `${s.source === 'contractor' ? office.backBar() : office.tabs('profile')}<h3>${esc(employeeName(s))} · ${esc(s.name)}</h3>
+    <div class="k">${esc(SOURCE_TITLES[s.source] || s.source)}${s.owner ? ' · ' + esc(s.owner) : ''} · ${work.load.get(s.id) || 0} jobs</div>
     <div class="desc">${esc(s.description)}</div>`;
   const apps = appsOf(s);
   if (apps.length) {
@@ -839,6 +1041,27 @@ function renderBoard(el, s) {
       ${a.status === 'connected' ? `<em class="connected" title="${esc(`integration: ${a.server}`)}">connected</em>`
         : `<button class="btn mini" data-fixapp="${esc(a.key)}" title="${esc(a.server ? `integration: ${a.server}` : 'No integration for this app in Claude yet')}">${a.status === 'needs sign-in' ? 'Sign in' : a.status === 'not set up' ? 'Add' : 'Fix'}</button>`}</div>`).join('')}</div>`;
   }
+  if (s.source !== 'contractor' && state.brain) {
+    const depts = state.org?.departments || [], mine = depts.find(d => d.employees.includes(s.id));
+    html += `<div class="deptpick"><span>Department</span><select data-assign="${esc(s.id)}"><option value="">Lobby (no department)</option>${depts.map(d =>
+      `<option value="${esc(d.id)}" ${mine === d ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select>${mine ? `<button class="btn mini" data-opendept="${esc(mine.id)}">Open</button>` : ''}</div>`;
+  }
+  // their runs are on their computer; a contractor has no desk, so theirs stay here
+  if (s.source === 'contractor') html += runsHtml(s);
+  if (s.source !== 'contractor') {
+    const editable = s.source === 'project' && s.owner === brainFolder();
+    html += `<div class="bar"><span class="msg-err"></span>${editable
+      ? `<button class="btn danger" data-skill="ask">Fire</button><button class="btn" data-skill="edit">Edit SKILL.md</button>`
+      : `<button class="btn" data-skill="view">View SKILL.md</button>`}</div>`;
+  }
+  el.innerHTML = html;
+  el.classList.add('board');
+}
+// What the employee is on now, then the runs Claude handed them (from the activity hook)
+function runsHtml(s) {
+  const busy = work.busy.get(s.id);
+  const runs = (work.runs.get(s.id) || []).slice(0, 20);
+  let html = '';
   if (busy) html += `<div class="nowcard"><b>Working on</b>${esc(busy.prompt || 'a task')}<span>started ${ago(busy.start)}</span></div>`;
   html += `<div class="runs-h">Recent runs</div>`;
   if (!runs.length) html += `<div class="empty">No runs yet. When Claude hands ${esc(employeeName(s))} work, each task shows up here with how it went.</div>`;
@@ -854,15 +1077,180 @@ function renderBoard(el, s) {
       ${others.length ? `<div class="with">with ${esc(others.join(', '))}</div>` : ''}
     </div>`;
   }
-  if (s.source !== 'contractor') {
-    const editable = s.source === 'project' && s.owner === brainFolder();
-    html += `<div class="bar"><span class="msg-err"></span>${editable
-      ? `<button class="btn danger" data-skill="ask">Fire</button><button class="btn" data-skill="edit">Edit SKILL.md</button>`
-      : `<button class="btn" data-skill="view">View SKILL.md</button>`}</div>`;
-  }
-  el.innerHTML = html;
-  el.classList.add('board');
+  return html;
 }
+
+// ---------- an employee's desk (office.js) ----------
+// Clicking someone opens their chat box; their monitor opens their computer, their cabinet their files.
+let deskView = 'chat';
+office.onChange(() => { if (employees.has(selected)) renderDetail(); });
+office.onError(msg => toast(msg));
+function backToManager() { if (employees.has(selected)) { selected = null; renderPanel(); } }
+addEventListener('keydown', e => {
+  if (e.key === 'Escape' && employees.has(selected) && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName)) backToManager();
+});
+document.getElementById('detail').addEventListener('click', async e => {
+  if (e.target.closest('[data-desk-back]')) return backToManager();
+  const t = e.target.closest('[data-desk-view]');
+  if (t) { deskView = t.dataset.deskView; return renderDetail(); }
+  if (employees.has(selected)) office.click(e);
+});
+document.getElementById('detail').addEventListener('keydown', e => { if (employees.has(selected)) office.key(e); });
+
+// ---------- departments and their projects ----------
+// A department is a room in the building: its people, what it's for, and its projects. The Manager gives
+// project work to the department that owns it; each finished task's report goes in the project's log.
+const NEW_DEPT = '__dept__';
+const deptById = id => (state.org?.departments || []).find(d => d.id === id);
+let deptForm = { mode: 'view', err: '' }; // view | edit | confirm | project (adding one)
+const openProjects = new Set();
+async function orgApi(body) {
+  const r = await api('/api/org', body);
+  if (r.error) { deptForm.err = r.error; renderDetail(); }
+  return r;
+}
+function renderDeptPanel(el) {
+  // a live update mustn't wipe what is being typed
+  const a = document.activeElement, key = `${selected}:${deptForm.mode}:${deptForm.err}`;
+  if (el.dataset.for === key && el.contains(a) && /^(INPUT|TEXTAREA)$/.test(a.tagName)) return true;
+  el.dataset.for = key;
+  delete el.dataset.mode;
+  const err = `<span class="msg-err">${esc(deptForm.err)}</span>`;
+  if (selected === NEW_DEPT) {
+    el.innerHTML = `<h3>New department</h3><div class="k">A room in the building for a group of employees and their projects. People in the same department work together more: the Manager pairs them up, and they see each other's reports.</div>
+      <label for="dpName">Name</label><input class="f" id="dpName" placeholder="Design" maxlength="60">
+      <label for="dpAbout">What it does <small>optional</small></label><input class="f" id="dpAbout" placeholder="Brand, layouts and video" maxlength="300">
+      <div class="bar">${err}<button class="btn" data-d="cancel">Cancel</button><button class="btn primary" data-d="create">Create</button></div>`;
+    el.querySelector('#dpName').focus();
+    return true;
+  }
+  const d = deptById(selected.slice(5));
+  if (!d) return false;
+  const people = state.skills.filter(s => d.employees.includes(s.id));
+  const active = d.projects.filter(p => p.status === 'active');
+  let html = `<h3><i class="ddot" style="background:${esc(d.color)}"></i>${esc(d.name)}</h3>
+    <div class="k">${people.length} ${people.length === 1 ? 'person' : 'people'} · ${active.length} active project${active.length === 1 ? '' : 's'}${d.projects.length > active.length ? ` · ${d.projects.length - active.length} done` : ''}</div>`;
+  if (deptForm.mode === 'edit') {
+    el.innerHTML = html + `<label for="dpName">Name</label><input class="f" id="dpName" maxlength="60">
+      <label for="dpAbout">What it does</label><input class="f" id="dpAbout" maxlength="300">
+      <label for="dpColor">Colour</label><input type="color" id="dpColor" value="${esc(d.color)}">
+      <div class="bar">${err}<button class="btn" data-d="view">Cancel</button><button class="btn primary" data-d="save">Save</button></div>`;
+    el.querySelector('#dpName').value = d.name;
+    el.querySelector('#dpAbout').value = d.about || '';
+    return true;
+  }
+  if (d.about) html += `<div class="desc">${esc(d.about)}</div>`;
+  html += `<div class="runs-h">People</div>`;
+  if (!people.length) html += `<div class="empty">Nobody works here yet. Add someone below, or drag them onto ${esc(d.name)} in the list.</div>`;
+  for (const s of people) {
+    const busy = work.busy.get(s.id);
+    html += `<div class="dperson" data-pick="${esc(s.id)}"><div class="dot" style="background:${hex(SOURCE_COLORS[s.source] ?? SOURCE_COLORS.plugin)}"></div>
+      <div><b>${esc(employeeName(s))}</b><span>${esc(busy ? 'working: ' + (busy.prompt || 'a task') : s.name)}</span></div>
+      <button class="btn mini" data-d="unassign" data-skill="${esc(s.id)}" title="Back to the Lobby">×</button></div>`;
+  }
+  const others = state.skills.filter(s => s.source !== 'contractor' && !d.employees.includes(s.id)).sort((x, y) => employeeName(x).localeCompare(employeeName(y)));
+  if (others.length) html += `<select data-add="${esc(d.id)}" class="dadd"><option value="">+ Add someone…</option>${others.map(s => {
+    const in_ = (state.org?.departments || []).find(x => x.employees.includes(s.id));
+    return `<option value="${esc(s.id)}">${esc(employeeName(s))} · ${esc(s.name)}${in_ ? ` (from ${esc(in_.name)})` : ''}</option>`;
+  }).join('')}</select>`;
+  html += `<div class="runs-h">Projects</div>`;
+  if (!d.projects.length && deptForm.mode !== 'project') html += `<div class="empty">No projects yet. A project gives the team a goal and a folder; the Manager puts its tasks on it, and everyone's reports collect here.</div>`;
+  for (const p of [...active, ...d.projects.filter(x => x.status !== 'active')]) {
+    const open = openProjects.has(p.id), log = [...p.log].reverse();
+    html += `<div class="proj ${p.status} ${open ? 'open' : ''}" data-proj="${esc(p.id)}">
+      <div class="top"><b>${esc(p.name)}</b><em>${p.status === 'done' ? 'done' : log.length ? `${log.length} report${log.length > 1 ? 's' : ''}` : 'new'}</em></div>
+      ${p.goal ? `<div class="goal">${esc(p.goal)}</div>` : ''}
+      ${p.folder ? `<div class="file" data-file="${esc(p.folder)}">${esc(p.folder)}</div>` : ''}
+      ${log.slice(0, open ? 20 : 2).map(l => `<div class="plog ${l.status}"><i></i><b>${esc(l.name)}</b> ${esc(l.task)} · ${ago(l.ts)}${open ? `<div class="res">${esc(l.result)}</div>` : ''}</div>`).join('')}
+      <div class="pacts">${p.status === 'active' ? `<button class="btn mini" data-d="brief" data-p="${esc(p.id)}" title="Ask the Manager in Chat to put the team on it">Brief the team</button><button class="btn mini" data-d="done" data-p="${esc(p.id)}">Mark done</button>`
+        : `<button class="btn mini" data-d="reopen" data-p="${esc(p.id)}">Reopen</button>`}<button class="btn mini danger" data-d="rmproj" data-p="${esc(p.id)}">Remove</button></div></div>`;
+  }
+  if (deptForm.mode === 'project') {
+    html += `<div class="pform"><label for="pjName">Project name</label><input class="f" id="pjName" placeholder="Spring launch video" maxlength="60">
+      <label for="pjGoal">Goal <small>what done looks like</small></label><textarea class="desc-f" id="pjGoal" maxlength="1000" placeholder="A 30-second launch video and three stills for socials, in our brand style."></textarea>
+      <label for="pjFolder">Folder <small>optional, full path to where its files live</small></label><input class="f" id="pjFolder" spellcheck="false" placeholder="C:\\Users\\you\\Projects\\launch">
+      <div class="bar">${err}<button class="btn" data-d="view">Cancel</button><button class="btn primary" data-d="addproj">Add project</button></div></div>`;
+  }
+  html += deptForm.mode === 'confirm'
+    ? `<div class="bar"><span class="ask">Remove ${esc(d.name)}? Its people go back to the Lobby and its projects are deleted.</span><button class="btn" data-d="view">Cancel</button><button class="btn danger primary" data-d="remove">Remove</button></div>`
+    : `<div class="bar">${deptForm.mode === 'project' ? '' : err}<button class="btn danger" data-d="ask">Remove</button><button class="btn" data-d="edit">Edit</button>${deptForm.mode === 'project' ? '' : '<button class="btn primary" data-d="project">+ Project</button>'}</div>`;
+  el.innerHTML = html;
+  if (deptForm.mode === 'project') el.querySelector('#pjName').focus();
+  return true;
+}
+function openDept(id) { selected = id === NEW_DEPT ? NEW_DEPT : 'dept:' + id; deptForm = { mode: 'view', err: '' }; renderPanel(); }
+document.getElementById('detail').addEventListener('click', async e => {
+  const od = e.target.closest('[data-opendept]');
+  if (od) return openDept(od.dataset.opendept);
+  if (selected !== NEW_DEPT && !String(selected).startsWith('dept:')) return;
+  const pick = e.target.closest('.dperson');
+  if (pick && !e.target.closest('button')) { selected = pick.dataset.pick; return renderPanel(); }
+  const card = e.target.closest('.proj');
+  const b = e.target.closest('[data-d]');
+  if (!b) {
+    if (card && !e.target.closest('[data-file]')) { openProjects.has(card.dataset.proj) ? openProjects.delete(card.dataset.proj) : openProjects.add(card.dataset.proj); renderDetail(); }
+    return;
+  }
+  const act = b.dataset.d, id = String(selected).slice(5), val = sel => document.getElementById(sel)?.value ?? '';
+  deptForm.err = '';
+  if (act === 'cancel') { selected = null; return renderPanel(); }
+  if (['view', 'edit', 'ask', 'project'].includes(act)) { deptForm.mode = act === 'ask' ? 'confirm' : act; return renderDetail(); }
+  if (act === 'create') {
+    const r = await orgApi({ op: 'addDept', name: val('dpName'), about: val('dpAbout') });
+    if (r.ok) { selected = 'dept:' + r.id; deptForm.mode = 'view'; if (deptById(r.id)) renderPanel(); }
+    return;
+  }
+  if (act === 'save') { const r = await orgApi({ op: 'editDept', id, name: val('dpName'), about: val('dpAbout'), color: val('dpColor') }); if (r.ok) { deptForm.mode = 'view'; renderDetail(); } return; }
+  if (act === 'remove') { const r = await orgApi({ op: 'removeDept', id }); if (r.ok) { selected = null; deptForm.mode = 'view'; toast(`Removed the ${r.removed.name} department`); } return; }
+  if (act === 'unassign') return orgApi({ op: 'assign', skill: b.dataset.skill, dept: '' });
+  if (act === 'addproj') { const r = await orgApi({ op: 'addProject', dept: id, name: val('pjName'), goal: val('pjGoal'), folder: val('pjFolder') }); if (r.ok) { deptForm.mode = 'view'; renderDetail(); } return; }
+  if (act === 'done' || act === 'reopen') return orgApi({ op: 'editProject', id: b.dataset.p, status: act === 'done' ? 'done' : 'active' });
+  if (act === 'rmproj') return orgApi({ op: 'removeProject', id: b.dataset.p });
+  if (act === 'brief') {
+    // the Manager is the chat: start the request there, the user says what to do
+    const p = deptById(id)?.projects.find(x => x.id === b.dataset.p);
+    if (!p) return;
+    document.querySelector('aside header [data-tab="chat"]').click();
+    const input = document.getElementById('input');
+    input.value = `Put the ${deptById(id).name} department on the project "${p.name}" (${p.id}): `;
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+});
+document.getElementById('detail').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' || e.target.tagName !== 'INPUT') return;
+  const go = document.querySelector('#detail [data-d="create"], #detail [data-d="save"], #detail [data-d="addproj"]');
+  if (go) { e.preventDefault(); go.click(); }
+});
+document.getElementById('detail').addEventListener('change', e => {
+  const as = e.target.closest('select[data-assign]');
+  if (as) return orgApi({ op: 'assign', skill: as.dataset.assign, dept: as.value });
+  const add = e.target.closest('select[data-add]');
+  if (add && add.value) orgApi({ op: 'assign', skill: add.value, dept: add.dataset.add });
+});
+// drag an employee row onto a department (or a Lobby heading) to move them
+const teamEl = document.getElementById('team');
+teamEl.addEventListener('dragstart', e => {
+  const row = e.target.closest('.emp[draggable]');
+  if (!row) return;
+  e.dataTransfer.setData('text/x-claudeos-emp', row.dataset.id);
+  e.dataTransfer.effectAllowed = 'move';
+  teamEl.classList.add('dragging');
+});
+teamEl.addEventListener('dragend', () => { teamEl.classList.remove('dragging'); for (const x of teamEl.querySelectorAll('.over')) x.classList.remove('over'); });
+teamEl.addEventListener('dragover', e => {
+  const t = e.target.closest('[data-drop]');
+  if (!t || !e.dataTransfer.types.includes('text/x-claudeos-emp')) return;
+  e.preventDefault();
+  for (const x of teamEl.querySelectorAll('.over')) if (x !== t) x.classList.remove('over');
+  t.classList.add('over');
+});
+teamEl.addEventListener('drop', e => {
+  const t = e.target.closest('[data-drop]'), id = e.dataTransfer.getData('text/x-claudeos-emp');
+  if (!t || !id) return;
+  e.preventDefault();
+  orgApi({ op: 'assign', skill: id, dept: t.dataset.drop });
+});
 
 // ---------- skill editor ----------
 // Hire (a new SKILL.md in this brain's .claude/skills), edit or fire an employee without asking Claude.
@@ -1222,6 +1610,9 @@ document.querySelector('aside header').addEventListener('click', e => {
 });
 document.getElementById('team').addEventListener('click', async e => {
   if (e.target.closest('[data-apps]')) return openApps();
+  if (e.target.closest('[data-newdept]')) return openDept(NEW_DEPT);
+  const dh = e.target.closest('[data-dept]');
+  if (dh) return openDept(dh.dataset.dept);
   if (e.target.closest('[data-hire]')) {
     skillForm = { id: null, mode: 'hire', data: null, err: '' };
     selected = HIRE;
@@ -1237,6 +1628,7 @@ document.getElementById('team').addEventListener('click', async e => {
   const row = e.target.closest('.emp');
   if (!row) return;
   selected = row.dataset.id;
+  deskView = 'chat';
   renderPanel();
 });
 
@@ -1248,8 +1640,8 @@ let downAt = null;
 function pick(ev) {
   mouse.set(ev.clientX / innerWidth * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(mouse, camera);
-  const targets = [boss.sphere, boss.screen, ...[...employees.values()].flatMap(e => [e.sphere, e.screen]), ...[...memories.values()].map(m => m.mesh),
-    ...[...satellites.values()].flatMap(s => [...s.dots.values()])];
+  const targets = [boss.sphere, boss.screen, ...[...employees.values()].flatMap(e => [e.sphere, e.screen, ...(e.cabinet ? [e.cabinet] : [])]), ...[...memories.values()].map(m => m.mesh),
+    ...[...satellites.values()].flatMap(s => [...s.dots.values()]), ...[...rooms.values()].flatMap(r => r.pickables)];
   const hit = ray.intersectObjects(targets, false)[0];
   return hit?.object.userData;
 }
@@ -1258,8 +1650,9 @@ canvas.addEventListener('pointermove', ev => {
   if (!u) { tip.style.display = 'none'; canvas.style.cursor = ''; return; }
   canvas.style.cursor = 'pointer';
   let title, sub;
-  if (u.kind === 'employee') { const s = employees.get(u.id).data; title = `${employeeName(s)} · ${s.name}`; const b = work.busy.get(s.id); sub = b ? 'Working on: ' + (b.prompt || 'a task') : `${work.load.get(s.id) || 0} jobs done`; }
+  if (u.kind === 'employee') { const s = employees.get(u.id).data; title = `${employeeName(s)} · ${s.name}${u.view === 'computer' ? ' · computer' : u.view === 'cabinet' ? ' · file cabinet' : ''}`; const b = work.busy.get(s.id); sub = b ? 'Working on: ' + (b.prompt || 'a task') : `${work.load.get(s.id) || 0} jobs done`; }
   else if (u.kind === 'manager') { title = 'Manager · briefs & splits the work'; sub = bossLine() || 'Talk to the Manager in the Chat tab. Queue requests there to brief the team on several at once.'; }
+  else if (u.kind === 'dept') { const d = deptById(u.id.slice(5)); if (!d) return; title = `${d.name} department`; sub = `${d.employees.filter(id => employees.has(id)).length} people · ${d.projects.filter(p => p.status === 'active').length} active projects. Click to open it.`; }
   else if (u.kind === 'linked') { title = `${u.memory.name} · ${u.brain.name}`; sub = u.memory.description; }
   else { const m = memories.get(u.id).data; title = m.name; sub = m.description; }
   tip.innerHTML = `<b>${esc(title)}</b><span>${esc(sub)}</span>`;
@@ -1271,7 +1664,9 @@ canvas.addEventListener('pointerdown', ev => { downAt = [ev.clientX, ev.clientY]
 canvas.addEventListener('pointerup', ev => {
   if (!downAt || Math.hypot(ev.clientX - downAt[0], ev.clientY - downAt[1]) > 5) return;
   const u = pick(ev);
-  if (u?.kind === 'manager') { document.querySelector('aside header [data-tab="chat"]').click(); return document.getElementById('input').focus(); }
+  if (u?.kind === 'dept') return openDept(u.id.slice(5));
+  if (u?.kind === 'employee') deskView = u.view || 'chat';
+  if (u?.kind === 'manager') { backToManager(); document.querySelector('aside header [data-tab="chat"]').click(); return document.getElementById('input').focus(); }
   selected = u ? u.id : null;
   renderPanel();
 });
@@ -1282,6 +1677,7 @@ const tmp = new THREE.Vector3();
 const brainWorld = new THREE.Vector3();
 const screenWorld = new THREE.Vector3();
 const focus = new THREE.Vector3();
+const visitSpot = new THREE.Vector3(), visitLook = new THREE.Vector3();
 const HOME = new THREE.Vector3();
 let goHome = false;
 function animate() {
@@ -1321,20 +1717,45 @@ function animate() {
     if (age < 0) continue;
     const busy = work.busy.has(e.data.id);
     e.busyAmt += ((busy ? 1 : 0) - e.busyAmt) * Math.min(1, dt * 3);
-    tmp.set(Math.cos(e.angle0) * e.radius, e.height, Math.sin(e.angle0) * e.radius);
+    tmp.copy(e.home);
     e.root.position.copy(tmp);
-    e.station.rotation.y = Math.atan2(-tmp.x, -tmp.z);
+    e.station.rotation.y = e.facing;
     // idle: leaning back in the chair, face above the monitor, breathing slowly;
     // busy: leaning in to the screen with a little typing bounce
     const lean = 0.12 * e.busyAmt - 0.28 * (1 - e.busyAmt);
-    e.body.position.set(-tmp.x / e.radius * lean, 0, -tmp.z / e.radius * lean);
+    e.body.position.set(Math.sin(e.facing) * lean, 0, Math.cos(e.facing) * lean);
     e.body.position.y = (0.28 + Math.sin(t * 1.4 + e.phase) * 0.04) * (1 - e.busyAmt) + Math.abs(Math.sin(t * 9 + e.phase)) * 0.05 * e.busyAmt;
     const k = Math.min(1, age / 0.7);
     const sel = selected === e.data.id ? 1.18 : 1;
     e.root.scale.setScalar(Math.max(0.0001, easeOutBack(k) * sel));
     // idle employees turn round to look at you; busy ones face their screen
-    const look = busy ? e.screen.getWorldPosition(screenWorld) : camera.position;
+    let look = busy ? e.screen.getWorldPosition(screenWorld) : camera.position;
+    // stopping by a colleague: float over (hopping the desks), stay a while, float back
+    let talk = null;
+    const v = e.visit, host = v && employees.get(v.to);
+    if (v) {
+      const el = (now - v.start) / 1000;
+      if (!host || busy || el > v.walk * 2 + v.stay) e.visit = null;
+      else {
+        const ease = x => x * x * (3 - 2 * x);
+        const f = el < v.walk ? ease(el / v.walk) : el < v.walk + v.stay ? 1 : ease(1 - (el - v.walk - v.stay) / v.walk);
+        // the spot at the host's right, beside their chair
+        visitSpot.set(Math.cos(host.facing) * 1.3 - Math.sin(host.facing) * 0.2, 0.3, -Math.sin(host.facing) * 1.3 - Math.cos(host.facing) * 0.2)
+          .add(host.home).sub(e.home).divideScalar(e.root.scale.x);
+        e.body.position.lerp(visitSpot, f);
+        e.body.position.y += Math.sin(f * Math.PI) * (f < 1 ? 1.1 : 0);
+        if (f > 0.85) {
+          look = host.body.getWorldPosition(visitLook);
+          talk = `${v.reason === 'handoff' ? 'Handing over to' : 'Chatting with'} ${employeeName(host.data)}`;
+          host.visitor = { id: e.data.id, until: now + 200 };
+        }
+      }
+    }
+    // a colleague at your desk: turn to them (unless you're busy)
+    const guest = e.visitor && now < e.visitor.until && employees.get(e.visitor.id);
+    if (guest && !busy) look = guest.body.getWorldPosition(visitLook);
     e.body.lookAt(look);
+    e.bubble.position.set(e.body.position.x, 2.25 + e.body.position.y - 0.28, e.body.position.z);
     if (busy !== e.screen.userData.busy || (busy && now - e.screen.userData.drawnAt > 110) || (!busy && now - e.screen.userData.drawnAt > 400)) {
       drawScreen(e.screen, busy, t);
       e.screen.userData.busy = busy;
@@ -1346,8 +1767,10 @@ function animate() {
     e.aura.material.opacity = e.busyAmt * 0.35;
     e.label.material.opacity = 0.5 + e.busyAmt * 0.45 + (selected === e.data.id ? 0.3 : 0);
     if (busy) setBubble(e.bubble, work.busy.get(e.data.id).prompt || 'working…', e.color);
-    e.bubble.material.opacity = e.busyAmt * 0.95;
-    e.bubble.visible = e.busyAmt > 0.01;
+    else if (talk) setBubble(e.bubble, talk, e.color);
+    e.talkAmt = (e.talkAmt || 0) + (((talk && !busy) ? 1 : 0) - (e.talkAmt || 0)) * Math.min(1, dt * 4);
+    e.bubble.material.opacity = Math.max(e.busyAmt * 0.95, e.talkAmt * 0.8);
+    e.bubble.visible = e.bubble.material.opacity > 0.01;
 
     const pos = e.beam.geometry.attributes.position;
     pos.setXYZ(1, tmp.x, tmp.y, tmp.z);
@@ -1395,7 +1818,9 @@ function animate() {
 
   // swing the view round to the memory being inspected, and back to the brain after
   const focused = memories.get(selected) || (linkedDot(selected) && { mesh: linkedDot(selected) });
-  if (focused) { focused.mesh.getWorldPosition(focus); controls.target.lerp(focus, Math.min(1, dt * 2.5)); goHome = true; }
+  const room = typeof selected === 'string' && selected.startsWith('dept:') && rooms.get(selected.slice(5));
+  if (room) { controls.target.lerp(room.center, Math.min(1, dt * 2)); goHome = true; }
+  else if (focused) { focused.mesh.getWorldPosition(focus); controls.target.lerp(focus, Math.min(1, dt * 2.5)); goHome = true; }
   else if (goHome) { controls.target.lerp(HOME, Math.min(1, dt * 2.5)); if (controls.target.lengthSq() < 1e-4) goHome = false; }
 
   controls.update();
