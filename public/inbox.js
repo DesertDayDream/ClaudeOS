@@ -106,7 +106,7 @@ async function act(what, btn) {
 
 async function load() { const r = await api('/api/manager'); if (!r.error) s = r; render(); }
 events.addEventListener('manager', e => { s = JSON.parse(e.data); render(); });
-events.addEventListener('chat', e => { const ev = JSON.parse(e.data); if (ev.kind === 'busy') { s.chatting = ev.busy; render(); } });
+events.addEventListener('chat', e => { const ev = JSON.parse(e.data); if (ev.kind === 'busy') { s.chatting = !!ev.any; render(); } });
 events.addEventListener('open', () => load());
 events.addEventListener('brain', () => load()); // each brain has its own inbox
 tabBtn.addEventListener('click', () => load()); // files may have landed in inbox/ from outside

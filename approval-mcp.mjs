@@ -14,6 +14,8 @@ function fail(id, message) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0
 const LINKS = (process.env.CLAUDEOS_LINKS || '').split('\n').filter(Boolean);
 // Who is asking for approvals (an employee working a brief); empty in the chat, which is the Manager.
 const WHO = process.env.CLAUDEOS_WHO || '';
+// Which of the brain's chats this run belongs to (its approvals and briefs go back to it).
+const CHAT = process.env.CLAUDEOS_CHAT || '';
 // Only the chat (the Manager) gets post_brief, with the team it may assign work to.
 let TEAM = [];
 try { TEAM = JSON.parse(process.env.CLAUDEOS_TEAM || '[]'); } catch { /* no team */ }
@@ -78,11 +80,11 @@ rl.on('line', async line => {
     return reply(id, { content: [{ type: 'text', text: r.error || `${r.brain} answered:\n\n${r.result}` }], isError: !!r.error });
   }
   if (method === 'tools/call' && params?.name === 'post_brief' && TEAM.length) {
-    const r = await ask(params.arguments || {}, '/api/brief');
+    const r = await ask({ ...(params.arguments || {}), chat: CHAT }, '/api/brief');
     return reply(id, { content: [{ type: 'text', text: r.error || r.text || 'Brief accepted.' }], isError: !!r.error });
   }
   if (method === 'tools/call' && params?.name === 'approve') {
-    const decision = await ask({ ...(params.arguments || {}), ...(WHO ? { who: WHO } : {}) });
+    const decision = await ask({ ...(params.arguments || {}), ...(WHO ? { who: WHO } : { chat: CHAT }) });
     return reply(id, { content: [{ type: 'text', text: JSON.stringify(decision) }] });
   }
   fail(id, `Unknown method ${method}`);

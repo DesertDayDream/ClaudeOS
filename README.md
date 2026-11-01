@@ -12,6 +12,7 @@ Give Claude a brain you can see.
 - **Hire, edit and fire** without asking Claude: *+ Hire an employee* at the top of the Team tab writes a new `SKILL.md` (a name, a description Claude uses to pick it, and its instructions). Click an employee for *Edit SKILL.md* or *Fire*; a fired employee's folder goes to `~/.claudeos/trash/skills` and *Undo* brings it back with the same name. Only the brain's own team can be changed here; your personal and plugin skills open read-only.
 - **Token use:** under the chat, a meter shows how many tokens each message resends and whether the cache is still warm; each reply shows what it read and wrote. **Wrap up** saves what matters to the brain and starts a fresh chat that gets a short handover, and ClaudeOS suggests it when a chat gets big or the cache has expired.
 - **The chat** runs Claude inside the brain's folder. Pick the model (Fable, Opus, Sonnet, Haiku) and the effort under the message box; the brain keeps your choice. You watch the employees it hands work to light up at their desks. Anything that needs your OK, from the Manager or an employee, shows up as an Allow / Deny card (the Chat tab gets a dot).
+- **Chats:** each brain keeps as many chats as you like. *New chat* starts a fresh one; *Chats* lists them all, newest first, with a search over every message. Rename (✎, or double-click the title) and delete (×; it goes to the brain's chat trash). Each chat runs on its own: leave one working and start another, and a dot tells you it's still going. The team's reports always go back to the chat that sent the brief.
 - **The Inbox** is where you leave requests and files for later (files go into the brain's `inbox/` folder). *Brief & assign* hands everything waiting to the Manager in the chat. The Inbox tab shows each brief, who's on what, each employee's report and what it cost.
 - **Linked brains:** from the brain menu, choose *Link brains…* to let this brain use another one. Claude here can read the linked brain's memory (never change it) and hand its team tasks, which run in that brain and send back the answer. Its skills show in the Team tab with a *Copy* button. Linked brains float beside the cloud.
 - **Brains** are folders. Make as many as you like (one per project, client or idea) and switch between them from the name under the title.
@@ -56,7 +57,7 @@ ClaudeOS only ever adds what a folder is missing. It never overwrites or deletes
 
 ## Where your data lives
 
-The app folder holds only code, so you can move it, update it or zip it and give it to someone. Your own data is in `~/.claudeos` (`C:\Users\<you>\.claudeos` on Windows): the list of brains, chat history, each brain's inbox and briefs (`manager/`), employee names and the activity log. Set `CLAUDEOS_HOME` to keep it somewhere else.
+The app folder holds only code, so you can move it, update it or zip it and give it to someone. Your own data is in `~/.claudeos` (`C:\Users\<you>\.claudeos` on Windows): the list of brains, each brain's chats (`chats/<brain>/`, deleted ones in `trash/` there), each brain's inbox and briefs (`manager/`), employee names and the activity log. Set `CLAUDEOS_HOME` to keep it somewhere else.
 
 ## Privacy and safety
 

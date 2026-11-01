@@ -157,11 +157,11 @@ Files in inbox/ with no typed request are work too when an employee's skill says
     const label = `Brief & assign: ${[items.length && n(items.length, 'request'), files.length && n(files.length, 'file')].filter(Boolean).join(' and ')} from the inbox`;
     return { text, label, ids: items.map(x => x.id) };
   }
-  function markSent(ids) { for (const x of state.inbox) if (ids.includes(x.id) && x.status === 'new') x.status = 'sent'; changed(); }
-  // the chat's answer ended: requests it didn't brief are waiting again
-  function chatDone() {
+  function markSent(ids, chat) { for (const x of state.inbox) if (ids.includes(x.id) && x.status === 'new') { x.status = 'sent'; x.chat = chat; } changed(); }
+  // a chat's answer ended: requests it was handed but didn't brief are waiting again
+  function chatDone(chat) {
     let n = 0;
-    for (const x of state.inbox) if (x.status === 'sent') { x.status = 'new'; n++; }
+    for (const x of state.inbox) if (x.status === 'sent' && x.chat === chat) { x.status = 'new'; n++; }
     if (n) changed(); else broadcast('manager', snapshot());
   }
 
@@ -190,7 +190,8 @@ Files in inbox/ with no typed request are work too when an employee's skill says
     const skipped = (Array.isArray(args.skipped) ? args.skipped : []).map(s => ({ request: String(s.request || ''), reason: clip(s.reason, 400) }));
     const asked = new Set([...clean.flatMap(t => t.request), ...skipped.map(s => s.request)]);
     const items = state.inbox.filter(x => asked.has(x.id) && (x.status === 'new' || x.status === 'sent'));
-    const brief = { id: crypto.randomBytes(4).toString('hex'), ts: Date.now(), status: 'working', items: items.map(x => x.id),
+    // chat: the chat that briefed it, which gets the team's reports
+    const brief = { id: crypto.randomBytes(4).toString('hex'), ts: Date.now(), status: 'working', chat: String(args.chat || ''), items: items.map(x => x.id),
       title: clip(args.title || 'Brief', 120), summary: clip(args.summary, 1500), notes: clip(args.notes, 1500), skipped, tasks: clean, error: '' };
     state.briefs.push(brief);
     // a request the Manager only set aside goes back to waiting

@@ -568,7 +568,7 @@ function setManager(next) {
 }
 events.addEventListener('manager', e => setManager(JSON.parse(e.data)));
 // talking in the Chat tab is talking to the Manager
-events.addEventListener('chat', e => { const ev = JSON.parse(e.data); if (ev.kind === 'busy') managerState = { ...managerState, chatting: ev.busy }; });
+events.addEventListener('chat', e => { const ev = JSON.parse(e.data); if (ev.kind === 'busy') managerState = { ...managerState, chatting: !!ev.any }; });
 async function loadManager() { const r = await api('/api/manager'); if (!r.error) setManager(r); }
 events.addEventListener('open', loadManager);
 events.addEventListener('brain', loadManager);

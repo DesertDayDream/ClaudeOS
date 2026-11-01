@@ -287,16 +287,18 @@ function broadcast(event, data) {
 // the served page knows, plus Host/Origin checks against other sites and DNS rebinding.
 const TOKEN = crypto.randomBytes(24).toString('hex');
 const LOCAL_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`]);
-// one chat (conversation + history) per brain; only the active brain's chat is used
+// each brain's chats (any number, each its own conversation); the page shows the active brain's
 const chats = new Map();
 function chatFor(brain) {
   if (!chats.has(brain.id)) {
     chats.set(brain.id, createChat({ cwd: brain.path, memoryFile: memoryFileOf(brain), helper, memoryServer,
-      stateFile: path.join(DATA, 'chats', `${brain.id}.json`), activityFile: ACTIVITY, port: PORT,
-      links: () => brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, memoryFile: memoryFileOf(b) })), token: TOKEN, broadcast,
+      dir: path.join(DATA, 'chats', brain.id), legacyFile: path.join(DATA, 'chats', `${brain.id}.json`), activityFile: ACTIVITY, port: PORT,
+      links: () => brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, memoryFile: memoryFileOf(b) })), token: TOKEN,
+      // a brain you switched away from keeps working, out of sight
+      broadcast: (event, data) => { if (brains.active()?.id === brain.id) broadcast(event, data); },
       othersWorking: () => managerFor(brain).busy(), team: () => teamOf(brain),
       // the chat is the Manager: when it stops, the Manager desk stops typing and unbriefed requests wait again
-      onIdle: () => managerFor(brain).chatDone() }));
+      onIdle: chatId => managerFor(brain).chatDone(chatId) }));
   }
   return chats.get(brain.id);
 }
@@ -312,8 +314,8 @@ function managerFor(brain) {
   if (!managers.has(brain.id)) {
     managers.set(brain.id, createManager({ cwd: brain.path, dataFile: path.join(DATA, 'manager', `${brain.id}.json`), activityFile: ACTIVITY,
       memoryFile: memoryFileOf(brain), helper, memoryServer, port: PORT, token: TOKEN, team: () => teamOf(brain),
-      chatBusy: () => chatFor(brain).snapshot().busy,
-      onBriefDone: (brief, text) => chatFor(brain).report(brief.title, text),
+      chatBusy: () => chatFor(brain).anyBusy(),
+      onBriefDone: (brief, text) => chatFor(brain).report(brief.chat, brief.title, text),
       broadcast: (event, data) => {
         if (brains.active()?.id === brain.id) broadcast(event, data);
         if (!data.busy) chatFor(brain).dropOthersApprovals();
@@ -322,7 +324,7 @@ function managerFor(brain) {
   }
   return managers.get(brain.id);
 }
-const anyBusy = () => [...chats.values()].some(c => c.snapshot().busy) || [...managers.values()].some(m => m.busy());
+const anyBusy = () => [...chats.values()].some(c => c.anyBusy()) || [...managers.values()].some(m => m.busy());
 const memoryEditor = createMemoryEditor({ claudeDir: CLAUDE, dataDir: DATA, memoryFileOf });
 // only memories the active brain is showing right now can be opened, so an id can't reach other files
 function memoryById(brain, id) {
@@ -468,6 +470,7 @@ async function handleApi(req, res, url) {
   }
   if (url.pathname === '/api/integrations' && req.method === 'GET') return json(res, 200, integrationsView(active));
   if (url.pathname === '/api/chat' && req.method === 'GET') return json(res, 200, chat ? chat.snapshot() : { messages: [], busy: false, approvals: [] });
+  if (url.pathname === '/api/chats' && req.method === 'GET') return json(res, 200, chat ? chat.list(url.searchParams.get('q') || '') : { chats: [] });
   if (url.pathname === '/api/manager' && req.method === 'GET') return json(res, 200, active ? managerFor(active).snapshot() : { inbox: [], files: [], briefs: [], busy: false });
   if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
   // a file dropped on the Inbox tab streams straight into the brain's inbox/ folder
@@ -493,7 +496,9 @@ async function handleApi(req, res, url) {
         const wasActive = brains.active().id === b.id;
         brains.remove(b.id);
         chats.delete(b.id);
-        fs.rmSync(path.join(DATA, 'chats', `${b.id}.json`), { force: true }); // its chat history; the folder itself stays
+        // its chat history; the folder itself stays
+        fs.rmSync(path.join(DATA, 'chats', `${b.id}.json`), { force: true });
+        fs.rmSync(path.join(DATA, 'chats', b.id), { recursive: true, force: true });
         if (wasActive && brains.active()) switchTo(brains.active()); else { refresh(); broadcast('brain', { id: null }); }
         return json(res, 200, { ok: true });
       }
@@ -551,17 +556,20 @@ async function handleApi(req, res, url) {
     if (what === 'remove') return json(res, 200, m.remove(String(body.id || '')));
     if (what === 'run') {
       // "Brief & assign" hands the inbox to the Manager, which is the chat
-      if (chat.snapshot().busy) return json(res, 200, { error: 'The Manager is answering in the chat. Wait for it, or press Stop, then brief the team.' });
+      if (chat.busy()) return json(res, 200, { error: 'The Manager is answering in the open chat. Wait for it, press Stop, or start a new chat, then brief the team.' });
       const h = m.handOver();
       if (h.error) return json(res, 200, h);
       const r = chat.send(h.text, { label: h.label, from: 'inbox' });
-      if (!r.error) m.markSent(h.ids);
+      if (!r.error) m.markSent(h.ids, chat.currentId());
       return json(res, 200, r);
     }
     if (what === 'stop') return json(res, 200, m.stop());
     return json(res, 404, { error: 'not found' });
   }
-  if (url.pathname === '/api/chat/new') return json(res, 200, chat.reset());
+  if (url.pathname === '/api/chat/new') return json(res, 200, chat.newChat());
+  if (url.pathname === '/api/chats/open') return json(res, 200, chat.open(String(body.id || '')));
+  if (url.pathname === '/api/chats/rename') return json(res, 200, chat.rename(String(body.id || ''), body.title));
+  if (url.pathname === '/api/chats/delete') return json(res, 200, chat.remove(String(body.id || '')));
   if (url.pathname === '/api/chat/options') return json(res, 200, chat.setOptions(body));
   if (url.pathname === '/api/chat/wrap') return json(res, 200, chat.wrapUp());
   if (url.pathname === '/api/approval') return json(res, 200, await chat.requestApproval(body));
@@ -625,7 +633,7 @@ function openPage(url) {
 
 // Quit from the tray: stop anything Claude is doing for us first.
 function quit() {
-  for (const c of chats.values()) c.stop();
+  for (const c of chats.values()) c.stopAll();
   for (const h of handoffs.values()) h.stop();
   for (const m of managers.values()) m.stop();
   setTimeout(() => process.exit(0), 800);
