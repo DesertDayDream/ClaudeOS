@@ -92,7 +92,7 @@ try {
   assert.equal((await api('/api/update')).value.desktop, true);
   assert.equal((await api('/api/update', {})).value.ok, true); assert.equal(updateChecks, 1);
   const deniedRollback = (await api('/api/update', { rollback: true })).value;
-  assert.match(deniedRollback.error, /previous installer/);
+  assert.match(deniedRollback.error, /no earlier version/);
   const waitFor = async predicate => {
     for (let i = 0; i < 60; i++) { const state = (await api('/api/chat')).value; if (predicate(state)) return state; await new Promise(resolve => setTimeout(resolve, 30)); }
     throw new Error('Timed out waiting for lab chat state');

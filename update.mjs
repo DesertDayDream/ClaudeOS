@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { IS_EXE, buildId } from './runtime.mjs';
+import { IS_EXE, buildId, appVersion } from './runtime.mjs';
 import { IS_DESKTOP, desktopEvent } from './desktop-bridge.mjs';
 
 // what happened at the last update or rollback (read once, at start, then forgotten)
@@ -17,7 +17,7 @@ function readLast(marker) {
   try {
     const m = JSON.parse(fs.readFileSync(marker, 'utf8'));
     fs.rmSync(marker, { force: true });
-    if (Date.now() - m.at < 10 * 60e3) return { ok: m.status !== 'failed', kind: m.kind || 'update', status: m.status, from: m.from, to: buildId(), version: m.version || null, chat: m.chat, brain: m.brain, at: m.at };
+    if (Date.now() - m.at < 10 * 60e3) return { ok: m.status !== 'failed', kind: m.kind || 'update', status: m.status, from: m.from, to: buildId(), version: m.version || null, installer: m.installer || null, chat: m.chat, brain: m.brain, at: m.at };
   } catch { /* no update just happened */ }
   return null;
 }
@@ -25,32 +25,73 @@ function readLast(marker) {
 // The desktop app installs either a release from GitHub (electron-updater) or a local installer that
 // `npm run desktop:finish` built (update_app with installer): ClaudeOS waits until no chat is working,
 // the shell quits, installs it silently and opens again on the chat that asked.
+// Rolling back: <data>/installers keeps the installer of the running version and of the one before it,
+// never more. A rollback installs the one before and swaps the two, so updating again brings the newer
+// one back. Which is which is settled at the next start, once the install is known to have worked.
 const INSTALLER = /^ClaudeOS-Setup-(\d+\.\d+\.\d+)\.exe$/i;
-function createDesktopUpdater({ busy, dataDir }) {
+function createDesktopUpdater({ busy, dataDir, version = null }) {
   const marker = path.join(dataDir, 'update.json');
-  let state = { desktop: true, canUpdate: true, build: buildId(), phase: 'idle', ready: null, previous: null, pending: false, last: readLast(marker) };
+  const keptDir = path.join(dataDir, 'installers'), keptFile = path.join(keptDir, 'installers.json');
+  const kept = () => { try { return JSON.parse(fs.readFileSync(keptFile, 'utf8')); } catch { return {}; } };
+  const isFile = f => { try { return fs.statSync(f).isFile(); } catch { return false; } };
+  const versionOf = name => INSTALLER.exec(name || '')?.[1] || null;
+  // keep only the installers named in installers.json
+  function prune(k) {
+    try { for (const f of fs.readdirSync(keptDir)) if (f !== 'installers.json' && f !== k.current && f !== k.previous) fs.rmSync(path.join(keptDir, f), { force: true }); } catch { /* no folder yet */ }
+  }
+  function settle(last) {
+    if (!last || !['install', 'rollback'].includes(last.kind) || !last.installer) return;
+    const k = kept();
+    if (!last.ok) return prune(k); // drops a copied installer that didn't install
+    const next = last.kind === 'rollback' ? { current: k.previous, previous: k.current }
+      : { current: last.installer, previous: k.current && k.current !== last.installer ? k.current : k.previous };
+    fs.mkdirSync(keptDir, { recursive: true });
+    fs.writeFileSync(keptFile, JSON.stringify(next));
+    prune(next);
+  }
+  const last = readLast(marker);
+  // then drop any other installer (one copied for an install that was cancelled or failed)
+  try { settle(last); prune(kept()); } catch (e) { console.log('Update: could not keep the installers:', e.message); }
+  // the version to go back to: kept, and not the one already running (an install made by hand)
+  function previous() {
+    const k = kept(), v = versionOf(k.previous);
+    return v && v !== version && isFile(path.join(keptDir, k.previous)) ? { version: v, installer: k.previous } : null;
+  }
+  let state = { desktop: true, canUpdate: true, build: buildId(), version, phase: 'idle', ready: null, pending: false, last };
   let timer;
   process.on('message', message => {
     if (message?.type === 'desktop-update-state') state = { ...state, ...message.value };
   });
+  // once no chat is working: say what is being installed (for the next start), then hand over to the shell
+  function installWhenIdle(file, info) {
+    const install = () => {
+      if (busy()) { timer = setTimeout(install, 500); return; }
+      fs.writeFileSync(marker, JSON.stringify({ status: 'started', from: buildId(), ...info, at: Date.now() }));
+      desktopEvent('desktop-update-install', { installer: file });
+    };
+    timer = setTimeout(install, 300);
+  }
   return {
-    status: () => state,
+    status: () => ({ ...state, previous: previous() }),
     cancel() { clearTimeout(timer); state.pending = false; return { ok: true }; },
     request({ kind, installer, chat = '', brain = '' } = {}) {
-      if (kind === 'rollback') return { error: 'To roll back the desktop app, run a previous installer. Your brains and chats are kept separately.' };
-      if (state.pending) return { ok: true, waiting: true };
+      if (state.pending) return state.pending === (kind === 'rollback' ? 'rollback' : 'update') ? { ok: true, waiting: true } : { error: 'Already installing. Cancel that first.' };
+      if (kind === 'rollback') {
+        const back = previous();
+        if (!back) return { error: 'There is no earlier version to go back to yet. ClaudeOS keeps the one before each update from now on.' };
+        state.pending = 'rollback';
+        installWhenIdle(path.join(keptDir, back.installer), { kind: 'rollback', version: back.version, installer: back.installer, chat, brain });
+        return { ok: true, waiting: busy(), version: back.version };
+      }
       if (installer) {
         const file = path.resolve(String(installer)), name = INSTALLER.exec(path.basename(file));
-        let isFile = false;
-        try { isFile = path.isAbsolute(String(installer)) && fs.statSync(file).isFile(); } catch { /* missing */ }
-        if (!name || !isFile) return { error: `${installer} is not an installer. Build one with npm run desktop:finish and pass its full path (dist\desktop\ClaudeOS-Setup-<version>.exe).` };
+        if (!name || !path.isAbsolute(String(installer)) || !isFile(file)) return { error: `${installer} is not an installer. Build one with npm run desktop:finish and pass its full path (dist/desktop/ClaudeOS-Setup-<version>.exe).` };
+        // keep a copy of it, so it can be gone back to after the next update
+        const base = path.basename(file), copy = path.join(keptDir, base);
+        try { fs.mkdirSync(keptDir, { recursive: true }); if (path.resolve(copy) !== file) fs.copyFileSync(file, copy); }
+        catch (e) { return { error: `Could not keep a copy of the installer: ${e.message}` }; }
         state.pending = 'update';
-        const install = () => {
-          if (busy()) { timer = setTimeout(install, 500); return; }
-          fs.writeFileSync(marker, JSON.stringify({ status: 'started', kind: 'install', from: buildId(), version: name[1], chat, brain, at: Date.now() }));
-          desktopEvent('desktop-update-install', { installer: file });
-        };
-        timer = setTimeout(install, 300);
+        installWhenIdle(copy, { kind: 'install', version: name[1], installer: base, chat, brain });
         return { ok: true, waiting: busy(), version: name[1] };
       }
       if (!state.ready) { desktopEvent('desktop-update-check'); return { ok: true }; }
@@ -112,7 +153,7 @@ try {
 `;
 
 export function createUpdater({ dataDir, port, busy, quit }) {
-  if (IS_DESKTOP) return createDesktopUpdater({ busy, dataDir });
+  if (IS_DESKTOP) return createDesktopUpdater({ busy, dataDir, version: appVersion() });
   const exe = process.execPath;
   const base = exe.replace(/\.exe$/i, '');
   const next = `${base}.new.exe`, old = `${base}.old.exe`;

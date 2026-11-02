@@ -123,7 +123,7 @@ export function toolSummary(name, input = {}) {
   if (name === 'mcp__claudeos__delete_scheduled') return `Delete scheduled task ${input.id || ''}`;
   if (name === 'mcp__claudeos__publish_artifact') return `Published an artifact: ${input.title || ''}`;
   if (name === 'mcp__claudeos__update_app' && input.installer) return `Install ${String(input.installer).split(/[\\/]/).pop()}: ClaudeOS closes, installs it and opens again once every chat is done`;
-  if (name === 'mcp__claudeos__update_app') return input.rollback ? 'Roll ClaudeOS back to the previous build (dist/ClaudeOS.old.exe) once every chat is done' : 'Restart ClaudeOS into the new build (dist/ClaudeOS.new.exe) once every chat is done';
+  if (name === 'mcp__claudeos__update_app') return input.rollback ? 'Roll ClaudeOS back to the version before once every chat is done' : 'Restart ClaudeOS into the new build (dist/ClaudeOS.new.exe) once every chat is done';
   if (name === 'mcp__claudeos__terminal_run') return `Terminal: ${String(input.command || '').slice(0, 120)}`;
   if (/^mcp__claudeos__terminal_/.test(name)) return `Terminal: ${name.slice('mcp__claudeos__terminal_'.length)} ${input.tab || ''}`;
   if (name.startsWith('mcp__computer__')) return `Computer: ${name.slice('mcp__computer__'.length)}${input.text ? ` "${String(input.text).slice(0, 60)}"` : input.keys ? ` ${input.keys}` : input.coordinate ? ` at ${input.coordinate.join(', ')}` : ''}`;

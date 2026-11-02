@@ -57,7 +57,9 @@ function updateRow() {
       : u.phase === 'current' ? 'You have the latest published release.'
       : 'Updates come from ClaudeOS releases on GitHub.';
     const busy = ['checking', 'downloading', 'development'].includes(u.phase);
-    return `<div class="row"><b>Desktop updates</b><span>${note} <button type="button" class="btn mini" data-act="update" ${busy || u.pending ? 'disabled' : ''}>${u.ready ? 'Restart to update' : 'Check for updates'}</button>${u.pending ? ' <button type="button" class="btn mini" data-act="update-cancel">Cancel</button>' : ''}</span></div>`;
+    const pending = u.pending === 'rollback' ? ' Going back as soon as every chat is done…' : u.pending ? ' Installing as soon as every chat is done…' : '';
+    const back = u.previous && !u.pending ? `<div class="row"><b>Roll back</b><span>Go back to ${esc(u.previous.version)}. ${u.version ? `${esc(u.version)} is kept, so updating again brings it back.` : ''} <button type="button" class="btn mini" data-act="rollback">Roll back</button></span></div>` : '';
+    return `<div class="row"><b>Desktop updates</b><span>${u.version ? `Running ${esc(u.version)}. ` : ''}${note}${pending} <button type="button" class="btn mini" data-act="update" ${busy || u.pending ? 'disabled' : ''}>${u.ready ? 'Restart to update' : 'Check for updates'}</button>${u.pending ? ' <button type="button" class="btn mini" data-act="update-cancel">Cancel</button>' : ''}</span></div>${back}`;
   }
   const when = t => { const d = new Date(t); return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
   const name = f => f.build ? `build ${esc(f.build)}` : `the build from ${when(f.built)}`;
@@ -93,7 +95,7 @@ menu.addEventListener('change', e => {
 menu.addEventListener('click', e => {
   if (e.target.dataset.act === 'allow') Notification.requestPermission().then(draw);
   if (e.target.dataset.act === 'update') api('/api/update', {}).then(r => { if (r.error) alert(r.error); load(); });
-  if (e.target.dataset.act === 'rollback' && confirm(`Restart ClaudeOS into the previous build? Chats that are working finish their turn first.`)) api('/api/update', { rollback: true }).then(r => { if (r.error) alert(r.error); load(); });
+  if (e.target.dataset.act === 'rollback' && confirm(update?.desktop && update.previous ? `Go back to ClaudeOS ${update.previous.version}? ClaudeOS closes, installs it and opens again. Chats that are working finish their turn first.` : `Restart ClaudeOS into the previous build? Chats that are working finish their turn first.`)) api('/api/update', { rollback: true }).then(r => { if (r.error) alert(r.error); load(); });
   if (e.target.dataset.act === 'update-cancel') api('/api/update', { cancel: true }).then(load);
 });
 // the hotkey box records the keys you press, so you don't have to spell them
@@ -148,8 +150,8 @@ events.addEventListener('hello', e => {
   const t = document.createElement('div');
   t.className = 'toast';
   const back = u.kind === 'rollback';
-  t.textContent = u.ok ? (back ? `ClaudeOS rolled back to build ${u.to} (Restart to update in ⚙ brings ${u.from} back)` : `ClaudeOS updated to ${u.version ? `${u.version} (build ${u.to})` : `build ${u.to}`}`)
-    : u.kind === 'install' ? `The installer failed, so ClaudeOS stayed on build ${u.to} (see update.log in your ClaudeOS data folder)`
+  t.textContent = u.ok ? (back ? (u.version ? `ClaudeOS went back to ${u.version} (build ${u.to})` : `ClaudeOS rolled back to build ${u.to} (Restart to update in ⚙ brings ${u.from} back)`) : `ClaudeOS updated to ${u.version ? `${u.version} (build ${u.to})` : `build ${u.to}`}`)
+    : u.kind === 'install' || u.version ? `The installer failed, so ClaudeOS stayed on build ${u.to} (see update.log in your ClaudeOS data folder)`
     : `The ${back ? 'previous' : 'new'} build didn't start, so ClaudeOS stayed on build ${u.to} (see update.log in your ClaudeOS data folder)`;
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 8000);

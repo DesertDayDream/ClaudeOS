@@ -397,6 +397,7 @@ async function desk(tool, a) {
   if (tool === 'update_app') {
     const brain = [...chats.entries()].find(([, c]) => c === owner)?.[0] || '';
     const r = updater.request({ chat: a.chat, brain, kind: a.rollback ? 'rollback' : 'update', installer: a.installer });
+    if (IS_DESKTOP && !r.error && a.rollback) return { text: `ClaudeOS goes back to ${r.version} ${r.waiting ? 'as soon as every chat (this one included) has finished its turn' : 'now'}: it closes, installs it and opens again on this chat. The version it leaves is kept, so updating again brings it back. End your turn now.` };
     if (IS_DESKTOP && !r.error && a.installer) return { text: `ClaudeOS installs ${r.version} ${r.waiting ? 'as soon as every chat (this one included) has finished its turn' : 'now'}: it closes, installs and opens again on this chat, where you get a message to finish up. End your turn now.` };
     if (IS_DESKTOP && !r.error) return { text: updater.status().ready ? 'The desktop app will install the downloaded release after working chats finish their turns.' : 'Checking GitHub for a desktop release. If one is available, ClaudeOS will offer to download it.' };
     if (!r.error && a.rollback) return { text: `ClaudeOS goes back to the previous build ${r.waiting ? 'as soon as every chat (this one included) has finished its turn' : 'now'}. End your turn now; the page reloads by itself.` };
@@ -959,8 +960,10 @@ function resumeAfterUpdate() {
     const c = chatFor(b);
     if (c.open(u.chat).error) return;
     const what = u.version ? `ClaudeOS ${u.version} (build ${u.to})` : `build ${u.to}`;
-    c.report(u.chat, u.ok ? `Updated to ${what}` : 'The update did not install',
-      u.ok ? `ClaudeOS closed, installed ${what} and opened again (it was build ${u.from}). Check that it works, finish the shipping steps that come after installing, and tell me in a line or two.`
+    const back = u.kind === 'rollback';
+    c.report(u.chat, u.ok ? `${back ? 'Rolled back' : 'Updated'} to ${what}` : `The ${back ? 'rollback' : 'update'} did not install`,
+      u.ok ? back ? `ClaudeOS closed, went back to ${what} and opened again (it was build ${u.from}). Check that it works and tell me in a line or two.`
+        : `ClaudeOS closed, installed ${what} and opened again (it was build ${u.from}). Check that it works, finish the shipping steps that come after installing, and tell me in a line or two.`
         : `The installer failed, so ClaudeOS is still on build ${u.to}. Read update.log in the ClaudeOS data folder, tell me why in a line or two, and fix it if you can.`, 'update');
   } catch (e) { console.error('Could not reopen the chat after the update:', e.message); }
 }
