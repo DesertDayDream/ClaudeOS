@@ -8,7 +8,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { events } from '/events.js';
 import { APPS, appForServer, normServer } from './apps.js';
 import * as office from './office.js';
-import { mindScore, recordScore, intelligence, modelFamily } from './minds.js';
+import { modelTier, effortLevel, rating, modelFamily } from './minds.js';
 
 const TOKEN = window.CLAUDEOS_TOKEN;
 async function api(path, body) {
@@ -413,58 +413,89 @@ function setBubble(s, text, color) {
 }
 
 // ---------- how intelligent an employee is (minds.js) ----------
-// One score from the model and effort they think with, how their runs went, and their SKILL.md.
+// The brain over their head: its size is their model, its brightness their effort, how full it is
+// their SKILL.md, and the number beside it their rating (how their runs went).
 const MODEL_NAMES = { fable: 'Fable', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' };
 function mindOf(s) {
   const m = state.minds?.[s.id] || { engine: 'claude', model: '', effort: '', from: 'manager' };
-  const rec = recordScore(work.runs.get(s.id) || []);
-  const mind = mindScore(m);
-  const craft = s.craft ? s.craft.score : undefined;
   const fam = modelFamily(m.model);
-  const model = m.engine === 'codex' ? `Codex ${m.model || 'default model'}` : fam ? MODEL_NAMES[fam] : m.model || 'Claude Code default model';
-  const from = m.modelFrom === 'skill' ? 'set in their SKILL.md' : m.from === 'own' ? 'their own pick' : "the Manager's pick";
-  return { score: intelligence({ mind, record: rec.score, craft }), mind, record: rec, craft, settings: m,
-    mindText: `${model} · ${m.effort ? m.effort + ' effort' : 'default effort'} (${from})` };
+  const from = (k) => m[k + 'From'] === 'skill' ? 'set in their SKILL.md' : m[k + 'From'] === 'settings' ? 'your Claude settings'
+    : m.from === 'own' ? 'their own pick' : "the Manager's pick";
+  const r = rating(work.runs.get(s.id) || []);
+  return {
+    size: modelTier(m), brightness: effortLevel(m.effort), meter: s.craft ? s.craft.score : null, record: r,
+    rating: r.runs ? Math.round(r.score * 100) : null, // null: no runs yet, a new hire
+    modelText: `${m.engine === 'codex' ? `Codex ${m.model || 'default model'}` : fam ? MODEL_NAMES[fam] : m.model || 'Claude Code default model'} (${from('model')})`,
+    effortText: `${m.effort ? m.effort[0].toUpperCase() + m.effort.slice(1) : 'Default'} effort (${from('effort')})`,
+  };
 }
-const scoreColor = n => n >= 75 ? '#7ee0a8' : n >= 50 ? '#f2c14e' : '#f08a7e';
+const ratingColor = n => n == null ? '#9aa3c7' : n >= 75 ? '#7ee0a8' : n >= 50 ? '#f2c14e' : '#f08a7e';
+const ratingText = n => n == null ? 'new' : String(n);
+function skillText(c) {
+  return c ? `${c.words.toLocaleString()} words · ${c.sections} sections · ${c.examples} examples · ${c.files} files` : 'no SKILL.md on this PC';
+}
 function mindTip(s) {
-  const i = mindOf(s), c = s.craft;
-  return `Intelligence ${i.score}/100\n• Model and effort: ${i.mindText}\n• Track record: ${i.record.runs ? `${i.record.done} of ${i.record.runs} runs done` : 'no runs yet'}`
-    + (c ? `\n• SKILL.md: ${c.words.toLocaleString()} words, ${c.sections} sections, ${c.examples} examples, ${c.files} bundled files` : '');
+  const i = mindOf(s);
+  return `Rating: ${i.rating == null ? 'new, no runs yet' : `${i.rating}/100 (${i.record.done} of ${i.record.runs} runs done)`}`
+    + `\n• Size, model: ${i.modelText}\n• Brightness, effort: ${i.effortText}\n• Filled, SKILL.md: ${i.meter == null ? '–' : Math.round(i.meter * 100) + '/100'}, ${skillText(s.craft)}`;
 }
-// the brain over their head, filled up to their score
 function brainSprite() {
   const c = document.createElement('canvas');
-  c.width = 256; c.height = 112;
+  c.width = 288; c.height = 128;
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false, opacity: 0.6 }));
-  s.scale.set(1.6, 0.7, 1);
-  s.position.y = 2.2;
-  s.userData = { canvas: c, score: null };
+  s.scale.set(1.8, 0.8, 1);
+  s.position.y = 2.25;
+  s.userData = { canvas: c, key: null };
   return s;
 }
-function drawBrain(sprite, score) {
-  if (sprite.userData.score === score) return;
-  sprite.userData.score = score;
+// one brain emoji per size, drawn once and reused
+const brainEmoji = new Map();
+function emojiOf(px) {
+  if (brainEmoji.has(px)) return brainEmoji.get(px);
+  const c = document.createElement('canvas');
+  c.width = c.height = Math.ceil(px * 1.25);
+  const g = c.getContext('2d');
+  g.font = `${px}px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`;
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText('🧠', c.width / 2, c.height / 2 + px * 0.06);
+  brainEmoji.set(px, c);
+  return c;
+}
+function drawBrain(sprite, i) {
+  const key = [i.size, i.brightness, i.meter, i.rating].join();
+  if (sprite.userData.key === key) return;
+  sprite.userData.key = key;
   const c = sprite.userData.canvas, g = c.getContext('2d');
   g.clearRect(0, 0, c.width, c.height);
-  // the emoji, with the part above the score dimmed: a brain that fills up
+  // size: the model (Haiku smallest, Fable biggest)
+  const px = Math.round(44 + 50 * Math.max(0, i.size - 0.45) / 0.55);
+  const em = emojiOf(px);
+  // the meter: the part above how full their SKILL.md is turns grey
   const icon = document.createElement('canvas');
-  icon.width = icon.height = 104;
+  icon.width = em.width; icon.height = em.height;
   const ig = icon.getContext('2d');
-  ig.font = '84px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif';
-  ig.textAlign = 'center'; ig.textBaseline = 'middle';
-  ig.fillText('🧠', 52, 58);
-  const top = 12, bottom = 96, line = bottom - (bottom - top) * score / 100;
-  ig.globalCompositeOperation = 'source-atop';
-  ig.fillStyle = 'rgba(150,155,180,0.78)';
-  ig.fillRect(0, 0, icon.width, line);
-  g.drawImage(icon, 8, 4);
-  g.font = '700 58px system-ui, Segoe UI, sans-serif';
+  ig.drawImage(em, 0, 0);
+  if (i.meter != null) {
+    const top = em.height * 0.14, bottom = em.height * 0.88;
+    ig.globalCompositeOperation = 'source-atop';
+    ig.fillStyle = 'rgba(150,155,180,0.8)';
+    ig.fillRect(0, 0, icon.width, bottom - (bottom - top) * i.meter);
+  }
+  // brightness: the effort (low is dim, max glows)
+  const b = i.brightness;
+  g.save();
+  g.filter = `brightness(${(0.4 + 0.8 * b).toFixed(2)}) saturate(${(0.4 + 0.9 * b).toFixed(2)})`;
+  if (b >= 0.75) { g.shadowColor = `rgba(255,150,200,${b})`; g.shadowBlur = 26 * b; }
+  const cx = 66;
+  g.drawImage(icon, cx - icon.width / 2, c.height - icon.height - 2);
+  g.restore();
+  // the number: their rating
+  g.font = i.rating == null ? '600 40px system-ui, Segoe UI, sans-serif' : '700 60px system-ui, Segoe UI, sans-serif';
   g.textBaseline = 'middle';
-  g.fillStyle = scoreColor(score);
-  g.fillText(String(score), 124, 60);
+  g.fillStyle = ratingColor(i.rating);
+  g.fillText(ratingText(i.rating), 136, c.height - 52);
   sprite.material.map.needsUpdate = true;
 }
 
@@ -959,7 +990,7 @@ function apply(next) {
   layoutEmployees(next.org);
 
   state = { ...next, skills: allSkills };
-  for (const e of employees.values()) { drawApps(e.appStrip, appsOf(e.data)); drawBrain(e.brainIcon, mindOf(e.data).score); }
+  for (const e of employees.values()) { drawApps(e.appStrip, appsOf(e.data)); drawBrain(e.brainIcon, mindOf(e.data)); }
   firstLoad = false;
   if (selectWhenHired && employees.has(selectWhenHired)) { selected = selectWhenHired; selectWhenHired = null; }
   renderPanel();
@@ -987,7 +1018,7 @@ function renderPanel() {
       : lastRun ? `<div class="now ${lastRun.status}">${esc(lastRun.prompt || 'a task')} · ${ago(lastRun.end || lastRun.last)}</div>` : '';
     return `<div class="emp ${busy ? 'busy' : ''} ${selected === s.id ? 'sel' : ''}" data-id="${esc(s.id)}"${s.source !== 'contractor' ? ' draggable="true"' : ''}>
       <div class="dot" style="background:${hex(SOURCE_COLORS[s.source] ?? SOURCE_COLORS.plugin)}"></div>
-      <div class="who">${esc(employeeName(s))}<span class="iq" title="${esc(mindTip(s))}" style="color:${scoreColor(mindOf(s).score)}">🧠${mindOf(s).score}</span>${appsOf(s).slice(0, 5).map(appBadge).join('')}</div>
+      <div class="who">${esc(employeeName(s))}<span class="iq" title="${esc(mindTip(s))}" style="color:${ratingColor(mindOf(s).rating)}">🧠${ratingText(mindOf(s).rating)}</span>${appsOf(s).slice(0, 5).map(appBadge).join('')}</div>
       <div class="load">${busy ? 'working' : n ? `${n} job${n > 1 ? 's' : ''}` : 'idle'}</div>
       <div class="role">${esc(s.name)}</div>${now}</div>`;
   };
@@ -1133,15 +1164,15 @@ function renderBoard(el, s) {
   el.innerHTML = html;
   el.classList.add('board');
 }
-// Their intelligence and what it's made of, with what would raise it
+// Their brain explained: what each part of it shows, and what would raise it
 function mindHtml(s) {
-  const i = mindOf(s), c = s.craft;
-  const bar = (label, v, detail, tip) => `<div class="mbar" title="${esc(tip)}"><span>${label}</span><i><b style="width:${Math.round((v ?? 0) * 100)}%"></b></i><em>${v === undefined ? '–' : Math.round(v * 100)}</em><small>${esc(detail)}</small></div>`;
-  const r = i.record;
-  return `<div class="runs-h">Intelligence <b class="iqbig" style="color:${scoreColor(i.score)}">🧠 ${i.score}</b></div><div class="mind">
-    ${bar('Model', i.mind, i.mindText, 'A stronger model or more effort raises this. Pick them in their own chat box (their desk).')}
-    ${bar('Record', r.score, r.runs ? `${r.done} of ${r.runs} runs done${r.failed ? `, ${r.failed} failed` : ''}` : 'no runs yet: it grows as they finish work', 'Runs that finish well raise this; it counts more the more runs there are.')}
-    ${c ? bar('SKILL.md', c.score, `${c.words.toLocaleString()} words · ${c.sections} sections · ${c.examples} examples · ${c.files} files`, 'Clear instructions, a description that says when to use it, sections, steps, examples and bundled scripts raise this.') : ''}
+  const i = mindOf(s), r = i.record;
+  const bar = (label, v, detail, tip) => `<div class="mbar" title="${esc(tip)}"><span>${label}</span><i><b style="width:${Math.round((v ?? 0) * 100)}%"></b></i><em>${v == null ? '–' : Math.round(v * 100)}</em><small>${esc(detail)}</small></div>`;
+  return `<div class="runs-h">Intelligence <b class="iqbig" style="color:${ratingColor(i.rating)}">🧠 ${i.rating == null ? 'new' : `rated ${i.rating}`}</b></div><div class="mind">
+    ${bar('Model', i.size, `${i.modelText} · the brain's size`, "A stronger model makes a bigger brain. Pick it in their own chat box (their desk).")}
+    ${bar('Effort', i.brightness, `${i.effortText} · how bright it is`, 'More effort makes a brighter brain; high and up glow. Pick it in their own chat box.')}
+    ${bar('SKILL.md', i.meter, `${skillText(s.craft)} · how full it is`, 'Clear instructions, a description that says when to use it, sections, steps, examples and bundled scripts fill the brain.')}
+    ${bar('Rating', r.runs ? r.score : null, r.runs ? `${r.done} of ${r.runs} runs done${r.failed ? `, ${r.failed} failed` : ''} · the number` : 'no runs yet: shows "new" until they finish work', 'Runs that finish well raise their rating; it counts more the more runs there are.')}
   </div>`;
 }
 // What the employee is on now, then the runs Claude handed them (from the activity hook)

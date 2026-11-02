@@ -1,12 +1,12 @@
-// How intelligent an employee is: one 0-100 score from three parts.
-//   mind   - the model and effort they think with (their own pick, the skill's, or the Manager's)
-//   record - how their runs went (finished well, how many)
-//   craft  - how much their SKILL.md gives them to work with (instructions, structure, examples, files)
-// Shared by the server (craft, from the SKILL.md) and the page (record, from the activity log).
+// How intelligent an employee is, shown as the brain over their head:
+//   size       - the model they think with (their own pick, the skill's, or the Manager's)
+//   brightness - the effort they think with
+//   meter      - how much their SKILL.md gives them to work with (instructions, structure, examples, files)
+//   number     - their rating: how their runs went (finished well, how many)
+// Shared by the server (craft, from the SKILL.md) and the page (rating, from the activity log).
 
 const MODEL_TIER = { fable: 1, opus: 0.9, sonnet: 0.7, haiku: 0.45 };
 const EFFORT_LEVEL = { minimal: 0.1, low: 0.25, medium: 0.5, high: 0.75, xhigh: 0.9, max: 1 };
-const WEIGHTS = { mind: 0.4, record: 0.3, craft: 0.3 };
 const clamp = n => Math.max(0, Math.min(1, n));
 
 // claude model ids and aliases (claude-opus-5-5, opus, opus[1m]) to their family
@@ -15,16 +15,18 @@ export function modelFamily(model = '') {
   return Object.keys(MODEL_TIER).find(f => m.includes(f)) || '';
 }
 
-// { engine, model, effort } -> 0..1
-export function mindScore({ engine, model, effort } = {}) {
-  const tier = engine === 'codex' ? 0.85 : MODEL_TIER[modelFamily(model)] ?? 0.8; // unknown: Claude Code's default
-  const e = EFFORT_LEVEL[String(effort || '').toLowerCase()] ?? 0.6;
-  return tier * (0.65 + 0.35 * e);
+// { engine, model } -> 0..1, the brain's size
+export function modelTier({ engine, model } = {}) {
+  return engine === 'codex' ? 0.85 : MODEL_TIER[modelFamily(model)] ?? 0.8; // unknown: Claude Code's default
+}
+// effort -> 0..1, the brain's brightness
+export function effortLevel(effort) {
+  return EFFORT_LEVEL[String(effort || '').toLowerCase()] ?? 0.6; // unknown: Claude Code's default
 }
 
-// runs: [{ status: done | error | stopped | unfinished | working }] -> 0..1
+// runs: [{ status: done | error | stopped | unfinished | working }] -> their rating, 0..1
 // A good rate counts more the more runs it is over: a new hire starts low and earns it.
-export function recordScore(runs = []) {
+export function rating(runs = []) {
   const ended = runs.filter(r => r.status !== 'working');
   const done = ended.filter(r => r.status === 'done').length;
   const stopped = ended.filter(r => r.status === 'stopped').length;
@@ -54,11 +56,4 @@ export function craftOf(text = '', description = '', files = []) {
   };
   const score = parts.description * 0.2 + parts.length * 0.3 + parts.structure * 0.2 + parts.examples * 0.1 + parts.resources * 0.2;
   return { score: Math.round(score * 1000) / 1000, words, sections, steps, examples, files: files.length, scripts };
-}
-
-// The parts there are (a contractor has no SKILL.md here), weighted into 0-100.
-export function intelligence({ mind, record, craft }) {
-  const have = Object.entries({ mind, record, craft }).filter(([, v]) => typeof v === 'number');
-  const w = have.reduce((a, [k]) => a + WEIGHTS[k], 0);
-  return Math.round(100 * have.reduce((a, [k, v]) => a + WEIGHTS[k] * v, 0) / (w || 1));
 }

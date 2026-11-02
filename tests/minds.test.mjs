@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mindScore, recordScore, craftOf, intelligence, modelFamily } from '../public/minds.js';
+import { modelTier, effortLevel, rating, craftOf, modelFamily } from '../public/minds.js';
 
 test('model families from aliases and ids', () => {
   assert.equal(modelFamily('claude-opus-5-5'), 'opus');
@@ -8,18 +8,21 @@ test('model families from aliases and ids', () => {
   assert.equal(modelFamily(''), '');
 });
 
-test('a stronger model and more effort think better', () => {
-  assert.ok(mindScore({ model: 'opus', effort: 'max' }) > mindScore({ model: 'opus', effort: 'low' }));
-  assert.ok(mindScore({ model: 'opus', effort: 'high' }) > mindScore({ model: 'haiku', effort: 'high' }));
-  assert.ok(mindScore({ model: 'fable', effort: 'max' }) <= 1);
+test('a stronger model is a bigger brain, more effort a brighter one', () => {
+  assert.ok(modelTier({ model: 'fable' }) > modelTier({ model: 'opus' }));
+  assert.ok(modelTier({ model: 'opus' }) > modelTier({ model: 'sonnet' }));
+  assert.ok(modelTier({ model: 'sonnet' }) > modelTier({ model: 'haiku' }));
+  assert.equal(modelTier({ model: 'fable' }), 1);
+  assert.ok(effortLevel('max') > effortLevel('high') && effortLevel('high') > effortLevel('low'));
+  assert.equal(effortLevel(''), 0.6); // not picked: Claude Code's default
 });
 
 test('a track record is earned: more good runs, higher score', () => {
   const done = n => Array.from({ length: n }, () => ({ status: 'done' }));
-  assert.ok(recordScore([]).score < recordScore(done(3)).score);
-  assert.ok(recordScore(done(3)).score < recordScore(done(15)).score);
-  assert.ok(recordScore([...done(5), { status: 'error' }, { status: 'error' }]).score < recordScore(done(7)).score);
-  assert.equal(recordScore([{ status: 'working' }]).runs, 0); // a run still going doesn't count yet
+  assert.ok(rating([]).score < rating(done(3)).score);
+  assert.ok(rating(done(3)).score < rating(done(15)).score);
+  assert.ok(rating([...done(5), { status: 'error' }, { status: 'error' }]).score < rating(done(7)).score);
+  assert.equal(rating([{ status: 'working' }]).runs, 0); // a run still going doesn't count yet
 });
 
 test('a fuller SKILL.md scores higher than a stub', () => {
@@ -29,9 +32,4 @@ test('a fuller SKILL.md scores higher than a stub', () => {
   assert.ok(stub.score < 0.2, `stub ${stub.score}`);
   assert.ok(full.score > 0.8, `full ${full.score}`);
   assert.equal(full.scripts, 1);
-});
-
-test('intelligence mixes what is known into 0-100', () => {
-  assert.equal(intelligence({ mind: 1, record: 1, craft: 1 }), 100);
-  assert.equal(intelligence({ mind: 0.5, record: 0.5 }), 50); // a contractor has no SKILL.md here
 });
