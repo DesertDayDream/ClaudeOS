@@ -23,6 +23,19 @@ await build({
   bundle: true, platform: 'node', format: 'cjs', target: 'node22', logLevel: 'warning',
   define: { 'import.meta.url': '__claudeosUrl' },
   banner: { js: 'const __claudeosUrl = require("node:url").pathToFileURL(__filename).href;' },
+  plugins: [{
+    // the memory server reads its version from its package.json at start, which isn't inside the exe;
+    // give it the version as a constant instead
+    name: 'memory-server-version',
+    setup(b) {
+      const pkg = path.join(ROOT, 'node_modules', '@modelcontextprotocol', 'server-memory', 'package.json');
+      const { version } = JSON.parse(fs.readFileSync(pkg, 'utf8'));
+      b.onLoad({ filter: /[\\/]@modelcontextprotocol[\\/]server-memory[\\/]dist[\\/]version\.js$/ }, () => ({
+        contents: `export function resolvePackageVersion() { return ${JSON.stringify(version)}; }\nexport const SERVER_VERSION = ${JSON.stringify(version)};\n`,
+        loader: 'js',
+      }));
+    },
+  }],
 });
 
 // 2. the page: three.js bundled into app.js, so no import map is needed
