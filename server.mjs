@@ -167,16 +167,42 @@ function skillsIn(dir, source, owner) {
   return out;
 }
 
-function collectSkills(brain) {
-  const skills = [...skillsIn(path.join(CLAUDE, 'skills'), 'personal')];
+// Home is the user's own Claude (~/.claude): its team is the personal skills, and it has every plugin
+// Claude has turned on. Every other brain starts clean: personal skills are blocked in its chats and
+// plugins are off unless that brain's own settings turn one on. A brain hires copies from Home.
+function installedPlugins() {
   try {
     const installed = JSON.parse(fs.readFileSync(path.join(CLAUDE, 'plugins', 'installed_plugins.json'), 'utf8'));
-    for (const [key, entries] of Object.entries(installed.plugins || {})) {
-      const plugin = key.split('@')[0];
-      for (const e of entries) skills.push(...skillsIn(path.join(e.installPath, 'skills'), 'plugin', plugin));
-    }
-  } catch { /* no plugins */ }
-  skills.push(...skillsIn(path.join(brain.path, '.claude', 'skills'), 'project', path.basename(brain.path)));
+    return Object.entries(installed.plugins || {}).map(([key, entries]) => ({ key, name: key.split('@')[0], dirs: entries.map(e => path.join(e.installPath, 'skills')) }));
+  } catch { return []; }
+}
+function enabledPluginsIn(...files) {
+  const on = {};
+  for (const f of files) { try { Object.assign(on, JSON.parse(fs.readFileSync(f, 'utf8')).enabledPlugins || {}); } catch { /* none there */ } }
+  return on;
+}
+function pluginsOn(brain) {
+  const user = enabledPluginsIn(path.join(CLAUDE, 'settings.json'));
+  if (brain.home) return new Set(Object.keys(user).filter(k => user[k]));
+  const own = enabledPluginsIn(path.join(brain.path, '.claude', 'settings.json'), path.join(brain.path, '.claude', 'settings.local.json'));
+  return new Set(Object.keys(own).filter(k => own[k]));
+}
+const teamSkills = brain => skillsIn(teamDir(brain), 'project', path.basename(brain.path));
+// what a chat, employee run or hand-off in this brain starts with, on top of Claude's own settings
+function scopeFor(brain) {
+  if (!brain || brain.home) return { disallowed: [], settings: null };
+  const own = new Set(teamSkills(brain).map(s => s.name));
+  const disallowed = skillsIn(path.join(CLAUDE, 'skills'), 'personal').filter(s => !own.has(s.name)).map(s => `Skill(${s.name})`);
+  const on = pluginsOn(brain);
+  const off = Object.fromEntries(installedPlugins().filter(p => !on.has(p.key)).map(p => [p.key, false]));
+  return { disallowed, settings: Object.keys(off).length ? { enabledPlugins: off } : null };
+}
+
+function collectSkills(brain) {
+  const skills = [];
+  const on = pluginsOn(brain);
+  for (const p of installedPlugins()) if (on.has(p.key)) for (const d of p.dirs) skills.push(...skillsIn(d, 'plugin', p.name));
+  skills.push(...teamSkills(brain));
   const seen = new Set();
   return skills.filter(s => !seen.has(s.id) && seen.add(s.id));
 }
@@ -220,18 +246,38 @@ function saveNames() {
   try { fs.mkdirSync(path.dirname(NAMES_FILE), { recursive: true }); fs.writeFileSync(NAMES_FILE, JSON.stringify(names, null, 2)); } catch { /* names still work this session */ }
 }
 
+// Home: the brain ClaudeOS opens with, in Claude's own folder. Made once; it takes over reading
+// Claude's memories from every folder, and the personal skills keep the names they had.
+function ensureHome() {
+  let home = brains.home();
+  if (!home) {
+    const existing = brains.byPath(CLAUDE);
+    setupBrain(CLAUDE, { name: 'Home', hookCommand: HOOK, memoryServer, templatesDir: TEMPLATES, home: true });
+    for (const b of brains.list()) if (b.allClaudeMemories && b !== existing) brains.update(b.id, { allClaudeMemories: false });
+    home = existing ? brains.update(existing.id, { home: true, allClaudeMemories: true })
+      : brains.add({ id: crypto.randomUUID(), name: 'Home', path: CLAUDE, created: Date.now(), allClaudeMemories: true, home: true });
+    const owner = path.basename(CLAUDE);
+    for (const [id, name] of Object.entries(names)) if (id.startsWith('personal:')) names[`project:${owner}:${id.slice('personal:'.length)}`] ||= name;
+    saveNames();
+  }
+  brains.activate(home.id); // the app always opens in Home
+}
+try { ensureHome(); } catch (e) { console.error('Could not set up the Home brain:', e.message); }
+
 function snapshot() {
   const brain = brains.active();
-  const list = brains.list().map(b => ({ id: b.id, name: b.name, path: b.path, links: b.links || [] }));
+  const list = brains.list().map(b => ({ id: b.id, name: b.name, path: b.path, links: b.links || [], home: !!b.home }));
   if (!brain) return { brain: null, brains: list, memories: [], skills: [], names: {}, activity: [], at: Date.now() }; // first run
   const skills = collectSkills(brain);
   return {
-    brain: { id: brain.id, name: brain.name, path: brain.path },
+    brain: { id: brain.id, name: brain.name, path: brain.path, home: !!brain.home },
     brains: list,
     memories: [...collectBrain(brain), ...collectMemories(brain)], skills, names: { ...nameSkills(skills) },
     // linked brains: their shared brain (read-only here), their own team, and whether they're working for us
     linked: brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, path: b.path, busy: handoffs.has(b.id),
-      memories: collectBrain(b), skills: skillsIn(path.join(b.path, '.claude', 'skills'), 'project', path.basename(b.path)) })),
+      memories: collectBrain(b), skills: teamSkills(b) })),
+    // a clean brain hires from Home: the user's personal skills, copied into this brain's team
+    home: brain.home || !brains.home() ? null : { id: brains.home().id, name: brains.home().name, skills: teamSkills(brains.home()) },
     activity: collectActivity(brain), at: Date.now(), org: org.snapshot(brain.id),
     integrations: integrations.brainId === brain.id ? integrations.list : [],
   };
@@ -398,7 +444,8 @@ function chatFor(brain) {
       // the chat is the Manager: when it stops, the Manager desk stops typing and unbriefed requests wait again
       onIdle: chatId => managerFor(brain).chatDone(chatId),
       notify: n => notify({ ...n, brain: brain.name }), onLimits: setLimits,
-      onCodexTurn: () => setTimeout(() => broadcast('codexLimits', codexLimits()), 800) })); // Codex writes its log just after
+      onCodexTurn: () => setTimeout(() => broadcast('codexLimits', codexLimits()), 800), // Codex writes its log just after
+      scope: () => scopeFor(brains.find(brain.id) || brain) }));
   }
   return chats.get(brain.id);
 }
@@ -466,7 +513,7 @@ const managers = new Map();
 function managerFor(brain) {
   if (!managers.has(brain.id)) {
     managers.set(brain.id, createManager({ cwd: brain.path, dataFile: path.join(DATA, 'manager', `${brain.id}.json`), activityFile: ACTIVITY,
-      memoryFile: memoryFileOf(brain), helper, memoryServer, port: PORT, token: TOKEN, team: () => teamOf(brain),
+      memoryFile: memoryFileOf(brain), helper, memoryServer, port: PORT, token: TOKEN, team: () => teamOf(brain), scope: () => scopeFor(brains.find(brain.id) || brain),
       project: id => org.findProject(brain.id, id),
       cabinet: skill => { const s = skillsIn(teamDir(brain), 'project', path.basename(brain.path)).find(x => x.name === skill); return s ? cabinetFor(brain, s.id) : null; }, logWork: (id, entry) => { org.logWork(brain.id, id, entry); refresh(); },
       chatBusy: () => chatFor(brain).anyBusy(),
@@ -536,7 +583,7 @@ async function handoff(active, { brain: target, task }, req) {
     memory: memoryServer(memoryFileOf(b)),
     claudeos: { ...helper('approval-mcp'), env: { CLAUDEOS_PORT: String(PORT), CLAUDEOS_TOKEN: TOKEN } },
   };
-  const run = runHandoff({ brain: b, task, mcpServers, onExit: () => { handoffs.delete(b.id); refresh(); } });
+  const run = runHandoff({ brain: b, task, mcpServers, scope: scopeFor(b), onExit: () => { handoffs.delete(b.id); refresh(); } });
   handoffs.set(b.id, run);
   refresh();
   // if the asking Claude goes away (Stop, crash), stop the linked brain too
@@ -547,20 +594,21 @@ async function handoff(active, { brain: target, task }, req) {
 
 // Copies a skill folder from a linked brain's team into the active brain's team.
 function copySkill(active, { from, skill }) {
-  const b = brains.linksOf(active).find(x => x.id === from);
+  const b = brains.linksOf(active).find(x => x.id === from) || (brains.home()?.id === from ? brains.home() : null);
   if (!b) return { error: 'Link that brain first.' };
-  const s = skillsIn(path.join(b.path, '.claude', 'skills'), 'project').find(x => x.name === skill);
+  if (b.id === active.id) return { error: `That skill is already ${active.name}'s.` };
+  const s = teamSkills(b).find(x => x.name === skill);
   if (!s) return { error: `${b.name} has no skill called ${skill}.` };
-  const dest = path.join(active.path, '.claude', 'skills', s.folder);
-  if (fs.existsSync(dest)) return { error: `${active.name} already has a .claude/skills/${s.folder} folder.` };
-  fs.cpSync(path.join(b.path, '.claude', 'skills', s.folder), dest, { recursive: true, filter: src => !src.includes('__pycache__') });
+  const dest = path.join(teamDir(active), s.folder);
+  if (fs.existsSync(dest)) return { error: `${active.name} already has a ${s.folder} skill folder.` };
+  fs.cpSync(path.join(teamDir(b), s.folder), dest, { recursive: true, filter: src => !src.includes('__pycache__') });
   refresh();
   return { ok: true, folder: s.folder };
 }
 
 // The active brain's own team is editable from the page; personal and plugin skills are read-only.
 const skillEditor = createSkillEditor({ dataDir: DATA });
-const teamDir = brain => path.join(brain.path, '.claude', 'skills');
+function teamDir(brain) { return brain.home ? path.join(CLAUDE, 'skills') : path.join(brain.path, '.claude', 'skills'); }
 const teamSkill = (brain, id) => skillsIn(teamDir(brain), 'project', path.basename(brain.path)).find(s => s.id === id);
 function skillApi(active, route, body) {
   const team = teamDir(active), owner = path.basename(active.path);
@@ -740,6 +788,7 @@ async function handleApi(req, res, url) {
       if (url.pathname === '/api/brains/remove') {
         const b = brains.find(body.id);
         if (!b) return json(res, 200, { error: 'Unknown brain.' });
+        if (b.home) return json(res, 200, { error: 'Home is your own Claude and always stays.' });
         const wasActive = brains.active().id === b.id;
         brains.remove(b.id);
         chats.delete(b.id);

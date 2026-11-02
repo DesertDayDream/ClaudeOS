@@ -20,6 +20,10 @@ const TEAM_SECTION = `## The team
 Skills in \`.claude/skills/\` are this brain's team. Hand work to the skills that match the task, and only those; when a task has several parts, give each part to its own skill. When the user wants a new kind of help, offer to write a new skill (a folder with a \`SKILL.md\`) and show it before saving.
 `;
 
+const HOME_TEAM_SECTION = `## The team
+The user's personal skills (\`skills/\` in this folder, the ones Claude and Codex load everywhere) are this brain's team, along with the plugins turned on in Claude's settings. Other brains start with none of them and hire copies from here. Hand work to the skills that match the task, and only those. When the user wants a new kind of help, offer to write a new skill (a folder with a \`SKILL.md\` in \`skills/\`) and show it before saving.
+`;
+
 export function slugFor(dir) {
   return path.resolve(dir).replace(/[^a-zA-Z0-9]/g, '-');
 }
@@ -86,7 +90,7 @@ export function repairHooks(dir, command, memoryServer) {
 }
 
 // Adds the ClaudeOS pieces a folder is missing. Returns a list of what it did, for the page.
-export function setupBrain(dir, { name, hookCommand: command, memoryServer, template, templatesDir }) {
+export function setupBrain(dir, { name, hookCommand: command, memoryServer, template, templatesDir, home = false }) {
   const done = [];
   const creative = template === 'creative' ? path.join(templatesDir, 'creative') : null;
   fs.mkdirSync(path.join(dir, 'brain'), { recursive: true });
@@ -133,10 +137,14 @@ export function setupBrain(dir, { name, hookCommand: command, memoryServer, temp
     if (changed) { writeJsonFile(settingsFile, s); done.push(settings ? 'added ClaudeOS settings to .claude/settings.json' : '.claude/settings.json'); }
   }
 
-  const claudeMd = path.join(dir, 'CLAUDE.md');
+  // Home lives in Claude's own folder (~/.claude), where a CLAUDE.md would apply to every Claude
+  // session: its instructions go in .claude/CLAUDE.md, which only chats started in Home read
+  const claudeMd = home ? path.join(dir, '.claude', 'CLAUDE.md') : path.join(dir, 'CLAUDE.md');
   const title = name || path.basename(dir);
   if (!fs.existsSync(claudeMd)) {
-    let text = `# ${title}\n\nThis folder is a ClaudeOS brain: one Claude with its own shared brain and team.\n\n${BRAIN_SECTION}\n${TEAM_SECTION}`;
+    let text = home ? `# ${title}\n\nThis is the Home brain of ClaudeOS: the user's own Claude, in Claude's folder (${dir}).\n\n${BRAIN_SECTION}\n${HOME_TEAM_SECTION}`
+      : `# ${title}\n\nThis folder is a ClaudeOS brain: one Claude with its own shared brain and team.\n\n${BRAIN_SECTION}\n${TEAM_SECTION}`;
+    fs.mkdirSync(path.dirname(claudeMd), { recursive: true });
     if (creative) { try { text = fs.readFileSync(path.join(creative, 'CLAUDE.md'), 'utf8').replace('{{NAME}}', title); } catch { /* generic */ } }
     fs.writeFileSync(claudeMd, text);
     done.push('CLAUDE.md');
@@ -146,7 +154,7 @@ export function setupBrain(dir, { name, hookCommand: command, memoryServer, temp
   }
 
   const agentsMd = path.join(dir, 'AGENTS.md');
-  if (!fs.existsSync(agentsMd)) {
+  if (!home && !fs.existsSync(agentsMd)) {
     fs.writeFileSync(agentsMd, `# ${title} (for Codex and other agents)\n\nRead \`CLAUDE.md\` in this folder; its rules apply to you too. The shared brain is the \`memory\` MCP server with \`MEMORY_FILE_PATH\` set to this folder's \`brain/memory.jsonl\`.\n`);
     done.push('AGENTS.md');
   }
@@ -179,6 +187,8 @@ export function createRegistry({ file }) {
     add(brain) { reg.brains.push(brain); save(); return brain; },
     remove(id) { reg.brains = reg.brains.filter(b => b.id !== id); for (const b of reg.brains) if (b.links) b.links = b.links.filter(l => l !== id); if (reg.active === id) reg.active = reg.brains[0]?.id ?? null; save(); },
     activate(id) { reg.active = id; save(); },
+    update(id, patch) { const b = reg.brains.find(x => x.id === id); if (b) { Object.assign(b, patch); save(); } return b; },
+    home: () => reg.brains.find(b => b.home) || null,
     // a link lets this brain read the other's shared brain, hand its team work and copy its skills
     setLinks(id, links) {
       const b = reg.brains.find(x => x.id === id);

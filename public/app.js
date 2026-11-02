@@ -951,7 +951,9 @@ function renderPanel() {
   }
   // the teams of linked brains: copy a skill over to hire the same employee here
   const have = new Set(state.skills.filter(s => s.source === 'project').map(s => s.name));
-  for (const b of state.linked || []) {
+  // Home (the user's own skills) comes first: a clean brain hires from it
+  const sources = [...(state.home ? [state.home] : []), ...(state.linked || []).filter(b => b.id !== state.home?.id)];
+  for (const b of sources) {
     html += `<div class="group">From ${esc(b.name)} · ${b.skills.length}</div>`;
     if (!b.skills.length) html += `<div class="empty">${esc(b.name)} has no team of its own yet.</div>`;
     for (const s of [...b.skills].sort((x, y) => x.name.localeCompare(y.name))) {

@@ -17,7 +17,7 @@ const MAX_TASKS = 12;
 const MAX_BRIEFS = 30;
 const clip = (s, n) => (s = String(s || '').trim()).length > n ? s.slice(0, n - 1) + '…' : s;
 
-export function createManager({ cwd, dataFile, activityFile, memoryFile, helper, memoryServer, port, token, broadcast, team, project = () => null, logWork = () => {}, cabinet = () => null, chatBusy = () => false, onBriefDone = () => {} }) {
+export function createManager({ cwd, dataFile, activityFile, memoryFile, helper, memoryServer, port, token, broadcast, team, project = () => null, logWork = () => {}, cabinet = () => null, chatBusy = () => false, onBriefDone = () => {}, scope = () => ({ disallowed: [], settings: null }) }) {
   let state = { inbox: [], briefs: [] };
   try { state = { ...state, ...JSON.parse(fs.readFileSync(dataFile, 'utf8')) }; } catch { /* first run */ }
   // runs from before a restart are gone
@@ -117,11 +117,14 @@ export function createManager({ cwd, dataFile, activityFile, memoryFile, helper,
       memory: memoryServer(memoryFile),
       claudeos: { ...helper('approval-mcp'), env: { CLAUDEOS_PORT: String(port), CLAUDEOS_TOKEN: token, CLAUDEOS_WHO: who, ...extraEnv } },
     };
+    const sc = scope();
+    denied = [...denied, ...sc.disallowed];
     const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--session-id', session,
       '--mcp-config', JSON.stringify({ mcpServers }), '--permission-prompt-tool', 'mcp__claudeos__approve',
       '--allowedTools', allowed.join(','), ...(denied.length ? ['--disallowedTools', denied.join(',')] : []),
       // a project's own folder, beside the brain (whose .claude/skills the employee needs)
-      ...(addDir ? ['--add-dir', addDir] : [])];
+      ...(addDir ? ['--add-dir', addDir] : []),
+      ...(sc.settings ? ['--settings', JSON.stringify(sc.settings)] : [])];
     const proc = spawn('claude', args, { cwd, windowsHide: true,
       env: { ...process.env, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } });
     const run = { proc, session, stopped: false };

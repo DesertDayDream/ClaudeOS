@@ -149,7 +149,7 @@ export function mentionedFiles(text, folder) {
   return out;
 }
 
-export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, helper, memoryServer, browserServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], projects = () => [], onIdle = () => {}, notify = () => {}, onLimits = () => {}, onCodexTurn = () => {} }) {
+export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, helper, memoryServer, browserServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], projects = () => [], onIdle = () => {}, notify = () => {}, onLimits = () => {}, onCodexTurn = () => {}, scope = () => ({ disallowed: [], settings: null }) }) {
   // the brain's chats: which one the page shows, the model/effort picked, and a row per saved chat
   const indexFile = path.join(dir, 'index.json');
   let index = { current: null, options: {}, chats: {} };
@@ -349,11 +349,14 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       return extra;
     }
     function launch() {
-      const setup = servers(), { mcpServers, allowed, denied, tools, emp } = setup;
+      const setup = servers(), { mcpServers, allowed, tools, emp } = setup;
+      // a brain other than Home starts clean: no personal skills, and only the plugins it turned on
+      const sc = scope(), denied = [...setup.denied, ...sc.disallowed];
       const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
         '--mcp-config', JSON.stringify({ mcpServers }), '--permission-prompt-tool', 'mcp__claudeos__approve',
         // the brain's own memory never needs a prompt, even in a folder Claude Code hasn't trusted yet
-        '--allowedTools', allowed.join(','), ...(denied.length ? ['--disallowedTools', denied.join(',')] : [])];
+        '--allowedTools', allowed.join(','), ...(denied.length ? ['--disallowedTools', denied.join(',')] : []),
+        ...(sc.settings ? ['--settings', JSON.stringify(sc.settings)] : [])];
       // a project chat works in that folder like Claude Desktop does (its CLAUDE.md, settings, .mcp.json
       // and Claude Code memory), with the brain added beside it for its skills and instructions
       if (state.folder) args.push('--add-dir', cwd);
