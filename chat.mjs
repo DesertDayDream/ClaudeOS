@@ -149,7 +149,7 @@ export function mentionedFiles(text, folder) {
   return out;
 }
 
-export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, helper, memoryServer, browserServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], projects = () => [], onIdle = () => {}, notify = () => {}, onLimits = () => {} }) {
+export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, helper, memoryServer, browserServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], projects = () => [], onIdle = () => {}, notify = () => {}, onLimits = () => {}, onCodexTurn = () => {} }) {
   // the brain's chats: which one the page shows, the model/effort picked, and a row per saved chat
   const indexFile = path.join(dir, 'index.json');
   let index = { current: null, options: {}, chats: {} };
@@ -552,7 +552,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     // Codex's events (codex exec --json) as the chat's reply: its messages, a line per command, tool
     // call or file change, and its plan as the checklist.
     function handleCodex(ev) {
-      if (ev.type === 'turn.completed') { run.usage = ev.usage || null; return; }
+      if (ev.type === 'turn.completed') { run.usage = ev.usage || null; try { onCodexTurn(); } catch { /* meters only */ } return; }
       const item = ev.item;
       if (!item || !/^item\./.test(ev.type)) return;
       const say = t => { t = String(t || '').trim(); if (!t) return; const add = (run.reply.text ? '\n\n' : '') + t; run.reply.text += add; send1({ kind: 'delta', id: run.reply.id, text: add }); };

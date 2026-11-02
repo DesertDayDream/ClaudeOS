@@ -499,6 +499,7 @@ function showOptions(o = {}) {
   modeSel.title = cx
     ? "How far Codex may go in this chat. Codex never stops to ask: Plan only = read-only, Don't ask = full access, anything else = it may change files in the chat's folder."
     : modeSel.dataset.claudeTitle || modeSel.title;
+  if (typeof showLimits === 'function') try { showLimits(); } catch { /* meters not set up yet */ }
 }
 modeSel.dataset.claudeTitle = modeSel.title;
 async function saveOptions(change) {
@@ -867,17 +868,33 @@ input.addEventListener('blur', () => setTimeout(() => { if (document.activeEleme
 suggestEl.addEventListener('mousedown', e => { const n = e.target.closest('[data-n]')?.dataset.n; if (n != null) { e.preventDefault(); takeSuggest(Number(n)); } });
 
 // ---------- plan usage: the 5-hour and weekly limits ----------
-// Claude Code reports them with every reply (rate_limit_event); the server keeps the last ones.
+// The meters follow the chat's engine. Claude Code reports Claude's with every reply (rate_limit_event);
+// Codex's come from its own session logs (the server reads the newest). No numbers = "unavailable".
 const limitsEl = document.getElementById('limits');
-let limits = null;
+let limits = null, codexLim = null;
 const WINDOW_NAME = { five_hour: '5-hour', seven_day: 'Week', seven_day_opus: 'Week · Opus', seven_day_sonnet: 'Week · Sonnet' };
+const isCodex = () => opts.engine === 'codex';
 function resetText(sec) {
   const d = new Date(sec * 1000), now = new Date();
   const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   if (d.toDateString() === now.toDateString()) return time;
   return `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`;
 }
+function codexWindowName(min) {
+  if (!min) return 'Limit';
+  if (min === 300) return '5-hour';
+  if (min === 10080) return 'Week';
+  return min % 1440 === 0 ? `${min / 1440}-day` : min % 60 === 0 ? `${min / 60}-hour` : `${min}-min`;
+}
 function windows() {
+  if (isCodex()) {
+    if (!codexLim) return [];
+    return [['primary', codexLim.primary], ['secondary', codexLim.secondary]].filter(([, v]) => v && v.used_percent != null).map(([k, v]) => {
+      const over = v.resets_at && Date.now() > v.resets_at * 1000;
+      return { name: codexWindowName(v.window_minutes), pct: over ? 0 : Math.round(v.used_percent), resets: v.resets_at, over,
+        status: codexLim.reached && (codexLim.reached === k || codexLim.reached === 'both') && !over ? 'rejected' : '' };
+    });
+  }
   if (!limits) return [];
   const w = limits.unifiedWindows || (limits.rateLimitType ? { [limits.rateLimitType]: { utilization: limits.utilization, resetsAt: limits.resetsAt, status: limits.status } } : {});
   return Object.entries(w).filter(([, v]) => v && v.utilization != null).map(([k, v]) => {
@@ -886,25 +903,31 @@ function windows() {
   });
 }
 function showLimits() {
-  const ws = windows();
-  limitsEl.hidden = !ws.length;
-  if (!ws.length) return;
-  const old = Date.now() - limits.at > 3 * 3600e3;
-  limitsEl.innerHTML = ws.map(w => `<span class="lim${w.pct >= 90 || w.status === 'rejected' ? ' hot' : w.pct >= 75 ? ' warm' : ''}" title="${esc(w.name)} limit: ${w.over ? 'has reset since the last reply' : `${w.pct}% used, resets ${resetText(w.resets)}`}${old ? ` (as of ${new Date(limits.at).toLocaleString()})` : ''}">
+  const ws = windows(), who = isCodex() ? 'Codex' : 'Claude', src = isCodex() ? codexLim : limits;
+  limitsEl.hidden = false;
+  limitsEl.title = `Your ${who} plan usage (click for details)`;
+  if (!ws.length) { limitsEl.innerHTML = `<span class="lim na">${who} usage unavailable</span>`; return; }
+  const old = Date.now() - src.at > 3 * 3600e3;
+  limitsEl.innerHTML = `<span class="lim who">${who}</span>` + ws.map(w => `<span class="lim${w.pct >= 90 || w.status === 'rejected' ? ' hot' : w.pct >= 75 ? ' warm' : ''}" title="${who} ${esc(w.name)} limit: ${w.over ? 'has reset since the last reply' : `${w.pct}% used, resets ${resetText(w.resets)}`}${old ? ` (as of ${new Date(src.at).toLocaleString()})` : ''}">
     <b>${esc(w.name)}</b><span class="bar"><i style="width:${w.pct}%"></i></span>${w.over ? 'reset' : `${w.pct}%`}</span>`).join('') +
-    (limits.status === 'rejected' ? `<span class="lim hot">Limit reached${limits.resetsAt ? ` · back ${resetText(limits.resetsAt)}` : ''}</span>` : '');
+    (!isCodex() && limits.status === 'rejected' ? `<span class="lim hot">Limit reached${limits.resetsAt ? ` · back ${resetText(limits.resetsAt)}` : ''}</span>` : '') +
+    (isCodex() && ws.some(w => w.status === 'rejected') ? '<span class="lim hot">Limit reached</span>' : '');
 }
 function showUsage() {
-  const ws = windows();
-  if (!ws.length) return alert('No usage numbers yet. Claude Code reports them with each reply, so send a message first.');
-  alert(`Your Claude plan usage${Date.now() - limits.at > 600e3 ? ` (as of ${new Date(limits.at).toLocaleString()})` : ''}:\n\n` +
+  const ws = windows(), who = isCodex() ? 'Codex' : 'Claude', src = isCodex() ? codexLim : limits;
+  if (!ws.length) return alert(isCodex()
+    ? "Codex usage is unavailable: no Codex session has logged its limits yet (they're read from ~/.codex/sessions). Send Codex a message first."
+    : 'Claude usage is unavailable: Claude Code reports it with each reply, so send a message first.');
+  alert(`Your ${who} plan usage${isCodex() && codexLim.plan ? ` (${codexLim.plan})` : ''}${Date.now() - src.at > 600e3 ? ` as of ${new Date(src.at).toLocaleString()}` : ''}:\n\n` +
     ws.map(w => `${w.name}: ${w.over ? 'reset since then' : `${w.pct}% used · resets ${resetText(w.resets)}`}`).join('\n') +
-    (limits.isUsingOverage ? '\n\nYou are using extra usage now.' : ''));
+    (!isCodex() && limits.isUsingOverage ? '\n\nYou are using extra usage now.' : ''));
 }
 limitsEl.addEventListener('click', showUsage);
-api('/api/limits').then(r => { limits = r.limits || null; showLimits(); });
+const loadLimits = () => api('/api/limits').then(r => { limits = r.limits || null; codexLim = r.codex || null; showLimits(); }).catch(() => showLimits());
+loadLimits();
 events.addEventListener('limits', e => { limits = JSON.parse(e.data); showLimits(); });
-setInterval(showLimits, 60000);
+events.addEventListener('codexLimits', e => { codexLim = JSON.parse(e.data); showLimits(); });
+setInterval(() => (isCodex() ? loadLimits() : showLimits()), 60000);
 
 // ---------- voice: dictate into the message box ----------
 const micBtn = document.getElementById('micBtn');

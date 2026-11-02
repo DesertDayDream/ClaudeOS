@@ -113,3 +113,40 @@ export function runCodexTurn({ cwd, thread, prompt, images = [], model, effort, 
   proc.stdin.end(prompt);
   return { proc, done };
 }
+
+// Codex's plan usage (5-hour and weekly windows). `codex exec --json` doesn't report it, but every
+// Codex session (ours and the Codex app's) logs it to ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+// with each token_count event. Read the newest one; null when there is none to read.
+export function codexLimits() {
+  const root = path.join(codexHome(), 'sessions');
+  const subdirs = d => { try { return fs.readdirSync(d, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name).sort().reverse(); } catch { return []; } };
+  const files = [];
+  outer: for (const y of subdirs(root)) for (const m of subdirs(path.join(root, y))) for (const d of subdirs(path.join(root, y, m))) {
+    const dir = path.join(root, y, m, d);
+    try {
+      for (const f of fs.readdirSync(dir)) if (f.endsWith('.jsonl')) { const p = path.join(dir, f); files.push({ p, t: fs.statSync(p).mtimeMs }); }
+    } catch { /* skip */ }
+    if (files.length >= 30) break outer;
+  }
+  files.sort((a, b) => b.t - a.t);
+  for (const { p } of files.slice(0, 15)) {
+    let text;
+    try {
+      const fd = fs.openSync(p, 'r');
+      try {
+        const size = fs.fstatSync(fd).size, len = Math.min(size, 512 * 1024);
+        const buf = Buffer.alloc(len); fs.readSync(fd, buf, 0, len, size - len); text = buf.toString('utf8');
+      } finally { fs.closeSync(fd); }
+    } catch { continue; }
+    const lines = text.split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes('"rate_limits"')) continue;
+      let ev; try { ev = JSON.parse(lines[i]); } catch { continue; }
+      const rl = ev?.payload?.rate_limits;
+      if (!rl || (!rl.primary && !rl.secondary)) continue;
+      return { primary: rl.primary || null, secondary: rl.secondary || null, plan: rl.plan_type || null,
+        reached: rl.rate_limit_reached_type || null, at: Date.parse(ev.timestamp) || Date.now() };
+    }
+  }
+  return null;
+}

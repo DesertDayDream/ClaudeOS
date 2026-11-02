@@ -10,7 +10,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { exec, spawn } from 'node:child_process';
 import { createChat } from './chat.mjs';
-import { codexModels, codexStatus, codexCommand } from './codex.mjs';
+import { codexModels, codexStatus, codexCommand, codexLimits } from './codex.mjs';
 import { findFiles } from './files.mjs';
 import { createSchedules } from './schedules.mjs';
 import { createPlugins } from './plugins.mjs';
@@ -394,7 +394,8 @@ function chatFor(brain) {
       othersWorking: () => managerFor(brain).busy(), team: () => teamOf(brain), projects: () => projectsOf(brain),
       // the chat is the Manager: when it stops, the Manager desk stops typing and unbriefed requests wait again
       onIdle: chatId => managerFor(brain).chatDone(chatId),
-      notify: n => notify({ ...n, brain: brain.name }), onLimits: setLimits }));
+      notify: n => notify({ ...n, brain: brain.name }), onLimits: setLimits,
+      onCodexTurn: () => setTimeout(() => broadcast('codexLimits', codexLimits()), 800) })); // Codex writes its log just after
   }
   return chats.get(brain.id);
 }
@@ -630,7 +631,7 @@ async function handleApi(req, res, url) {
   }
   if (url.pathname === '/api/integrations' && req.method === 'GET') return json(res, 200, integrationsView(active));
   if (url.pathname === '/api/chat' && req.method === 'GET') return json(res, 200, chat ? chat.snapshot() : { messages: [], busy: false, approvals: [] });
-  if (url.pathname === '/api/limits' && req.method === 'GET') return json(res, 200, { limits });
+  if (url.pathname === '/api/limits' && req.method === 'GET') return json(res, 200, { limits, codex: codexLimits() });
   // Codex as a chat's engine: its models and whether it's installed and signed in
   if (url.pathname === '/api/codex' && req.method === 'GET') return json(res, 200, { models: codexModels(), ...(await codexStatus()) });
   // `codex login` opens the ChatGPT sign-in page in the browser and waits for it
