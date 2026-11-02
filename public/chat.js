@@ -14,6 +14,7 @@ const wrapBtn = document.getElementById('wrapChat');
 const form = document.getElementById('composer');
 const meter = document.getElementById('meter');
 const nudge = document.getElementById('nudge');
+const engineSel = document.getElementById('chatEngine');
 const modelSel = document.getElementById('chatModel');
 const effortSel = document.getElementById('chatEffort');
 const modeSel = document.getElementById('chatMode');
@@ -34,7 +35,7 @@ const mins = ms => ms >= 3600e3 ? `${Math.round(ms / 3600e3)} h` : `${Math.max(1
 function usageLine(u) {
   const pct = u.sent ? Math.round((u.cached / u.sent) * 100) : 0;
   const cost = u.cost != null ? ` · ≈$${u.cost.toFixed(u.cost < 0.1 ? 3 : 2)} at API prices` : '';
-  const tip = `Claude read ${u.sent.toLocaleString()} tokens over ${u.calls} step${u.calls === 1 ? '' : 's'}, ${u.cached.toLocaleString()} of them from cache (cheap), and wrote ${u.output.toLocaleString()}.` +
+  const tip = `${u.engine === 'codex' ? 'Codex' : 'Claude'} read ${u.sent.toLocaleString()} tokens over ${u.calls} step${u.calls === 1 ? '' : 's'}, ${u.cached.toLocaleString()} of them from cache (cheap), and wrote ${u.output.toLocaleString()}.` +
     (u.warm < 0.5 ? ' The cache had expired, so the conversation was sent again at full price.' : '');
   return `<div class="usage" title="${esc(tip)}">${kTok(u.sent)} read · ${pct}% from cache · ${kTok(u.output)} written${cost}</div>`;
 }
@@ -87,6 +88,7 @@ function render(msg) {
     if (!msg.wrap && !msg.from) entry.el.insertAdjacentHTML('beforeend', `<div class="macts"><button type="button" data-mact="edit" title="Edit this message and send it again: the chat goes back to here">Edit</button><button type="button" data-mact="retry" title="Send this message again from here">Retry</button></div>`);
   } else {
     entry.el.innerHTML =
+      (msg.engine === 'codex' ? '<div class="engine" title="Answered by Codex">Codex</div>' : '') +
       (msg.carry ? '<div class="head">Fresh start · handover from your last chat (the details are saved in the brain\'s memory)</div>' : '') +
       (msg.tools?.length ? `<div class="tools">${msg.tools.map((t, n) => toolRow(t, `${msg.id}:${n}`)).join('')}</div>` : '') +
       `<div class="body">${markdown(msg.text)}</div>` +
@@ -461,18 +463,67 @@ rowsEl.addEventListener('click', async e => {
 });
 titleEl.addEventListener('dblclick', () => { if (chatList.some(c => c.id === currentId)) rename(currentId, titleEl.textContent); });
 
-// the Manager's model and effort, kept per brain; empty = Claude Code's default
-function showOptions(o = {}) {
-  modelSel.value = o.model || '';
-  effortSel.value = o.effort || '';
-  modelSel.classList.toggle('set', !!o.model);
-  effortSel.classList.toggle('set', !!o.effort);
+// The Manager's engine, model and effort, kept per brain; empty = the engine's own default.
+// Claude's picks and Codex's are kept apart (model/effort and codexModel/codexEffort), and the model and
+// effort lists show the ones of the engine picked.
+const CLAUDE_MODELS = [['fable', 'Fable'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku']];
+const CLAUDE_EFFORTS = [['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['xhigh', 'Extra high'], ['max', 'Max']];
+const EFFORT_NAMES = Object.fromEntries([...CLAUDE_EFFORTS, ['ultra', 'Ultra']]);
+let opts = {};
+let codex = null; // { models, installed, signedIn, text } once asked
+async function codexInfo(fresh = false) {
+  if (!codex || fresh) codex = await api('/api/codex');
+  return codex;
 }
-for (const sel of [modelSel, effortSel]) sel.addEventListener('change', async () => {
-  const r = await api('/api/chat/options', { model: modelSel.value, effort: effortSel.value });
+function fill(sel, first, list, value) {
+  sel.innerHTML = `<option value="">${first}</option>` + list.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('');
+  if (value && ![...sel.options].some(o => o.value === value)) sel.insertAdjacentHTML('beforeend', `<option value="${esc(value)}">${esc(value)}</option>`);
+  sel.value = value || '';
+  sel.classList.toggle('set', !!value);
+}
+function showOptions(o = {}) {
+  opts = o || {};
+  const cx = opts.engine === 'codex';
+  engineSel.value = cx ? 'codex' : '';
+  engineSel.classList.toggle('set', cx);
+  if (!cx) {
+    fill(modelSel, 'Default model', CLAUDE_MODELS, opts.model);
+    fill(effortSel, 'Default effort', CLAUDE_EFFORTS, opts.effort);
+  } else {
+    const models = codex?.models || [];
+    const m = models.find(x => x.id === opts.codexModel);
+    fill(modelSel, 'Default model', models.map(x => [x.id, x.name]), opts.codexModel);
+    fill(effortSel, 'Default effort', (m?.efforts?.length ? m.efforts : ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']).map(e => [e, EFFORT_NAMES[e] || e]), opts.codexEffort);
+    if (!codex) codexInfo().then(() => { if (opts.engine === 'codex') showOptions(opts); });
+  }
+  modeSel.title = cx
+    ? "How far Codex may go in this chat. Codex never stops to ask: Plan only = read-only, Don't ask = full access, anything else = it may change files in the chat's folder."
+    : modeSel.dataset.claudeTitle || modeSel.title;
+}
+modeSel.dataset.claudeTitle = modeSel.title;
+async function saveOptions(change) {
+  const r = await api('/api/chat/options', { ...opts, ...change });
   if (r.error) alert(r.error);
-  showOptions(r.options);
+  showOptions(r.options || opts);
+}
+engineSel.addEventListener('change', async () => {
+  if (engineSel.value === 'codex') {
+    const c = await codexInfo(true);
+    if (!c.installed) { alert(`${c.text}
+
+Install it from a terminal, then pick Codex again.`); return showOptions(opts); }
+    if (!c.signedIn) {
+      if (!confirm("Codex isn't signed in yet. Sign in with your ChatGPT account now? A sign-in page opens in your browser.")) return showOptions(opts);
+      const r = await api('/api/codex/login', {});
+      if (r.error) { alert(r.error); return showOptions(opts); }
+      alert('Finish signing in on the page that opened, then press OK.');
+      if (!(await codexInfo(true)).signedIn) { alert("Codex still isn't signed in. Try again once the sign-in page says you're done."); return showOptions(opts); }
+    }
+  }
+  saveOptions({ engine: engineSel.value });
 });
+modelSel.addEventListener('change', () => saveOptions(opts.engine === 'codex' ? { codexModel: modelSel.value } : { model: modelSel.value }));
+effortSel.addEventListener('change', () => saveOptions(opts.engine === 'codex' ? { codexEffort: effortSel.value } : { effort: effortSel.value }));
 
 // how much this chat asks first (Claude Code's permission mode)
 function showMode(m = '') {
@@ -722,7 +773,8 @@ const BUILTIN = [
   { name: 'new', hint: 'Start a new chat', run: () => newBtn.click() },
   { name: 'clear', hint: 'Start a new chat (this one stays in Chats)', run: () => newBtn.click() },
   { name: 'wrap', hint: 'Save what matters to the brain and start fresh', run: () => wrap() },
-  { name: 'model', arg: 'fable · opus · sonnet · haiku', hint: 'Model for the next replies', run: a => pick(modelSel, a) },
+  { name: 'engine', arg: 'claude · codex', hint: 'Who answers: Claude or Codex', run: a => pick(engineSel, a, { claude: '', codex: 'codex' }) },
+  { name: 'model', arg: 'fable · opus · sonnet · haiku (or a Codex model)', hint: 'Model for the next replies', run: a => pick(modelSel, a) },
   { name: 'effort', arg: 'low · medium · high · xhigh · max', hint: 'Effort for the next replies', run: a => pick(effortSel, a) },
   { name: 'mode', arg: 'ask · edits · auto · plan · dontask', hint: 'How much Claude asks first', run: a => pick(modeSel, a, MODE_WORDS) },
   { name: 'usage', hint: 'Your plan usage: the 5-hour and weekly limits', run: () => showUsage() },

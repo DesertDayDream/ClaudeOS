@@ -8,8 +8,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { exec } from 'node:child_process';
+import { exec, spawn } from 'node:child_process';
 import { createChat } from './chat.mjs';
+import { codexModels, codexStatus, codexCommand } from './codex.mjs';
 import { findFiles } from './files.mjs';
 import { createSchedules } from './schedules.mjs';
 import { createPlugins } from './plugins.mjs';
@@ -630,6 +631,16 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/integrations' && req.method === 'GET') return json(res, 200, integrationsView(active));
   if (url.pathname === '/api/chat' && req.method === 'GET') return json(res, 200, chat ? chat.snapshot() : { messages: [], busy: false, approvals: [] });
   if (url.pathname === '/api/limits' && req.method === 'GET') return json(res, 200, { limits });
+  // Codex as a chat's engine: its models and whether it's installed and signed in
+  if (url.pathname === '/api/codex' && req.method === 'GET') return json(res, 200, { models: codexModels(), ...(await codexStatus()) });
+  // `codex login` opens the ChatGPT sign-in page in the browser and waits for it
+  if (url.pathname === '/api/codex/login' && req.method === 'POST') {
+    const cmd = codexCommand();
+    if (!cmd) return json(res, 200, { error: 'Codex is not installed. Install it with: npm install -g @openai/codex' });
+    try { spawn(cmd.command, [...cmd.args, 'login'], { env: { ...process.env, ...cmd.env }, windowsHide: true, stdio: 'ignore' }).on('error', () => {}); }
+    catch (err) { return json(res, 200, { error: err.message }); }
+    return json(res, 200, { ok: true });
+  }
   if (url.pathname === '/api/plugins' && req.method === 'GET') return json(res, 200, await plugins.view({ fresh: url.searchParams.get('fresh') === '1' }));
   if (url.pathname === '/api/schedules' && req.method === 'GET') return json(res, 200, { list: active ? schedules.list(active.id) : [], folder: chat ? chat.chatFolder(chat.currentId()) : null });
   // @mentions: files in the open chat's folder
@@ -831,7 +842,7 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health'
     || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief' || url.pathname === '/api/org' || url.pathname.startsWith('/api/employee')
-    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname === '/api/git' || url.pathname.startsWith('/api/git/') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file' || url.pathname === '/api/preview' || url.pathname === '/api/settings' || url.pathname === '/api/update' || url.pathname === '/api/limits' || url.pathname.startsWith('/api/schedules') || url.pathname.startsWith('/api/plugins')) {
+    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname === '/api/git' || url.pathname.startsWith('/api/git/') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file' || url.pathname === '/api/preview' || url.pathname === '/api/settings' || url.pathname === '/api/update' || url.pathname === '/api/limits' || url.pathname.startsWith('/api/codex') || url.pathname.startsWith('/api/schedules') || url.pathname.startsWith('/api/plugins')) {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));
   }
   if (url.pathname === '/api/state') {
