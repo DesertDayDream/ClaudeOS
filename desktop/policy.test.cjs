@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { externalUrl, appNavigation, windowBounds, backendSpec } = require('./policy.cjs');
+const { externalUrl, appNavigation, windowBounds, backendSpec, installerPath, installerVersion } = require('./policy.cjs');
 
 test('OS link opening rejects executable and local-file protocols', () => {
   for (const url of ['file:///C:/Windows/System32/cmd.exe', 'javascript:alert(1)', 'data:text/html,x', 'ms-settings:privacy', 'https://user:password@example.com/', 'not a url']) assert.equal(externalUrl(url), null);
@@ -21,4 +21,14 @@ test('packaged terminal and MCP helpers run on the bundled Node backend, not Ele
   const spec = backendSpec({ packaged: true, resources: 'resources', root: 'source', platform: 'win32' });
   assert.match(spec.command, /backend[\\/]ClaudeOS-backend\.exe$/);
   assert.deepEqual(spec.args, []);
+});
+test('only a ClaudeOS installer given by full path can be run as an update', () => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claudeos-installer-'));
+  const good = path.join(dir, 'ClaudeOS-Setup-1.2.3.exe');
+  fs.writeFileSync(good, 'x'); fs.writeFileSync(path.join(dir, 'evil.exe'), 'x'); fs.writeFileSync(path.join(dir, 'ClaudeOS-Setup-1.2.3.exe.cmd'), 'x');
+  assert.equal(installerPath(good), good);
+  assert.equal(installerVersion(good), '1.2.3');
+  for (const bad of [path.join(dir, 'evil.exe'), path.join(dir, 'ClaudeOS-Setup-1.2.3.exe.cmd'), path.join(dir, 'ClaudeOS-Setup-9.9.9.exe'), 'ClaudeOS-Setup-1.2.3.exe', dir, null, 42]) assert.equal(installerPath(bad), null);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

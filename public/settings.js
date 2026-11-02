@@ -148,7 +148,8 @@ events.addEventListener('hello', e => {
   const t = document.createElement('div');
   t.className = 'toast';
   const back = u.kind === 'rollback';
-  t.textContent = u.ok ? (back ? `ClaudeOS rolled back to build ${u.to} (Restart to update in ⚙ brings ${u.from} back)` : `ClaudeOS updated to build ${u.to}`)
+  t.textContent = u.ok ? (back ? `ClaudeOS rolled back to build ${u.to} (Restart to update in ⚙ brings ${u.from} back)` : `ClaudeOS updated to ${u.version ? `${u.version} (build ${u.to})` : `build ${u.to}`}`)
+    : u.kind === 'install' ? `The installer failed, so ClaudeOS stayed on build ${u.to} (see update.log in your ClaudeOS data folder)`
     : `The ${back ? 'previous' : 'new'} build didn't start, so ClaudeOS stayed on build ${u.to} (see update.log in your ClaudeOS data folder)`;
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 8000);

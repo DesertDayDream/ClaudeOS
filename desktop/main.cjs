@@ -1,9 +1,9 @@
 const { app, BrowserWindow, Menu, Tray, Notification, globalShortcut, shell, dialog, screen, session } = require('electron');
-const { spawn } = require('node:child_process');
+const { spawn, execFile } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { externalUrl, appNavigation, windowBounds, backendSpec } = require('./policy.cjs');
+const { externalUrl, appNavigation, windowBounds, backendSpec, installerPath } = require('./policy.cjs');
 
 const dataDir = path.resolve(process.env.CLAUDEOS_HOME || path.join(os.homedir(), '.claudeos'));
 fs.mkdirSync(dataDir, { recursive: true });
@@ -114,6 +114,42 @@ function checkUpdates() {
   if (!updater || ['checking', 'downloading'].includes(updateState.phase)) return;
   updater.checkForUpdates().catch(error => pushUpdate({ phase: 'error', error: error.message }));
 }
+// Installing a local build (update_app with an installer): once the backend has stopped and this
+// process has quit, a hidden PowerShell ends anything still running from the install folder (a memory
+// server another Claude session started holds its files), runs the installer silently over this install,
+// and opens ClaudeOS again. A failed install is marked in update.json, so the next start says so.
+const INSTALL_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+function Log($s) { Add-Content -Path $env:U_LOG -Value ("{0:HH:mm:ss} {1}" -f (Get-Date), $s) }
+function Mark($status) { try { $m = Get-Content -Raw -LiteralPath $env:U_MARK | ConvertFrom-Json; $m.status = $status; $m | ConvertTo-Json | Set-Content -LiteralPath $env:U_MARK } catch { Log "could not mark: $_" } }
+try {
+  Log "installing $env:U_SETUP; waiting for ClaudeOS (pid $env:U_PID) to quit"
+  try { Wait-Process -Id ([int]$env:U_PID) -Timeout 30 -ErrorAction Stop } catch { Stop-Process -Id ([int]$env:U_PID) -Force -ErrorAction SilentlyContinue }
+  $dir = $env:U_DIR.TrimEnd('\') + '\'
+  Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Log "ending $($_.Name) ($($_.Id))"; Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+  Start-Sleep -Milliseconds 500
+  $p = Start-Process -FilePath $env:U_SETUP -ArgumentList '/S', '--updated' -PassThru -Wait
+  if ($p.ExitCode -ne 0) { Log "the installer exited with $($p.ExitCode)"; Mark 'failed' } else { Log 'installed' }
+} catch { Log ("install failed: " + $_); Mark 'failed' }
+if (Test-Path -LiteralPath $env:U_EXE) { Start-Process -FilePath $env:U_EXE } else { Log "$env:U_EXE is missing; run the installer by hand: $env:U_SETUP" }
+`;
+// Started through WMI, so the runner belongs to no job of ours and outlives this process even when
+// ClaudeOS was started from a terminal or sandbox. WMI passes no environment: the script sets the
+// settings this app was started with (data folder, port), so ClaudeOS opens again with them.
+function installLocal(file) {
+  const q = v => `'${String(v).replace(/'/g, "''")}'`;
+  const keep = Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(CLAUDEOS_|CLAUDE_CONFIG_DIR$|CODEX_HOME$|PORT$|ARTIFACT_PORT$)/.test(k) && k !== 'CLAUDEOS_DESKTOP' && k !== 'CLAUDEOS_NO_OPEN'));
+  const env = { ...keep, U_PID: process.pid, U_SETUP: file, U_DIR: path.dirname(process.execPath), U_EXE: process.execPath,
+    U_LOG: path.join(dataDir, 'update.log'), U_MARK: path.join(dataDir, 'update.json') };
+  const script = path.join(dataDir, 'install.ps1');
+  fs.writeFileSync(script, '﻿' + Object.entries(env).map(([k, v]) => `$env:${k} = ${q(v)}`).join('\n') + '\n' + INSTALL_SCRIPT);
+  const cmd = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${script}"`;
+  const launch = `$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
+$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ${q(cmd)}; ProcessStartupInformation = $si }
+if ($r.ReturnValue -ne 0) { exit 1 }`;
+  return new Promise((resolve, reject) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(launch, 'utf16le').toString('base64')],
+    { windowsHide: true }, error => error ? reject(error) : resolve()));
+}
 function createTray() {
   tray = new Tray(icon);
   tray.setToolTip('ClaudeOS');
@@ -154,6 +190,18 @@ async function onMessage(message) {
         reply({ ok: true }); break;
       case 'desktop-update-check': checkUpdates(); break;
       case 'desktop-update-install':
+        if (value.installer) {
+          // The backend has checked the file and waited for all agent turns.
+          const file = installerPath(value.installer);
+          if (!file || !app.isPackaged) { log(`Refused installer ${value.installer}`); return pushUpdate({ pending: false, phase: 'error', error: app.isPackaged ? 'Not a ClaudeOS installer.' : 'Only the installed app can install a build.' }); }
+          log(`Installing ${file}`);
+          try { await installLocal(file); } catch (error) {
+            log(`Could not start the installer: ${error.message}`); fs.rmSync(path.join(dataDir, 'update.json'), { force: true });
+            return pushUpdate({ pending: false, phase: 'error', error: 'Could not start the installer.' });
+          }
+          // the runner waits for this process to end before it installs
+          await stopBackend(); app.quit(); break;
+        }
         if (!updater || !updateState.ready) return pushUpdate({ pending: false });
         // The backend has waited for all agent turns before requesting installation.
         await stopBackend(); updater.quitAndInstall(false, true); break;

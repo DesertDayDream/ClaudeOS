@@ -57,7 +57,10 @@ async function smoke(command, args, name) {
 try {
   if (process.platform !== 'win32' || process.arch !== 'x64' || Number(process.versions.node.split('.')[0]) < 24) throw new Error('Use Node 24 or newer on Windows x64.');
   if (!npmCli) throw new Error('Run this command through npm: npm run desktop:finish');
-  await step('Install desktop dependencies', () => run(process.execPath, [npmCli, '--prefix', 'desktop', fs.existsSync(path.join(root, 'desktop', 'package-lock.json')) ? 'ci' : 'install']));
+  // npm ci wipes node_modules and takes a while: skip it while the installed tree matches the lockfile
+  const lock = path.join(root, 'desktop', 'package-lock.json'), installed = path.join(root, 'desktop', 'node_modules', '.package-lock.json');
+  if (fs.existsSync(lock) && fs.existsSync(installed) && fs.statSync(installed).mtimeMs >= fs.statSync(lock).mtimeMs) console.log('\nDesktop dependencies are up to date');
+  else await step('Install desktop dependencies', () => run(process.execPath, [npmCli, '--prefix', 'desktop', fs.existsSync(lock) ? 'ci' : 'install']));
   await step('Run shell and security checks', () => run(process.execPath, [npmCli, 'run', 'test:desktop']));
   await step('Run Codex approval protocol checks', () => run(process.execPath, [npmCli, 'run', 'test:codex']));
   await step('Run isolated backend integration check', async () => { await freePort(4800); await freePort(4810); await run(process.execPath, [npmCli, 'run', 'test:desktop-backend']); });
@@ -67,8 +70,13 @@ try {
   const { version } = JSON.parse(fs.readFileSync(path.join(root, 'desktop', 'package.json'), 'utf8'));
   report.installer = path.join(root, 'dist', 'desktop', `ClaudeOS-Setup-${version}.exe`);
   if (!fs.existsSync(report.installer)) throw new Error('The expected installer was not created.');
+  // keep only this installer: older ones and their blockmaps go
+  const dist = path.dirname(report.installer);
+  for (const name of fs.readdirSync(dist)) {
+    if (/^ClaudeOS-Setup-.*\.exe(\.blockmap)?$/i.test(name) && !name.startsWith(path.basename(report.installer))) fs.rmSync(path.join(dist, name), { force: true });
+  }
   report.ok = true; report.finished = new Date().toISOString(); save();
-  console.log(`\nInstaller built and packaged smoke test passed:\n${report.installer}\n\nQuit the current ClaudeOS from its tray before launching the installed app.\nInstall by opening the installer above. Your brains and chats stay in their existing location.\nReal sign-in and installer-to-installer update checks are still required.\nBuild report: ${output}`);
+  console.log(`\nInstaller built and packaged smoke test passed:\n${report.installer}\n\nFrom a ClaudeOS chat, update_app with this installer closes ClaudeOS, installs it silently and opens it again on that chat.\nOr quit ClaudeOS from its tray and run the installer yourself. Your brains and chats stay where they are.\nBuild report: ${output}`);
 } catch (error) {
   report.ok = false; report.error = error.message; save();
   console.error(`\nDesktop build stopped: ${error.message}\nReport: ${output}`); process.exitCode = 1;

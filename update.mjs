@@ -12,8 +12,23 @@ import { execFile } from 'node:child_process';
 import { IS_EXE, buildId } from './runtime.mjs';
 import { IS_DESKTOP, desktopEvent } from './desktop-bridge.mjs';
 
-function createDesktopUpdater(busy) {
-  let state = { desktop: true, canUpdate: true, build: buildId(), phase: 'idle', ready: null, previous: null, pending: false, last: null };
+// what happened at the last update or rollback (read once, at start, then forgotten)
+function readLast(marker) {
+  try {
+    const m = JSON.parse(fs.readFileSync(marker, 'utf8'));
+    fs.rmSync(marker, { force: true });
+    if (Date.now() - m.at < 10 * 60e3) return { ok: m.status !== 'failed', kind: m.kind || 'update', status: m.status, from: m.from, to: buildId(), version: m.version || null, chat: m.chat, brain: m.brain, at: m.at };
+  } catch { /* no update just happened */ }
+  return null;
+}
+
+// The desktop app installs either a release from GitHub (electron-updater) or a local installer that
+// `npm run desktop:finish` built (update_app with installer): ClaudeOS waits until no chat is working,
+// the shell quits, installs it silently and opens again on the chat that asked.
+const INSTALLER = /^ClaudeOS-Setup-(\d+\.\d+\.\d+)\.exe$/i;
+function createDesktopUpdater({ busy, dataDir }) {
+  const marker = path.join(dataDir, 'update.json');
+  let state = { desktop: true, canUpdate: true, build: buildId(), phase: 'idle', ready: null, previous: null, pending: false, last: readLast(marker) };
   let timer;
   process.on('message', message => {
     if (message?.type === 'desktop-update-state') state = { ...state, ...message.value };
@@ -21,9 +36,23 @@ function createDesktopUpdater(busy) {
   return {
     status: () => state,
     cancel() { clearTimeout(timer); state.pending = false; return { ok: true }; },
-    request({ kind } = {}) {
+    request({ kind, installer, chat = '', brain = '' } = {}) {
       if (kind === 'rollback') return { error: 'To roll back the desktop app, run a previous installer. Your brains and chats are kept separately.' };
       if (state.pending) return { ok: true, waiting: true };
+      if (installer) {
+        const file = path.resolve(String(installer)), name = INSTALLER.exec(path.basename(file));
+        let isFile = false;
+        try { isFile = path.isAbsolute(String(installer)) && fs.statSync(file).isFile(); } catch { /* missing */ }
+        if (!name || !isFile) return { error: `${installer} is not an installer. Build one with npm run desktop:finish and pass its full path (dist\desktop\ClaudeOS-Setup-<version>.exe).` };
+        state.pending = 'update';
+        const install = () => {
+          if (busy()) { timer = setTimeout(install, 500); return; }
+          fs.writeFileSync(marker, JSON.stringify({ status: 'started', kind: 'install', from: buildId(), version: name[1], chat, brain, at: Date.now() }));
+          desktopEvent('desktop-update-install', { installer: file });
+        };
+        timer = setTimeout(install, 300);
+        return { ok: true, waiting: busy(), version: name[1] };
+      }
       if (!state.ready) { desktopEvent('desktop-update-check'); return { ok: true }; }
       state.pending = 'update';
       const install = () => {
@@ -83,7 +112,7 @@ try {
 `;
 
 export function createUpdater({ dataDir, port, busy, quit }) {
-  if (IS_DESKTOP) return createDesktopUpdater(busy);
+  if (IS_DESKTOP) return createDesktopUpdater({ busy, dataDir });
   const exe = process.execPath;
   const base = exe.replace(/\.exe$/i, '');
   const next = `${base}.new.exe`, old = `${base}.old.exe`;
@@ -93,13 +122,7 @@ export function createUpdater({ dataDir, port, busy, quit }) {
   const builds = () => { try { return JSON.parse(fs.readFileSync(buildsFile, 'utf8')); } catch { return {}; } };
   let pending = null, timer = 0;
 
-  // what happened at the last update or rollback (read once, at start)
-  let last = null;
-  try {
-    const m = JSON.parse(fs.readFileSync(marker, 'utf8'));
-    fs.rmSync(marker, { force: true });
-    if (Date.now() - m.at < 10 * 60e3) last = { ok: m.status !== 'failed', kind: m.kind || 'update', status: m.status, from: m.from, to: buildId(), chat: m.chat, brain: m.brain, at: m.at };
-  } catch { /* no update just happened */ }
+  const last = readLast(marker);
 
   const info = file => {
     if (!IS_EXE) return null;

@@ -122,6 +122,7 @@ export function toolSummary(name, input = {}) {
   if (name === 'mcp__claudeos__schedule_task') return `Schedule “${input.title || 'a task'}” (${input.repeat || ''}${input.time ? ` at ${input.time}` : ''}${input.date ? ` on ${input.date}` : ''}${input.day ? ` on ${input.day}` : ''})`;
   if (name === 'mcp__claudeos__delete_scheduled') return `Delete scheduled task ${input.id || ''}`;
   if (name === 'mcp__claudeos__publish_artifact') return `Published an artifact: ${input.title || ''}`;
+  if (name === 'mcp__claudeos__update_app' && input.installer) return `Install ${String(input.installer).split(/[\\/]/).pop()}: ClaudeOS closes, installs it and opens again once every chat is done`;
   if (name === 'mcp__claudeos__update_app') return input.rollback ? 'Roll ClaudeOS back to the previous build (dist/ClaudeOS.old.exe) once every chat is done' : 'Restart ClaudeOS into the new build (dist/ClaudeOS.new.exe) once every chat is done';
   if (name === 'mcp__claudeos__terminal_run') return `Terminal: ${String(input.command || '').slice(0, 120)}`;
   if (/^mcp__claudeos__terminal_/.test(name)) return `Terminal: ${name.slice('mcp__claudeos__terminal_'.length)} ${input.tab || ''}`;
@@ -892,7 +893,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     }
 
     // A brief is done: its reports go to the Manager as a message of their own, once the chat is free.
-    // A side session's turn ends the same way. from: 'team' | 'session'
+    // A side session's turn ends the same way, and so does coming back from an install. from: 'team' | 'session' | 'update'
     function report(title, text, from = 'team') {
       reports.push({ title, text, from });
       if (!run) nextReport();
@@ -900,7 +901,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     function nextReport() {
       if (run || !reports.length) return;
       const r = reports.shift();
-      const label = r.from === 'session' ? `Session report: ${r.title}` : `Team report: ${r.title}`;
+      const label = r.from === 'update' ? r.title : r.from === 'session' ? `Session report: ${r.title}` : `Team report: ${r.title}`;
       if (send(r.text, { label, from: r.from }).error) reports.unshift(r);
     }
 
@@ -1086,9 +1087,9 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
   const chatFolder = chatId => convs.get(chatId)?.folder() || cwd;
 
   // A finished brief reports to the chat that sent it (or the open one, if that chat was deleted).
-  function report(chatId, title, text) {
+  function report(chatId, title, text, from) {
     const c = chatId && (index.chats[chatId] || convs.has(chatId)) ? conv(chatId) : managerChat();
-    c.report(title, text);
+    c.report(title, text, from);
   }
 
   // takes effect from the next message (one already being answered keeps what it started with)

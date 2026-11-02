@@ -24,4 +24,14 @@ function backendSpec({ packaged, resources, root, node, platform }) {
   if (packaged) return { command: path.join(resources, 'backend', platform === 'win32' ? 'ClaudeOS-backend.exe' : 'ClaudeOS-backend'), args: [] };
   return { command: node || 'node', args: [path.join(root, 'server.mjs')] };
 }
-module.exports = { externalUrl, appNavigation, windowBounds, backendSpec };
+// A local installer ClaudeOS may run on itself: only a file named like the ones `npm run desktop:finish`
+// builds (ClaudeOS-Setup-<version>.exe), given as a full path, that exists.
+const INSTALLER = /^ClaudeOS-Setup-\d+\.\d+\.\d+\.exe$/i;
+function installerPath(value, fs = require('node:fs')) {
+  if (typeof value !== 'string' || !path.isAbsolute(value)) return null;
+  const file = path.resolve(value);
+  if (!INSTALLER.test(path.basename(file))) return null;
+  try { return fs.statSync(file).isFile() ? file : null; } catch { return null; }
+}
+function installerVersion(file) { return (INSTALLER.test(path.basename(file || '')) && /(\d+\.\d+\.\d+)\.exe$/i.exec(file)[1]) || null; }
+module.exports = { externalUrl, appNavigation, windowBounds, backendSpec, installerPath, installerVersion };

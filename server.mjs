@@ -396,7 +396,8 @@ async function desk(tool, a) {
   }
   if (tool === 'update_app') {
     const brain = [...chats.entries()].find(([, c]) => c === owner)?.[0] || '';
-    const r = updater.request({ chat: a.chat, brain, kind: a.rollback ? 'rollback' : 'update' });
+    const r = updater.request({ chat: a.chat, brain, kind: a.rollback ? 'rollback' : 'update', installer: a.installer });
+    if (IS_DESKTOP && !r.error && a.installer) return { text: `ClaudeOS installs ${r.version} ${r.waiting ? 'as soon as every chat (this one included) has finished its turn' : 'now'}: it closes, installs and opens again on this chat, where you get a message to finish up. End your turn now.` };
     if (IS_DESKTOP && !r.error) return { text: updater.status().ready ? 'The desktop app will install the downloaded release after working chats finish their turns.' : 'Checking GitHub for a desktop release. If one is available, ClaudeOS will offer to download it.' };
     if (!r.error && a.rollback) return { text: `ClaudeOS goes back to the previous build ${r.waiting ? 'as soon as every chat (this one included) has finished its turn' : 'now'}. End your turn now; the page reloads by itself.` };
     return r.error ? r : { text: r.waiting ? 'ClaudeOS restarts into the new build as soon as every chat (this one included) has finished its turn. End your turn now; the page reloads by itself, and the user sees which build is running.' : 'ClaudeOS is restarting into the new build now.' };
@@ -739,7 +740,7 @@ async function handleApi(req, res, url) {
   // the desk tools a chat's Claude calls (approval-mcp.mjs), for whichever brain that chat is in
   if (url.pathname.startsWith('/api/desk/')) return json(res, 200, await desk(url.pathname.slice('/api/desk/'.length), body));
   // install the new build beside the exe, go back to the previous one, or stop waiting to
-  if (url.pathname === '/api/update') return json(res, 200, body.cancel ? updater.cancel() : updater.request({ kind: body.rollback ? 'rollback' : 'update' }));
+  if (url.pathname === '/api/update') return json(res, 200, body.cancel ? updater.cancel() : updater.request({ kind: body.rollback ? 'rollback' : 'update', installer: body.installer, chat: body.chat, brain: body.chat ? active?.id : '' }));
   // window, hotkey, notifications, start at login
   if (url.pathname === '/api/settings') {
     const before = desktop.settings().hotkey;
@@ -947,8 +948,25 @@ const server = http.createServer((req, res) => {
 const PAGE_URL = `http://localhost:${PORT}`;
 const updater = createUpdater({ dataDir: DATA, port: PORT, quit: () => quit(),
   busy: () => [...chats.values()].some(c => c.anyBusy()) || [...managers.values()].some(m => m.busy()) || handoffs.size > 0 });
+// Back from an install a chat asked for (update_app): open on that chat, and tell Claude how it went
+// so it can finish the job (check, clean up, save what shipped) right where the user is looking.
+function resumeAfterUpdate() {
+  const u = updater.status().last;
+  const b = u?.chat && u.brain && brains.find(u.brain);
+  if (!b) return;
+  try {
+    switchTo(b);
+    const c = chatFor(b);
+    if (c.open(u.chat).error) return;
+    const what = u.version ? `ClaudeOS ${u.version} (build ${u.to})` : `build ${u.to}`;
+    c.report(u.chat, u.ok ? `Updated to ${what}` : 'The update did not install',
+      u.ok ? `ClaudeOS closed, installed ${what} and opened again (it was build ${u.from}). Check that it works, finish the shipping steps that come after installing, and tell me in a line or two.`
+        : `The installer failed, so ClaudeOS is still on build ${u.to}. Read update.log in the ClaudeOS data folder, tell me why in a line or two, and fix it if you can.`, 'update');
+  } catch (e) { console.error('Could not reopen the chat after the update:', e.message); }
+}
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`ClaudeOS running at ${PAGE_URL}  (data: ${DATA})`);
+  resumeAfterUpdate();
   if (IS_DESKTOP) desktopEvent('desktop-ready', { url: PAGE_URL, settings: desktop.settings() });
   if (process.argv.includes('--open')) openPage(PAGE_URL);
   if (process.argv.includes('--tray')) {
