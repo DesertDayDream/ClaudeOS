@@ -28,6 +28,7 @@ import { ensureCabinet, findCabinet, cabinetTree } from './cabinets.mjs';
 import { appsInText, appForServer } from './public/apps.js';
 import { CATALOG, CONNECTORS_URL, KEY_HELP, addIntegration, removeIntegration, loginIntegration, isSigningIn, signInLink, cancelLogin, sendLoginRedirect, logoutIntegration, keysFor, saveKey, setPtyLoader } from './integrations.mjs';
 import { createAccounts } from './accounts.mjs';
+import { refreshPath } from './agents.mjs';
 import { createRegistry, setupBrain, repairHooks, listFolder, slugFor, samePath, inside } from './brains.mjs';
 import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile, loadNodePty, appVersion } from './runtime.mjs';
 import { startTray } from './tray.mjs';
@@ -363,6 +364,8 @@ const LOCAL_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`]);
 // (served on their own port, so a page can never reach this one's token or API).
 const terminals = createTerminals({ broadcast, data: DATA });
 const gitPane = createGit();
+// Claude Code and Codex may have been installed after Windows gave this process its PATH
+refreshPath();
 // GitHub (gh) and other sign-ins that aren't MCP servers; shown with the integrations
 const accounts = createAccounts({ open: url => openWindow(url, { appWindow: false }), broadcast: done => {
   if (done) broadcast('account-login', done);

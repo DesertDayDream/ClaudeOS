@@ -4,8 +4,8 @@
 // Nothing here sees or stores the token; gh keeps it in Windows' credential store.
 import { execFile, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { refreshPath, findExe, codexCommand, codexHome, runInstaller, INSTALLERS } from './agents.mjs';
 
 const run = (cmd, args, timeout = 20000) => new Promise(resolve =>
   execFile(cmd, args, { windowsHide: true, timeout }, (err, out, errOut) =>
@@ -17,7 +17,12 @@ const run = (cmd, args, timeout = 20000) => new Promise(resolve =>
 const plan = p => p ? ' · ' + p[0].toUpperCase() + p.slice(1) : '';
 
 async function claudeAccount() {
-  const r = await run('claude', ['auth', 'status']);
+  let r = await run('claude', ['auth', 'status']);
+  // just installed: the installer may still be putting claude.exe in place for a moment
+  for (let i = 0; r.missing && findExe('claude') && i < 5; i++) {
+    await new Promise(ok => setTimeout(ok, 1500));
+    r = await run('claude', ['auth', 'status']);
+  }
   if (r.missing) return { state: 'missing' };
   try {
     const j = JSON.parse(r.text.slice(r.text.indexOf('{'), r.text.lastIndexOf('}') + 1));
@@ -28,10 +33,10 @@ async function claudeAccount() {
 }
 
 function codexAccount() {
-  const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  if (!codexCommand()) return { state: 'missing' };
   let j;
-  try { j = JSON.parse(readFileSync(path.join(home, 'auth.json'), 'utf8')); }
-  catch (err) { return { state: err.code === 'ENOENT' ? 'signed-out' : 'signed-out' }; }
+  try { j = JSON.parse(readFileSync(path.join(codexHome(), 'auth.json'), 'utf8')); }
+  catch { return { state: 'signed-out' }; }
   const idt = j.tokens?.id_token;
   if (idt) {
     try {
@@ -43,11 +48,11 @@ function codexAccount() {
   return j.OPENAI_API_KEY ? { state: 'signed-in', user: 'an OpenAI API key' } : { state: 'signed-out' };
 }
 
-// Codex comes from npm as codex.cmd, which needs the shell; the arguments are fixed text.
+// Each agent's CLI, wherever it's installed (agents.mjs finds Codex's own codex.exe, so no shell is needed).
 const AI = {
-  claude: { name: 'Claude', cmd: 'claude', login: ['auth', 'login', '--claudeai'], logout: ['auth', 'logout'], shell: false,
+  claude: { name: 'Claude', cli: () => ({ command: 'claude', args: [], env: {} }), login: ['auth', 'login', '--claudeai'], logout: ['auth', 'logout'],
     url: /https:\/\/claude\.(?:com|ai)\/\S*oauth\S*/ },
-  codex: { name: 'Codex', cmd: 'codex', login: ['login'], logout: ['logout'], shell: process.platform === 'win32',
+  codex: { name: 'Codex', cli: codexCommand, login: ['login'], logout: ['logout'],
     url: /https:\/\/auth\.openai\.com\/\S+/ },
 };
 // stop the CLI and anything it started (a shell's child keeps Codex's localhost port otherwise)
@@ -58,12 +63,14 @@ function stop(proc) {
 
 export function createAccounts({ broadcast, open }) {
   const aiFlows = {}; // key -> { proc, url, text, timer, cancelled }
+  const installs = {}; // key -> { proc, text, error } while an agent installs (error stays until the next try)
   let github = { state: 'checking' };
   let claudeAcct = { state: 'checking' };
   let codexAcct = { state: 'checking' };
   let flow = null; // { proc, code, url, timer }
 
   async function check() {
+    refreshPath();
     claudeAccount().then(a => { claudeAcct = a; broadcast(); });
     codexAcct = codexAccount();
     const r = await run('gh', ['auth', 'status', '--hostname', 'github.com']);
@@ -84,11 +91,11 @@ export function createAccounts({ broadcast, open }) {
     }, {
       key: 'claude', title: 'Claude', ...claudeAcct, ai: true, flow: aiView('claude'),
       what: 'Claude Code, which runs your chats and employees',
-      install: 'https://claude.com/claude-code',
+      install: 'https://claude.com/claude-code', installer: installView('claude'),
     }, {
       key: 'codex', title: 'Codex', ...codexAcct, ai: true, flow: aiView('codex'),
       what: 'OpenAI Codex, for chats that run on Codex',
-      install: 'https://developers.openai.com/codex/cli',
+      install: 'https://developers.openai.com/codex/cli', installer: installView('codex'),
     }];
   }
   function aiView(key) {
@@ -96,7 +103,32 @@ export function createAccounts({ broadcast, open }) {
     return f ? { url: f.url, paste: key === 'claude', starting: !f.url } : null;
   }
 
+  // the official installer, run on this PC: its command, and while it runs (or if it failed) its last lines
+  const lastLines = (text, n) => text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').split(/\r?\n/).map(l => l.trim()).filter(Boolean).slice(-n).join('\n');
+  function installView(key) {
+    const i = installs[key];
+    return { command: INSTALLERS[key].command, running: !!i?.proc, error: i?.error || '', log: i?.proc ? lastLines(i.text, 3).slice(-400) : '' };
+  }
+  function install(key) {
+    if (installs[key]?.proc || acctOf(key).state !== 'missing') return { ok: true, already: true };
+    const i = installs[key] = { proc: null, text: '', error: '' };
+    let last = 0;
+    const r = runInstaller(key, d => { i.text = (i.text + d).slice(-4000); if (Date.now() - last > 500) { last = Date.now(); broadcast(); } });
+    if (r.error) { delete installs[key]; return r; }
+    i.proc = r.proc;
+    r.done.then(async res => {
+      i.proc = null;
+      await recheck(key);
+      if (res.ok) delete installs[key];
+      else i.error = `${INSTALLERS[key].name} didn't install${res.code ? ` (exit code ${res.code})` : ''}. ${lastLines(i.text, 1).slice(0, 200)}`.trim();
+      broadcast({ key, title: AI[key].name, installed: res.ok, text: res.ok ? '' : i.error });
+    });
+    broadcast();
+    return { ok: true };
+  }
+
   async function recheck(key) {
+    refreshPath();
     if (key === 'claude') claudeAcct = await claudeAccount();
     else codexAcct = codexAccount();
   }
@@ -104,9 +136,10 @@ export function createAccounts({ broadcast, open }) {
 
   function aiLogin(key) {
     const a = AI[key];
-    if (acctOf(key).state === 'missing') return { error: `${a.name} isn't installed on this PC.` };
+    const cli = a.cli();
+    if (acctOf(key).state === 'missing' || !cli) return { error: `${a.name} isn't installed on this PC yet. Press Install first.` };
     if (aiFlows[key]) { if (aiFlows[key].url) open(aiFlows[key].url); return { ok: true, already: true }; }
-    const proc = spawn(a.cmd, a.login, { windowsHide: true, shell: a.shell, stdio: ['pipe', 'pipe', 'pipe'] });
+    const proc = spawn(cli.command, [...cli.args, ...a.login], { windowsHide: true, env: { ...process.env, ...cli.env }, stdio: ['pipe', 'pipe', 'pipe'] });
     const f = aiFlows[key] = { proc, url: '', text: '' };
     // the CLI opens the browser itself; the page shows the link too, in case it didn't
     const read = d => {
@@ -145,7 +178,9 @@ export function createAccounts({ broadcast, open }) {
   async function aiLogout(key) {
     const a = AI[key];
     if (aiFlows[key]) { aiFlows[key].cancelled = true; stop(aiFlows[key].proc); }
-    const r = await new Promise(resolve => execFile(a.cmd, a.logout, { windowsHide: true, shell: a.shell, timeout: 20000 },
+    const cli = a.cli();
+    if (!cli) return { error: `${a.name} isn't installed on this PC.` };
+    const r = await new Promise(resolve => execFile(cli.command, [...cli.args, ...a.logout], { windowsHide: true, env: { ...process.env, ...cli.env }, timeout: 20000 },
       (err, out, errOut) => resolve({ ok: !err, text: String(out || '') + String(errOut || '') })));
     await recheck(key);
     broadcast();
@@ -202,6 +237,7 @@ export function createAccounts({ broadcast, open }) {
 
   async function act(key, what, code) {
     if (AI[key]) {
+      if (what === 'install') return install(key);
       if (what === 'login') return aiLogin(key);
       if (what === 'code') return aiCode(key, code);
       if (what === 'cancel') { const f = aiFlows[key]; if (f) { f.cancelled = true; stop(f.proc); } return { ok: true }; }

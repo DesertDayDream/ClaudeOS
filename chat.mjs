@@ -13,6 +13,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { runCodexTurn, codexModels, shortCommand, CODEX_EFFORTS } from './codex.mjs';
+import { defaultEngine } from './agents.mjs';
 
 const MAX_MESSAGES = 300;
 // what a chat answers with: Claude Code (the default) or Codex. Switching mid-chat hands the other
@@ -112,6 +113,9 @@ export function cleanOptions({ engine = '', model = '', effort = '', codexModel 
   if (codexEffort && !CODEX_EFFORTS.includes(codexEffort)) return { error: `Unknown Codex effort "${codexEffort}".` };
   return { options: Object.fromEntries(Object.entries({ engine, model, effort, codexModel, codexEffort }).filter(([, v]) => v)) };
 }
+
+// No engine picked: Claude, unless this PC has only Codex (then the page shows Codex picked too).
+export const withEngine = o => o.engine || defaultEngine() !== 'codex' ? o : { ...o, engine: 'codex' };
 
 export function toolSummary(name, input = {}) {
   if (name === 'Skill') return `Handing off to ${input.skill || input.command || 'a skill'}`;
@@ -372,7 +376,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       return { args, key: JSON.stringify(args) };
     }
     // an employee runs on their own engine, model and effort; the Manager's chats on the brain's
-    function options() { return (state.employee ? state.options : index.options) || {}; }
+    function options() { return withEngine((state.employee ? state.options : index.options) || {}); }
     const engine = () => options().engine === 'codex' ? 'codex' : 'claude';
 
     // What an engine missed in this chat while the other one answered (or everything, the first time
@@ -441,7 +445,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         clearTimeout(me.idle);
         if (run?.live === me) finish(run.stopped ? null : error);
       };
-      proc.on('error', err => gone(`Could not start Claude Code: ${err.message}. Is "claude" installed and on PATH?`));
+      proc.on('error', err => gone(`Could not start Claude Code: ${err.message}. If it isn't installed yet, install it from Apps → Accounts (Install).`));
       proc.on('close', code => gone(me.stderr.trim().split('\n').pop() || `Claude exited with code ${code}`));
       idleTimer();
       trimWarm();
@@ -505,7 +509,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       send1({ kind: 'busy', busy: true, any: true });
       save();
       listChanged();
-      if (!me) { finish('Could not start Claude Code. Is "claude" installed and on PATH?'); return { ok: true }; }
+      if (!me) { finish("Could not start Claude Code. If it isn't installed yet, install it from Apps → Accounts (Install)."); return { ok: true }; }
       try {
         me.proc.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: content(text, attached) } }) + '\n');
       } catch (err) { finish(`Could not reach Claude: ${err.message}`); }
@@ -1102,7 +1106,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     // the open chat's warm Claude isn't needed while Codex answers (and is started again when it is)
     if (r.options.engine === 'codex') current().cool();
     saveIndex();
-    emit({ kind: 'options', options: index.options });
+    emit({ kind: 'options', options: withEngine(index.options) });
     return { ok: true, options: index.options };
   }
 
@@ -1174,7 +1178,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
   // the open chat, with every approval waiting anywhere (the page marks the other chats' ones)
   function snapshot() {
     const c = current(), own = c.employee();
-    return { ...c.snapshot(), approvals: [...approvals.values()].map(a => a.card), options: own ? c.snapshot().options : index.options || {}, any: anyBusy(),
+    return { ...c.snapshot(), approvals: [...approvals.values()].map(a => a.card), options: withEngine(own ? c.snapshot().options : index.options || {}), any: anyBusy(),
       employee: own ? { name: own.name, skill: own.skill, dept: own.dept } : null, commands: index.commands || [] };
   }
 

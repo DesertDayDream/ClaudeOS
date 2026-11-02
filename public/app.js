@@ -1390,6 +1390,7 @@ events.addEventListener('account-login', e => {
   const r = JSON.parse(e.data);
   if (r.cancelled) return;
   const t = r.title || 'GitHub';
+  if ('installed' in r) return toast(r.installed ? `${t} is installed` : `${t} didn’t install`, null, null, r.installed ? 'Sign in to it next (Apps → Accounts, or the Connect your AI screen).' : r.text);
   toast(r.ok ? `Signed in to ${t} as ${r.user}` : `${t} sign-in didn’t finish`, null, null,
     r.ok ? (r.key === 'claude' ? 'Your chats and employees run on this account.' : r.key === 'codex' ? 'Codex chats run on this account.' : 'git push, pull requests and CI work from now on.') : r.text);
 });
@@ -1427,6 +1428,8 @@ function renderAppsPanel(el) {
   html += `<div class="runs-h">Accounts</div><div class="apps-l">`;
   for (const a of d.accounts || []) {
     const st = a.state === 'signed-in' ? `<em class="connected">signed in</em><button class="btn mini" data-ap="acct" data-act="logout" data-key="${esc(a.key)}" title="Sign ${esc(a.user)} out of ${esc(a.title)} on this PC">Sign out</button>`
+      : a.state === 'missing' && a.installer?.running ? '<em>installing…</em>'
+      : a.state === 'missing' && a.installer ? `<em class="failed">not installed</em><button class="btn mini primary" data-ap="acct" data-act="install" data-key="${esc(a.key)}" title="Runs the official installer: ${esc(a.installer.command)}">Install</button>`
       : a.state === 'missing' ? `<em class="failed">not installed</em><a class="btn mini" href="${esc(a.install)}" target="_blank" rel="noopener">Get it</a>`
       : a.state === 'checking' ? '<em>checking…</em>'
       : a.flow ? `<em>waiting for ${a.ai ? 'your browser' : 'GitHub'}…</em><button class="btn mini" data-ap="acct" data-act="cancel" data-key="${esc(a.key)}">Cancel</button>`
@@ -1435,6 +1438,8 @@ function renderAppsPanel(el) {
     const sub = a.state === 'signed-in' && a.user ? `<span title="${esc(a.what)}">${esc(a.user)}</span>` : `<span>${esc(a.what)}</span>`;
     html += `<div class="row">${logo(a.key, a.title, a.state !== 'signed-in')}<div><b>${esc(a.title)}</b>${sub}</div><div class="acts">${st}</div></div>`;
     // Claude / Codex: the CLI opens the sign-in page; the link is here too, and Claude's page may hand back a code to paste
+    if (a.installer?.running && a.installer.log) html += `<div class="ap-box ap-code">Installing ${esc(a.title)}…<div class="note">${esc(a.installer.log)}</div></div>`;
+    else if (a.state === 'missing' && a.installer?.error) html += `<div class="ap-box ap-code">${esc(a.installer.error)}</div>`;
     if (a.ai && a.flow) html += `<div class="ap-box ap-code">${a.flow.url
       ? `Finish signing in to ${esc(a.title)} in your browser. This finishes by itself.
         <div class="code-line"><a class="btn mini" href="${esc(a.flow.url)}" target="_blank" rel="noopener">Open the sign-in page again</a></div>

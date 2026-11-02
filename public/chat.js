@@ -513,9 +513,13 @@ async function saveOptions(change) {
 engineSel.addEventListener('change', async () => {
   if (engineSel.value === 'codex') {
     const c = await codexInfo(true);
-    if (!c.installed) { alert(`${c.text}
-
-Install it from a terminal, then pick Codex again.`); return showOptions(opts); }
+    if (!c.installed) {
+      if (confirm("Codex isn't installed on this PC yet. Install it now? This runs OpenAI's official installer and takes a minute or two; Apps → Accounts shows how it goes, and you sign in there next.")) {
+        const r = await api('/api/accounts', { key: 'codex', act: 'install' });
+        if (r.error) alert(r.error); else document.dispatchEvent(new CustomEvent('claudeos:open-apps'));
+      }
+      return showOptions(opts);
+    }
     if (!c.signedIn) {
       if (!confirm("Codex isn't signed in yet. Sign in with your ChatGPT account now? A sign-in page opens in your browser.")) return showOptions(opts);
       const r = await api('/api/codex/login', {});

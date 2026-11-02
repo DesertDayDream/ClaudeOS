@@ -2,36 +2,15 @@
 // desk tools (terminal, artifacts, team briefs) through approval-mcp.mjs.
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { runAppServerTurn } from './codex-app-server.mjs';
+import { codexCommand, codexHome } from './agents.mjs';
 
 export const CODEX_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const FALLBACK_MODELS = [{ id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' }];
 
-const npmRoot = () => path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'npm', 'node_modules', '@openai', 'codex');
-const codexHome = () => process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-
-// Store app-execution aliases cannot reliably launch under a restricted Windows
-// token. Let Codex find a Win32 PowerShell instead; this changes only its child
-// environment, never the user's PATH or sandbox permissions.
-function codexEnvironment() {
-  if (process.platform !== 'win32') return {};
-  const key = Object.keys(process.env).find(key => key.toLowerCase() === 'path') || 'Path';
-  const entries = String(process.env[key] || '').split(';');
-  const filtered = entries.filter(entry => !/\\Microsoft\\WindowsApps(?:\\|$)/i.test(entry));
-  return filtered.length === entries.length ? {} : { [key]: filtered.join(';') };
-}
-
-// How to start Codex: its own codex.exe from the npm install (no Node needed), else node + its launcher.
-export function codexCommand() {
-  const root = npmRoot();
-  const exe = path.join(root, 'node_modules', '@openai', 'codex-win32-x64', 'vendor', 'x86_64-pc-windows-msvc', 'bin', 'codex.exe');
-  if (fs.existsSync(exe)) return { command: exe, args: [], env: { ...codexEnvironment(), CODEX_MANAGED_PACKAGE_ROOT: root, CODEX_MANAGED_BY_NPM: '1' } };
-  const js = path.join(root, 'bin', 'codex.js');
-  if (fs.existsSync(js)) return { command: 'node', args: [js], env: codexEnvironment() };
-  return null;
-}
+// Where Codex is and how to start it: agents.mjs finds it however it was installed.
+export { codexCommand } from './agents.mjs';
 
 // The models the user's Codex offers, from its own cache (what its model picker shows).
 export function codexModels() {
@@ -48,7 +27,7 @@ export function codexModels() {
 // Signed in? `codex login status` says "Logged in using …" or "Not logged in".
 export function codexStatus() {
   const cmd = codexCommand();
-  if (!cmd) return Promise.resolve({ installed: false, signedIn: false, text: 'Codex CLI is not installed (npm install -g @openai/codex).' });
+  if (!cmd) return Promise.resolve({ installed: false, signedIn: false, text: 'Codex is not installed. Install it from Apps → Accounts.' });
   return new Promise(resolve => execFile(cmd.command, [...cmd.args, 'login', 'status'], { env: { ...process.env, ...cmd.env }, windowsHide: true, timeout: 20000 },
     (err, stdout, stderr) => {
       const text = `${stdout || ''}${stderr || ''}`.trim().split('\n').pop() || '';
@@ -72,7 +51,7 @@ export function shortCommand(cmd) {
 // One private App Server connection per message, with a UI approval channel.
 export function runCodexTurn(options) {
   const cmd = codexCommand();
-  if (!cmd) return { proc: null, done: Promise.resolve({ error: 'Codex is not installed. Install it with: npm install -g @openai/codex, then sign in with: codex login' }), stop() {} };
+  if (!cmd) return { proc: null, done: Promise.resolve({ error: 'Codex is not installed on this PC. Install it from Apps → Accounts (Install), then sign in there.' }), stop() {} };
   const cfg = [];
   for (const [name, server] of Object.entries(options.mcpServers || {})) {
     cfg.push('-c', `mcp_servers.${name}=${toml({ command: server.command, args: server.args || [], ...(server.env ? { env: server.env } : {}), ...(server.enabled_tools ? { enabled_tools: server.enabled_tools } : {}), ...(server.disabled_tools ? { disabled_tools: server.disabled_tools } : {}) })}`);
