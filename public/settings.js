@@ -34,6 +34,7 @@ function draw() {
   menu.innerHTML = `
     <label><input type="checkbox" data-set="appWindow" ${s.appWindow ? 'checked' : ''}> <b>Open in its own window</b><span>An app window (Edge or Chrome) instead of a browser tab</span></label>
     <label><input type="checkbox" data-set="notify" ${s.notify ? 'checked' : ''}> <b>Notifications</b><span>${notifyNote}</span></label>
+    <div class="row"><b>Theme</b><select id="themePick" title="Light or dark panels (the 3D view stays dark)">${['dark', 'light', 'system'].map(t => `<option value="${t}"${theme() === t ? ' selected' : ''}>${{ dark: 'Dark', light: 'Light', system: 'Same as Windows' }[t]}</option>`).join('')}</select><span>Light or dark panels; the 3D view stays a night sky</span></div>
     <div class="row"><b>Hotkey</b><input type="text" id="hotkeyInput" value="${esc(s.hotkey)}" placeholder="Off" spellcheck="false" title="Like Ctrl+Alt+O or Ctrl+Shift+K. Empty turns it off. Click it and press the keys."><span>${hk}</span></div>
     ${updateRow()}
     <label class="${s.canStartAtLogin ? '' : 'off'}"><input type="checkbox" data-set="startAtLogin" ${s.startAtLogin ? 'checked' : ''} ${s.canStartAtLogin ? '' : 'disabled'}> <b>Start with Windows</b><span>${s.canStartAtLogin ? 'In the tray when you sign in, no window until you ask' : 'Works in ClaudeOS.exe'}</span></label>`;
@@ -69,6 +70,7 @@ async function change(patch) {
 btn.addEventListener('click', e => { e.stopPropagation(); menu.hidden = !menu.hidden; if (!menu.hidden) load(); });
 document.addEventListener('click', e => { if (!menu.hidden && !menu.contains(e.target) && e.target !== btn) menu.hidden = true; });
 menu.addEventListener('change', e => {
+  if (e.target.id === 'themePick') { setTheme(e.target.value); return; }
   const k = e.target.dataset.set;
   if (!k) return;
   change({ [k]: e.target.checked });
@@ -141,3 +143,17 @@ setInterval(async () => {
   if (u && !u.error) { update = u; btn.classList.toggle('ping', !!u.ready); if (!menu.hidden) draw(); }
 }, 20000);
 api('/api/update').then(u => { if (u && !u.error) { update = u; btn.classList.toggle('ping', !!u.ready); } });
+
+// ---------- theme ----------
+// kept in this window's storage; the page sets it before it draws (index.html), so it never flashes
+function theme() { try { return localStorage.getItem('claudeos.theme') || 'dark'; } catch { return 'dark'; } }
+const systemLight = matchMedia('(prefers-color-scheme: light)');
+function applyTheme() {
+  const t = theme();
+  document.documentElement.dataset.theme = t === 'system' ? (systemLight.matches ? 'light' : 'dark') : t;
+}
+function setTheme(t) {
+  try { localStorage.setItem('claudeos.theme', t); } catch { /* this time only */ }
+  applyTheme();
+}
+systemLight.addEventListener('change', applyTheme);

@@ -61,9 +61,26 @@ export async function preview(what) {
     return;
   }
   shown = { req: what, res: r };
+  bodyEl.classList.remove('url');
   panel.hidden = false;
   document.body.classList.add('previewing');
   draw(r);
+}
+// A running web app (a dev server on localhost) beside the chat, with an address bar. It is its own
+// site in the frame, so it can't reach ClaudeOS; most dev servers reload it themselves on changes.
+export function previewUrl(url) {
+  url = String(url || '').trim();
+  if (!/^https?:\/\//i.test(url)) url = `http://${url}`;
+  shown = { url };
+  panel.hidden = false;
+  document.body.classList.add('previewing');
+  nameEl.textContent = url.replace(/^https?:\/\//, '');
+  nameEl.title = url;
+  panel.querySelector('[data-pv-act="editor"]').hidden = true;
+  bodyEl.classList.add('url');
+  bodyEl.innerHTML = `<form class="pv-url"><input value="${esc(url)}" spellcheck="false" aria-label="Address"><button type="button" class="btn mini" data-pv-act="browser" title="Open it in your browser">Browser</button></form>
+    <iframe src="${esc(url)}" title="${esc(url)}" allow="clipboard-read; clipboard-write; fullscreen; microphone; camera; geolocation"></iframe>`;
+  bodyEl.querySelector('form').addEventListener('submit', e => { e.preventDefault(); previewUrl(e.target.querySelector('input').value); });
 }
 export function closePreview() {
   shown = null;
@@ -83,6 +100,8 @@ export async function loadLocalImages(root) {
 panel.addEventListener('click', async e => {
   const act = e.target.closest('[data-pv-act]')?.dataset.pvAct;
   if (act === 'close') closePreview();
+  else if (act === 'reload' && shown?.url) { const f = bodyEl.querySelector('iframe'); if (f) f.src = f.src; }
+  else if (act === 'browser' && shown?.url) window.open(shown.url, '_blank', 'noopener');
   else if (act === 'reload' && shown) preview(shown.req);
   else if (act === 'editor' && shown?.res.file) { const o = await api('/api/open-file', { path: shown.res.file }); if (o.error) alert(o.error); }
 });
@@ -90,9 +109,11 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && !panel.hid
 // Claude changed the file: show the new version where you were
 events.addEventListener('preview-changed', async e => {
   const { token } = JSON.parse(e.data);
-  if (!shown || shown.res.token !== token) return;
+  if (!shown?.res || shown.res.token !== token) return;
   const r = await api('/api/preview', shown.req);
   if (r.error || r.kind === 'none') return;
   shown.res = r;
   draw(r, true);
 });
+// Claude asked to show a running app (the show_preview desk tool)
+events.addEventListener('preview-url', e => previewUrl(JSON.parse(e.data).url));

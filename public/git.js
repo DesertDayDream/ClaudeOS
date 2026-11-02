@@ -1,6 +1,8 @@
 // The Git tab: the open chat's repository like Claude Desktop shows it. Branch and changes (click a
 // file for its diff), worktrees (open a terminal in one, or a chat), pull requests with their checks,
 // and the CI runs of the current branch. git runs locally; pull requests and CI come from gh.
+import { enableReview, reviewing } from '/review.js';
+import { highlight, langOf } from '/markdown.js';
 const TOKEN = window.CLAUDEOS_TOKEN;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 async function api(p, body) {
@@ -41,11 +43,21 @@ function changeKind(c) {
   const k = y !== '.' ? y : x;
   return [k === '?' ? 'N' : k, `${XY[k] || k}${x !== '.' && y === '.' ? ', staged' : x !== '.' && y !== '.' ? ', partly staged' : ''}`];
 }
-function diffBody(text) {
+// a file's diff, coloured by its language, with line numbers (review comments use them)
+function diffBody(text, file) {
   if (text == null) return '<div class="gap">Loading…</div>';
   if (!text.trim()) return '<div class="gap">No changes to show (binary, or only the mode changed).</div>';
-  return text.split('\n').filter(l => !/^(diff --git|index |--- |\+\+\+ |new file mode|deleted file mode|similarity|rename (from|to))/.test(l)).map(l =>
-    l.startsWith('@@') ? `<div class="gap">${esc(l)}</div>` : l.startsWith('+') ? `<div class="l a">${esc(l.slice(1))}</div>` : l.startsWith('-') ? `<div class="l d">${esc(l.slice(1))}</div>` : `<div class="l">${esc(l.slice(1))}</div>`).join('');
+  const lang = langOf(file);
+  let oldLn = 0, newLn = 0;
+  return text.split('\n').filter(l => !/^(diff --git|index |--- |\+\+\+ |new file mode|deleted file mode|similarity|rename (from|to)|\\ No newline)/.test(l)).map(l => {
+    const h = l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)/);
+    if (h) { oldLn = Number(h[1]); newLn = Number(h[2]); return `<div class="gap">${esc(l)}</div>`; }
+    const code = highlight(l.slice(1), lang);
+    if (l.startsWith('+')) return `<div class="l a" data-ln="${newLn++}">${code}</div>`;
+    if (l.startsWith('-')) return `<div class="l d" data-ln="${oldLn++}">${code}</div>`;
+    oldLn++;
+    return `<div class="l" data-ln="${newLn++}">${code}</div>`;
+  }).join('');
 }
 const section = (key, title, count, body, extra = '') => `<div class="gsec${fold[key] ? ' folded' : ''}" data-sec="${key}">
   <div class="gsec-h"><button type="button" class="gfold" data-fold="${key}">${fold[key] ? '▸' : '▾'} ${title}${count != null ? ` <em>${count}</em>` : ''}</button>${extra}</div>
@@ -71,7 +83,7 @@ function draw() {
     const [k, label] = changeKind(c);
     const open = openDiffs.has(c.file);
     return `<div class="gfile${open ? ' open' : ''}"><button type="button" data-diff="${esc(c.file)}" title="${esc(label)}${c.from ? ` (from ${esc(c.from)})` : ''} · click for the diff"><i class="k k${esc(k)}">${esc(k)}</i><span>${esc(c.file)}</span></button><a href="#" data-open="${esc(c.file)}" title="Open in your editor">Open</a></div>
-      ${open ? `<div class="diff">${diffBody(openDiffs.get(c.file))}</div>` : ''}`;
+      ${open ? `<div class="diff" data-file="${esc(c.file)}" title="Click a line to comment on it for Claude">${diffBody(openDiffs.get(c.file), c.file)}</div>` : ''}`;
   }).join('') + (data.changes.length > 300 ? `<div class="gmore">… and ${data.changes.length - 300} more</div>` : '') : '<div class="gnone">No changes. The working tree is clean.</div>';
 
   const wts = data.worktrees.map(w => `<div class="gwt${path(w.path) === path(data.root) ? ' here' : ''}">
@@ -221,8 +233,9 @@ function setDir(d) {
 // fresh when the tab opens; while it's open, local status every 10 s and GitHub every minute
 tabBtn('git').addEventListener('click', () => load({ github: !gh || Date.now() - ghAt > 30000 }));
 setInterval(async () => {
-  if (!showing() || busy || document.hidden) return;
+  if (!showing() || busy || document.hidden || reviewing(el)) return;
   if (openDiffs.size) await refreshDiffs();
   load({ github: Date.now() - ghAt > 60000 });
 }, 10000);
+enableReview(el);
 draw();

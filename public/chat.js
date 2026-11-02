@@ -1,6 +1,7 @@
 import { events } from '/events.js';
-import { markdown } from '/markdown.js';
-import { preview, loadLocalImages } from '/preview.js';
+import { markdown, highlight, langOf } from '/markdown.js';
+import { preview, previewUrl, loadLocalImages } from '/preview.js';
+import { enableReview } from '/review.js';
 // ClaudeOS chat panel: send requests to Claude in the active brain's folder, stream replies,
 // and answer tool approvals with Allow/Deny.
 const TOKEN = window.CLAUDEOS_TOKEN;
@@ -77,22 +78,41 @@ function render(msg) {
     messages.set(msg.id, entry);
   }
   entry.msg = msg;
+  if (entry.editing) return; // the message is open for editing; it's redrawn when that ends
   const stick = atBottom();
   if (msg.role === 'user') {
     entry.el.textContent = msg.text;
     if (msg.files?.length) entry.el.prepend(sentFiles(msg.files));
+    // your own messages can be edited or sent again (rewinding the chat to them)
+    if (!msg.wrap && !msg.from) entry.el.insertAdjacentHTML('beforeend', `<div class="macts"><button type="button" data-mact="edit" title="Edit this message and send it again: the chat goes back to here">Edit</button><button type="button" data-mact="retry" title="Send this message again from here">Retry</button></div>`);
   } else {
     entry.el.innerHTML =
       (msg.carry ? '<div class="head">Fresh start · handover from your last chat (the details are saved in the brain\'s memory)</div>' : '') +
-      (msg.tools?.length ? `<div class="tools">${msg.tools.map(toolRow).join('')}</div>` : '') +
+      (msg.tools?.length ? `<div class="tools">${msg.tools.map((t, n) => toolRow(t, `${msg.id}:${n}`)).join('')}</div>` : '') +
       `<div class="body">${markdown(msg.text)}</div>` +
       (msg.streaming && !msg.text ? '<span class="typing"></span>' : '') +
       (msg.error ? `<div class="err">${esc(msg.error)}</div>` : '') +
       (msg.note ? `<div class="note">${esc(msg.note)}</div>` : '') +
-      (msg.usage && !msg.streaming ? usageLine(msg.usage) : '');
+      (msg.usage && !msg.streaming ? usageLine(msg.usage) : '') +
+      (!msg.streaming && !msg.carry && askedBefore(msg.id) ? `<div class="macts"><button type="button" data-mact="again" title="Ask again: the chat goes back to your message before this reply and sends it again">Retry</button></div>` : '');
     if (!msg.streaming) loadLocalImages(entry.el);
+    // details you opened stay open while the reply streams in
+    for (const d of entry.el.querySelectorAll('details[data-k]')) if (openDetails.has(d.dataset.k)) d.open = true;
   }
+  if (msg.todos) showTodos(msg.todos);
   scrollDown(stick);
+}
+const openDetails = new Set();
+log.addEventListener('toggle', e => {
+  const k = e.target.dataset?.k;
+  if (k) e.target.open ? openDetails.add(k) : openDetails.delete(k);
+}, true);
+// the message of yours a reply answers (null for team reports and handovers)
+function askedBefore(replyId) {
+  const list = [...messages.values()].map(x => x.msg);
+  const i = list.findIndex(m => m.id === replyId);
+  for (let j = i - 1; j >= 0; j--) if (list[j].role === 'user') return list[j].wrap || list[j].from ? null : list[j];
+  return null;
 }
 
 // ---------- what Claude did: tool lines, and file edits as diffs ----------
@@ -115,7 +135,8 @@ function diffLines(a, b) {
   return out;
 }
 // unchanged runs longer than 6 lines fold to 3 either side
-function diffHtml(rows) {
+function diffHtml(rows, lang = '') {
+  const code = t => highlight(t, lang);
   let html = '';
   for (let k = 0; k < rows.length; k++) {
     if (rows[k][0] === ' ') {
@@ -123,29 +144,52 @@ function diffHtml(rows) {
       while (e < rows.length && rows[e][0] === ' ') e++;
       const run = e - k, head = k === 0 ? 0 : 3, tail = e === rows.length ? 0 : 3;
       if (run > head + tail + 1) {
-        for (let q = k; q < k + head; q++) html += `<div class="l">${esc(rows[q][1])}</div>`;
+        for (let q = k; q < k + head; q++) html += `<div class="l">${code(rows[q][1])}</div>`;
         html += `<div class="gap">… ${run - head - tail} unchanged line${run - head - tail === 1 ? '' : 's'}</div>`;
-        for (let q = e - tail; q < e; q++) html += `<div class="l">${esc(rows[q][1])}</div>`;
+        for (let q = e - tail; q < e; q++) html += `<div class="l">${code(rows[q][1])}</div>`;
         k = e - 1;
         continue;
       }
     }
-    html += `<div class="l${rows[k][0] === ' ' ? '' : ' ' + rows[k][0]}">${esc(rows[k][1])}</div>`;
+    html += `<div class="l${rows[k][0] === ' ' ? '' : ' ' + rows[k][0]}">${code(rows[k][1])}</div>`;
   }
   return html;
 }
-function toolRow(t) {
+const AGENT_STATE = { running: '◐', done: '✓', failed: '✕', stopped: '■' };
+function toolRow(t, key) {
   if (typeof t === 'string') return `<div title="${esc(t)}">${esc(t)}</div>`;
+  // a subagent, with the steps it took folded under it
+  if (t.agent) {
+    const a = t.agent;
+    const label = a.state === 'running' ? (a.background ? 'working in the background' : 'working') : a.state;
+    return `<details class="agent ${esc(a.state)}" data-k="${esc(key)}"><summary title="${esc(a.text)}"><i class="ag">${AGENT_STATE[a.state] || '◐'}</i>Agent · ${esc(a.type)}: ${esc(a.text)}<span class="n">${a.count || 0} step${a.count === 1 ? '' : 's'} · ${esc(label)}</span></summary>
+      <div class="ag-steps">${a.steps?.length ? a.steps.map(s => `<div title="${esc(s)}">${esc(s)}</div>`).join('') : '<div>No steps yet.</div>'}${a.count > (a.steps?.length || 0) ? `<div class="more">… ${a.count - a.steps.length} earlier steps not shown</div>` : ''}</div></details>`;
+  }
   const rows = t.write != null ? diffLines('', t.write) : t.edits.flatMap((e, n) => [...(n ? [['gap', '']] : []), ...diffLines(e.old, e.new)]);
   const add = rows.filter(r => r[0] === 'a').length, del = rows.filter(r => r[0] === 'd').length;
   const body = rows.reduce((parts, r) => { if (r[0] === 'gap') parts.push([]); else parts.at(-1).push(r); return parts; }, [[]])
-    .map(diffHtml).join('<div class="gap">⋯</div>');
+    .map(part => diffHtml(part, langOf(t.file))).join('<div class="gap">⋯</div>');
   const name = t.file.split(/[\\/]/).pop();
-  return `<details><summary title="${esc(t.text)}">${esc(t.text.replace(t.file, name))}<span class="n"><span class="a">+${add}</span> <span class="d">-${del}</span></span></summary>
-    <div class="diff"><div class="hd"><span>${esc(t.file)}</span><a class="file" href="#" data-edit="${esc(t.file)}">Open</a></div>${body}</div></details>`;
+  return `<details data-k="${esc(key)}"><summary title="${esc(t.text)}">${esc(t.text.replace(t.file, name))}<span class="n"><span class="a">+${add}</span> <span class="d">-${del}</span></span></summary>
+    <div class="diff" data-file="${esc(t.file)}" title="Click a line to comment on it for Claude"><div class="hd"><span>${esc(t.file)}</span><a class="file" href="#" data-edit="${esc(t.file)}">Open</a></div>${body}</div></details>`;
 }
 // Copy and Preview on code blocks; file links open the preview panel, diff headers the editor
 log.addEventListener('click', async e => {
+  const mact = e.target.closest('[data-mact]');
+  if (mact) {
+    const id = mact.closest('.msg') && [...messages.values()].find(x => x.el === mact.closest('.msg'))?.msg.id;
+    if (!id) return;
+    if (mact.dataset.mact === 'edit') return editMessage(id);
+    const asked = mact.dataset.mact === 'again' ? askedBefore(id) : messages.get(id)?.msg;
+    if (asked) return retry(asked.id);
+    return;
+  }
+  // a local dev server opens beside the chat (Ctrl+click: in your browser)
+  const web = e.target.closest('a[href^="http"]');
+  if (web && !e.ctrlKey && !e.metaKey && /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(web.href)) {
+    e.preventDefault();
+    return previewUrl(web.href.replace('0.0.0.0', 'localhost'));
+  }
   const pv = e.target.closest('.code .pv');
   if (pv) return preview({ content: pv.parentElement.querySelector('code').textContent, type: pv.dataset.pv });
   const copy = e.target.closest('.code .copy');
@@ -164,6 +208,74 @@ log.addEventListener('click', async e => {
     if (r.error) alert(r.error);
   }
 });
+
+// ---------- rewind: edit or retry one of your messages ----------
+// Did Claude change files after this message? Then going back can put them back too.
+function editsAfter(id) {
+  const list = [...messages.values()].map(x => x.msg);
+  const i = list.findIndex(m => m.id === id);
+  return list.slice(i + 1).some(m => m.tools?.some(t => t && typeof t === 'object' && t.file));
+}
+async function rewind(id, text, restoreFiles) {
+  const r = await api('/api/chat/rewind', { id, ...(text != null ? { text } : {}), restoreFiles });
+  if (r.error) { alert(r.error); return false; }
+  return true;
+}
+// a small bar asking whether to put files back as well
+function askFiles(el, verb) {
+  return new Promise(resolve => {
+    const bar = document.createElement('div');
+    bar.className = 'rw-ask';
+    bar.innerHTML = `<span>Claude changed files after this message.</span><button type="button" class="btn mini" data-r="keep">${verb}, keep files</button><button type="button" class="btn mini primary" data-r="undo">${verb} and undo file changes</button><button type="button" class="btn mini" data-r="cancel">Cancel</button>`;
+    el.after(bar);
+    bar.addEventListener('click', e => { const r = e.target.closest('[data-r]')?.dataset.r; if (!r) return; bar.remove(); resolve(r); });
+  });
+}
+async function retry(id) {
+  if (busy) return alert('Claude is still answering. Wait for it, or press Stop.');
+  const el = messages.get(id)?.el;
+  let restore = false;
+  if (editsAfter(id)) {
+    const r = await askFiles(el, 'Retry');
+    if (r === 'cancel') return;
+    restore = r === 'undo';
+  } else if (!confirm('Send this message again? The replies after it are replaced.')) return;
+  rewind(id, null, restore);
+}
+function editMessage(id) {
+  if (busy) return alert('Claude is still answering. Wait for it, or press Stop.');
+  const entry = messages.get(id);
+  if (!entry || entry.editing) return;
+  entry.editing = true;
+  const edits = editsAfter(id);
+  entry.el.classList.add('editing');
+  entry.el.innerHTML = `<textarea class="rw-text"></textarea>
+    ${edits ? '<label class="rw-files"><input type="checkbox"> Also undo the file changes Claude made after this message</label>' : ''}
+    <div class="rw-acts"><span>The chat goes back to here; the replies after it are replaced.</span><button type="button" class="btn mini" data-rw="cancel">Cancel</button><button type="button" class="btn mini primary" data-rw="send">Send</button></div>`;
+  const ta = entry.el.querySelector('textarea');
+  ta.value = entry.msg.text;
+  ta.style.height = Math.min(ta.scrollHeight + 4, 260) + 'px';
+  ta.focus();
+  const on = e => {
+    const a = e.target.closest('[data-rw]')?.dataset.rw;
+    if (a === 'cancel') done(); else if (a === 'send') go();
+  };
+  const done = () => { entry.el.removeEventListener('click', on); entry.editing = false; entry.el.classList.remove('editing'); render(entry.msg); };
+  let sending = false;
+  const go = async () => {
+    const text = ta.value.trim();
+    if (sending || (!text && !entry.msg.files?.length)) return;
+    sending = true;
+    const ok = await rewind(id, text, !!entry.el.querySelector('.rw-files input')?.checked);
+    sending = false;
+    if (ok) done();
+  };
+  entry.el.addEventListener('click', on);
+  ta.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); go(); }
+    if (e.key === 'Escape') done();
+  });
+}
 
 function renderApproval(card) {
   const el = document.createElement('div');
@@ -202,6 +314,7 @@ function setBusy(b) {
   stopBtn.hidden = !b;
   wrapBtn.disabled = b; // New chat stays: the busy one keeps working in the list
   showContext();
+  if (todos) showTodos(todos);
 }
 
 // the chat box shows the Manager's chat, or an employee's when their desk is open (s.employee)
@@ -234,6 +347,9 @@ async function load() {
   log.innerHTML = '';
   messages.clear();
   dismissed.clear();
+  commands = s.commands || commands;
+  todosEl.hidden = true;
+  if (s.todos) showTodos(s.todos);
   for (const m of s.messages || []) render(m);
   for (const c of s.approvals || []) renderApproval(c);
   context = s.context || null;
@@ -271,6 +387,8 @@ function onEvent(ev) {
   else if (ev.kind === 'context') { context = ev.context; showContext(); }
   else if (ev.kind === 'options') showOptions(ev.options);
   else if (ev.kind === 'mode') showMode(ev.mode);
+  else if (ev.kind === 'reset') load();
+  else if (ev.kind === 'commands') commands = ev.commands || [];
 }
 
 // ---------- the brain's chats ----------
@@ -301,7 +419,7 @@ function showList(l) {
 function drawRows(rows) {
   const mark = s => query ? esc(s).replace(new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])), 'gi'), m => `<mark>${m}</mark>`) : esc(s);
   rowsEl.innerHTML = rows.length ? rows.map(c => `<div class="crow ${c.id === currentId ? 'on' : ''}" data-id="${c.id}">
-      <div class="ct"><b>${mark(c.title)}</b><span>${c.parent ? '<span class="sub">↳ side session · </span>' : ''}${c.busy ? '<span class="busy">● working · </span>' : ''}${ago(c.updated)} · ${c.count} messages</span>${c.snippet ? `<em>${mark(c.snippet)}</em>` : ''}</div>
+      <div class="ct"><b>${mark(c.title)}</b><span>${c.parent ? '<span class="sub">↳ side session · </span>' : ''}${c.schedule ? '<span class="sched">⏰ scheduled · </span>' : ''}${c.busy ? '<span class="busy">● working · </span>' : ''}${ago(c.updated)} · ${c.count} messages</span>${c.snippet ? `<em>${mark(c.snippet)}</em>` : ''}</div>
       <div class="acts"><button type="button" class="btn mini" data-act="rename" title="Rename">✎</button><button type="button" class="btn mini" data-act="delete" title="Delete">×</button></div>
     </div>`).join('')
     : `<div class="empty">${query ? 'No chat mentions that.' : 'No saved chats yet. Your chats show up here once you send a message.'}</div>`;
@@ -518,6 +636,8 @@ input.addEventListener('focus', warm);
 
 async function send() {
   const text = input.value.trim();
+  hideSuggest();
+  if (!pending.length && await builtin(text)) { input.value = ''; autosize(); return; }
   if (busy || pending.some(p => !p.file && !p.error)) return; // still uploading
   const ready = pending.filter(p => p.file);
   if (!text && !ready.length) return;
@@ -550,6 +670,7 @@ document.getElementById('queueBtn').addEventListener('click', async () => {
 function autosize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 160) + 'px'; }
 input.addEventListener('input', autosize);
 input.addEventListener('keydown', e => {
+  if (suggestKeys(e)) return;
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
 });
 form.addEventListener('submit', e => { e.preventDefault(); send(); });
@@ -561,6 +682,213 @@ newBtn.addEventListener('click', async () => {
   if (r.error) alert(r.error);
   input.focus();
 });
+
+// ---------- Claude's plan: the checklist from TodoWrite / TaskCreate ----------
+const todosEl = document.getElementById('todos');
+let todos = null, todosOpen = localStorage.getItem('claudeos.todosOpen') !== '0';
+const TODO_ICON = { completed: '✓', in_progress: '◐', pending: '○' };
+function showTodos(list) {
+  todos = list?.length ? list : null;
+  if (!todos) { todosEl.hidden = true; return; }
+  const done = todos.filter(t => t.status === 'completed').length;
+  const now = todos.find(t => t.status === 'in_progress');
+  // a finished plan goes away once Claude is done
+  todosEl.hidden = done === todos.length && !busy;
+  todosEl.classList.toggle('open', todosOpen);
+  todosEl.innerHTML = `<button type="button" class="td-h" title="Claude's plan for this task">${todosOpen ? '▾' : '▸'} Plan · ${done} of ${todos.length} done${now ? ` · <span>${esc(now.active || now.text)}</span>` : ''}</button>
+    <ul>${todos.map(t => `<li class="${esc(t.status)}"><i>${TODO_ICON[t.status] || '○'}</i>${esc(t.status === 'in_progress' && t.active ? t.active : t.text)}</li>`).join('')}</ul>`;
+}
+todosEl.addEventListener('click', e => {
+  if (!e.target.closest('.td-h')) return;
+  todosOpen = !todosOpen;
+  localStorage.setItem('claudeos.todosOpen', todosOpen ? '1' : '0');
+  showTodos(todos);
+});
+
+// ---------- / commands and @ files ----------
+// Typing / at the start lists ClaudeOS's own commands, Claude Code's commands and the skills; @ lists
+// the files in the chat's folder. Up/Down picks, Enter or Tab takes it, Esc closes.
+const suggestEl = document.getElementById('suggest');
+let commands = [];
+const MODE_WORDS = { ask: '', 'ask-first': '', edits: 'acceptEdits', accept: 'acceptEdits', acceptedits: 'acceptEdits', auto: 'auto', plan: 'plan', dontask: 'bypassPermissions', bypass: 'bypassPermissions', 'dont-ask': 'bypassPermissions' };
+function pick(sel, word, map) {
+  word = String(word || '').toLowerCase().trim();
+  const value = map ? map[word] : [...sel.options].find(o => o.value && (o.value === word || o.textContent.toLowerCase().startsWith(word)))?.value;
+  if (value === undefined || (!word && !map)) { alert(`Pick one of: ${[...sel.options].map(o => o.textContent).join(', ')}`); return; }
+  sel.value = value;
+  sel.dispatchEvent(new Event('change'));
+}
+const BUILTIN = [
+  { name: 'new', hint: 'Start a new chat', run: () => newBtn.click() },
+  { name: 'clear', hint: 'Start a new chat (this one stays in Chats)', run: () => newBtn.click() },
+  { name: 'wrap', hint: 'Save what matters to the brain and start fresh', run: () => wrap() },
+  { name: 'model', arg: 'fable · opus · sonnet · haiku', hint: 'Model for the next replies', run: a => pick(modelSel, a) },
+  { name: 'effort', arg: 'low · medium · high · xhigh · max', hint: 'Effort for the next replies', run: a => pick(effortSel, a) },
+  { name: 'mode', arg: 'ask · edits · auto · plan · dontask', hint: 'How much Claude asks first', run: a => pick(modeSel, a, MODE_WORDS) },
+  { name: 'usage', hint: 'Your plan usage: the 5-hour and weekly limits', run: () => showUsage() },
+  { name: 'schedule', hint: 'Run a prompt on a schedule', run: a => document.dispatchEvent(new CustomEvent('claudeos:schedule', { detail: { prompt: a } })) },
+  { name: 'plugins', hint: 'Browse and install Claude Code plugins', run: () => document.dispatchEvent(new CustomEvent('claudeos:plugins')) },
+];
+async function builtin(text) {
+  const m = text.match(/^\/([\w:-]+)(?:\s+([\s\S]*))?$/);
+  const b = m && BUILTIN.find(x => x.name === m[1].toLowerCase());
+  if (!b) return false;
+  await b.run((m[2] || '').trim());
+  return true;
+}
+let sug = { items: [], i: 0, t: null }, fileReq = 0, fileTimer = 0;
+function token() {
+  const pos = input.selectionStart;
+  if (pos !== input.selectionEnd) return null;
+  const before = input.value.slice(0, pos);
+  let m = before.match(/^\/([\w:-]*)$/);
+  if (m) return { kind: 'cmd', q: m[1], start: 0, end: pos };
+  m = before.match(/(?:^|\s)@([^\s@"]*)$/);
+  if (m) return { kind: 'file', q: m[1], start: pos - m[1].length - 1, end: pos };
+  return null;
+}
+function hideSuggest() { suggestEl.hidden = true; sug = { items: [], i: 0, t: null }; }
+function drawSuggest() {
+  if (!sug.items.length) {
+    if (sug.t?.kind === 'file') { suggestEl.hidden = false; suggestEl.innerHTML = `<div class="sg-none">${sug.loading ? 'Looking…' : 'No file matches.'}</div>`; return; }
+    return hideSuggest();
+  }
+  suggestEl.hidden = false;
+  suggestEl.innerHTML = sug.items.map((x, n) => x.file
+    ? `<div class="sg${n === sug.i ? ' on' : ''}" data-n="${n}"><b>${esc(x.name.split('/').pop())}</b><span>${esc(x.name)}</span></div>`
+    : `<div class="sg${n === sug.i ? ' on' : ''}" data-n="${n}"><b>/${esc(x.name)}</b>${x.arg ? `<em>${esc(x.arg)}</em>` : ''}<span>${esc(x.hint || '')}</span><i>${esc(x.tag)}</i></div>`).join('');
+  suggestEl.querySelector('.on')?.scrollIntoView({ block: 'nearest' });
+}
+function updateSuggest() {
+  const t = token();
+  if (!t) return hideSuggest();
+  sug.t = t;
+  if (t.kind === 'cmd') {
+    const q = t.q.toLowerCase(), seen = new Set();
+    const all = [...BUILTIN.map(b => ({ name: b.name, hint: b.hint, arg: b.arg, tag: 'ClaudeOS' })),
+      ...commands.map(c => ({ name: c.name, hint: c.kind === 'skill' ? 'Use this skill' : 'Claude Code command', tag: c.kind }))]
+      .filter(x => !seen.has(x.name) && seen.add(x.name) && x.name.toLowerCase().includes(q));
+    sug.items = all.sort((a, b) => (b.name.toLowerCase().startsWith(q) - a.name.toLowerCase().startsWith(q))).slice(0, 14);
+    sug.i = Math.min(sug.i, Math.max(0, sug.items.length - 1));
+    return drawSuggest();
+  }
+  sug.loading = true;
+  if (!sug.items.length) drawSuggest();
+  clearTimeout(fileTimer);
+  fileTimer = setTimeout(async () => {
+    const no = ++fileReq;
+    const r = await api('/api/chat/files?q=' + encodeURIComponent(t.q));
+    if (no !== fileReq || sug.t !== t && token()?.q !== t.q) return;
+    sug.loading = false;
+    sug.items = (r.files || []).map(f => ({ name: f, file: true }));
+    sug.i = 0;
+    drawSuggest();
+  }, 100);
+}
+function takeSuggest(n = sug.i) {
+  const x = sug.items[n], t = sug.t;
+  if (!x || !t) return;
+  const after = input.value.slice(t.end);
+  const ins = x.file ? `@${/\s/.test(x.name) ? `"${x.name}"` : x.name} ` : `/${x.name} `;
+  input.value = input.value.slice(0, t.start) + ins + after.replace(/^\s+/, '');
+  const at = t.start + ins.length;
+  input.setSelectionRange(at, at);
+  hideSuggest();
+  autosize();
+  input.focus();
+}
+function suggestKeys(e) {
+  if (suggestEl.hidden || !sug.items.length) { if (e.key === 'Escape' && !suggestEl.hidden) { hideSuggest(); return true; } return false; }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); sug.i = (sug.i + (e.key === 'ArrowDown' ? 1 : -1) + sug.items.length) % sug.items.length; drawSuggest(); return true; }
+  // Enter on a full command with nothing to add sends it as it is
+  if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+    const x = sug.items[sug.i];
+    if (e.key === 'Enter' && !x.file && sug.t?.q === x.name) { hideSuggest(); return false; }
+    e.preventDefault(); takeSuggest(); return true;
+  }
+  if (e.key === 'Escape') { e.preventDefault(); hideSuggest(); return true; }
+  return false;
+}
+input.addEventListener('input', updateSuggest);
+input.addEventListener('click', updateSuggest);
+input.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== input) hideSuggest(); }, 150));
+suggestEl.addEventListener('mousedown', e => { const n = e.target.closest('[data-n]')?.dataset.n; if (n != null) { e.preventDefault(); takeSuggest(Number(n)); } });
+
+// ---------- plan usage: the 5-hour and weekly limits ----------
+// Claude Code reports them with every reply (rate_limit_event); the server keeps the last ones.
+const limitsEl = document.getElementById('limits');
+let limits = null;
+const WINDOW_NAME = { five_hour: '5-hour', seven_day: 'Week', seven_day_opus: 'Week · Opus', seven_day_sonnet: 'Week · Sonnet' };
+function resetText(sec) {
+  const d = new Date(sec * 1000), now = new Date();
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (d.toDateString() === now.toDateString()) return time;
+  return `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`;
+}
+function windows() {
+  if (!limits) return [];
+  const w = limits.unifiedWindows || (limits.rateLimitType ? { [limits.rateLimitType]: { utilization: limits.utilization, resetsAt: limits.resetsAt, status: limits.status } } : {});
+  return Object.entries(w).filter(([, v]) => v && v.utilization != null).map(([k, v]) => {
+    const over = v.resetsAt && Date.now() > v.resetsAt * 1000; // that window has started over since
+    return { name: WINDOW_NAME[k] || k.replace(/_/g, ' '), pct: over ? 0 : Math.round(v.utilization * 100), resets: v.resetsAt, over, status: v.status };
+  });
+}
+function showLimits() {
+  const ws = windows();
+  limitsEl.hidden = !ws.length;
+  if (!ws.length) return;
+  const old = Date.now() - limits.at > 3 * 3600e3;
+  limitsEl.innerHTML = ws.map(w => `<span class="lim${w.pct >= 90 || w.status === 'rejected' ? ' hot' : w.pct >= 75 ? ' warm' : ''}" title="${esc(w.name)} limit: ${w.over ? 'has reset since the last reply' : `${w.pct}% used, resets ${resetText(w.resets)}`}${old ? ` (as of ${new Date(limits.at).toLocaleString()})` : ''}">
+    <b>${esc(w.name)}</b><span class="bar"><i style="width:${w.pct}%"></i></span>${w.over ? 'reset' : `${w.pct}%`}</span>`).join('') +
+    (limits.status === 'rejected' ? `<span class="lim hot">Limit reached${limits.resetsAt ? ` · back ${resetText(limits.resetsAt)}` : ''}</span>` : '');
+}
+function showUsage() {
+  const ws = windows();
+  if (!ws.length) return alert('No usage numbers yet. Claude Code reports them with each reply, so send a message first.');
+  alert(`Your Claude plan usage${Date.now() - limits.at > 600e3 ? ` (as of ${new Date(limits.at).toLocaleString()})` : ''}:\n\n` +
+    ws.map(w => `${w.name}: ${w.over ? 'reset since then' : `${w.pct}% used · resets ${resetText(w.resets)}`}`).join('\n') +
+    (limits.isUsingOverage ? '\n\nYou are using extra usage now.' : ''));
+}
+limitsEl.addEventListener('click', showUsage);
+api('/api/limits').then(r => { limits = r.limits || null; showLimits(); });
+events.addEventListener('limits', e => { limits = JSON.parse(e.data); showLimits(); });
+setInterval(showLimits, 60000);
+
+// ---------- voice: dictate into the message box ----------
+const micBtn = document.getElementById('micBtn');
+const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null;
+if (!Speech) micBtn.hidden = true;
+micBtn.addEventListener('click', () => {
+  if (rec) { rec.stop(); return; }
+  rec = new Speech();
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.lang = navigator.language || 'en-US';
+  const base = input.value.trim() ? input.value.replace(/\s*$/, ' ') : '';
+  let said = '';
+  rec.onresult = e => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) said += r[0].transcript; else interim += r[0].transcript;
+    }
+    input.value = base + said + interim;
+    autosize();
+  };
+  rec.onerror = e => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') alert('ClaudeOS can\'t use the microphone. Allow it for this page (the icon at the right of the address bar, or Windows Settings → Privacy → Microphone).');
+    else if (e.error === 'network') alert('Dictation needs the internet: the browser sends the audio to its speech service.');
+  };
+  rec.onend = () => { rec = null; micBtn.classList.remove('on'); micBtn.title = 'Dictate (click again to stop)'; input.focus(); };
+  rec.start();
+  micBtn.classList.add('on');
+  micBtn.title = 'Listening… click to stop';
+  input.focus();
+});
+
+// ---------- review comments on diffs ----------
+enableReview(log);
 
 events.addEventListener('chat', e => onEvent(JSON.parse(e.data)));
 events.addEventListener('open', () => load()); // also re-syncs after a reconnect

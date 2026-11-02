@@ -1405,7 +1405,8 @@ function renderAppsPanel(el) {
   if (!d) { el.innerHTML = '<h3>Apps</h3><div class="empty">Loading…</div>'; return; }
   const have = new Set(d.list.map(i => i.key).filter(Boolean));
   let html = `<h3>Apps</h3><div class="k">What Claude can reach from ${esc(state.brain?.name || 'this brain')}. Employees use these through their skills.
-    <button class="btn mini" data-ap="refresh" ${d.checking ? 'disabled' : ''}>${d.checking ? 'Checking…' : 'Refresh'}</button></div>`;
+    <button class="btn mini" data-ap="refresh" ${d.checking ? 'disabled' : ''}>${d.checking ? 'Checking…' : 'Refresh'}</button>
+    <button class="btn mini" data-ap="plugins" title="Browse and install Claude Code plugins: skills, commands, agents and MCP servers from marketplaces">Plugins…</button></div>`;
   // accounts for tools on this PC (GitHub's gh), each with a one-click sign-in
   html += `<div class="runs-h">Accounts</div><div class="apps-l">`;
   for (const a of d.accounts || []) {
@@ -1479,6 +1480,7 @@ document.getElementById('detail').addEventListener('click', async e => {
   const redraw = () => { appsPanel.drawn = ''; renderDetail(); };
   if (act === 'open') { appsPanel.open = appsPanel.open === btn.dataset.key ? null : btn.dataset.key; appsPanel.err = ''; return redraw(); }
   if (act === 'refresh') return api('/api/integrations/refresh', {});
+  if (act === 'plugins') return document.dispatchEvent(new CustomEvent('claudeos:plugins'));
   if (act === 'acct') { const r = await api('/api/integrations/account', { key: btn.dataset.key, act: btn.dataset.act }); if (r.error) toast(r.error); return; }
   if (act === 'copy') { navigator.clipboard?.writeText(btn.dataset.text).then(() => { btn.textContent = 'Copied'; }); return; }
   if (act === 'savekey' || act === 'rmkey') {

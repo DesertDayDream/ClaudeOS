@@ -67,7 +67,7 @@ function blocks(lines) {
       i++; // the closing fence (or the end, while it's still streaming)
       const lang = fence[2];
       const pv = /^(html|svg|mermaid)$/i.test(lang) ? `<button type="button" class="copy pv" data-pv="${esc(lang.toLowerCase())}" title="Show it rendered">Preview</button>` : '';
-      html += `<div class="code">${lang ? `<span class="lang">${esc(lang)}</span>` : ''}${pv}<button type="button" class="copy" title="Copy">Copy</button><pre><code>${esc(body.join('\n'))}</code></pre></div>`;
+      html += `<div class="code">${lang ? `<span class="lang">${esc(lang)}</span>` : ''}${pv}<button type="button" class="copy" title="Copy">Copy</button><pre><code>${highlight(body.join('\n'), lang)}</code></pre></div>`;
       continue;
     }
     const h = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/);
@@ -146,6 +146,63 @@ function list(lines, i, html) {
   }
   return [html + `</${tag}>`, i];
 }
+
+// ---------- syntax highlighting ----------
+// One regex per language family; the first alternative that matches at a spot wins, so comments and
+// strings come before keywords. Patterns use only non-capturing groups (the match index says which).
+const kw = words => new RegExp(`\\b(?:${words.split(' ').join('|')})\\b`);
+const C_COMMENT = /\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/, HASH_COMMENT = /#[^\n]*/;
+const DQ = /"(?:[^"\\\n]|\\.)*"?/, SQ = /'(?:[^'\\\n]|\\.)*'?/, BQ = /`(?:[^`\\]|\\.)*`?/;
+const NUM = /\b(?:0x[\da-fA-F_]+|\d[\d_]*(?:\.\d+)?(?:e[+-]?\d+)?)[a-zA-Z]*\b/;
+const FN = /\b[A-Za-z_$][\w$]*(?=\s*\()/, TYPE = /\b[A-Z][A-Za-z0-9_]*\b/;
+const JS_KW = 'async await break case catch class const continue debugger default delete do else export extends finally for from function if import in instanceof let new of return static super switch this throw try typeof var void while with yield interface type enum implements private public protected readonly as declare namespace abstract';
+const SPECS = {
+  js: [['com', C_COMMENT], ['str', BQ], ['str', DQ], ['str', SQ], ['kw', kw(JS_KW)], ['lit', kw('true false null undefined NaN Infinity')], ['num', NUM], ['fn', FN], ['type', TYPE]],
+  c: [['com', C_COMMENT], ['meta', /^[ \t]*#[ \t]*\w+[^\n]*/], ['str', DQ], ['str', SQ], ['kw', kw('auto break case catch char class const continue default delete do double else enum explicit extern float for friend goto if inline int long namespace new operator private protected public register return short signed sizeof static struct switch template this throw try typedef typename union unsigned using virtual void volatile while bool override final nullptr constexpr noexcept fn let mut impl pub use mod match loop trait where crate self func package import go chan defer select var interface map range type fallthrough val fun when object internal is as in out ref string base foreach lock readonly sealed async await')],
+    ['lit', kw('true false null nil NULL None')], ['num', NUM], ['fn', FN], ['type', TYPE]],
+  py: [['com', HASH_COMMENT], ['str', /[rbfRBF]{0,2}(?:"""[\s\S]*?(?:"""|$)|'''[\s\S]*?(?:'''|$))/], ['str', DQ], ['str', SQ], ['meta', /@[\w.]+/],
+    ['kw', kw('and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield match case')],
+    ['lit', kw('True False None self cls')], ['num', NUM], ['fn', FN], ['type', TYPE]],
+  sh: [['com', HASH_COMMENT], ['str', DQ], ['str', SQ], ['var', /\$\{[^}]*\}|\$[\w@#?*!-]+/],
+    ['kw', kw('if then else elif fi for while until do done case esac in function return local export source alias set unset echo exit cd param begin process end foreach switch try catch finally throw')],
+    ['meta', /(?:^|(?<=\s))-{1,2}[A-Za-z][\w-]*/], ['num', NUM]],
+  verse: [['com', /<#[\s\S]*?(?:#>|$)|#[^\n]*/], ['str', DQ], ['meta', /<\w+>|@\w+/],
+    ['kw', kw('using module class struct interface enum var set if else then for loop break return block spawn sync race rush branch defer case where of and or not array map option tuple subtype type logic int float string char void any comparable external override final abstract concrete unique castable persistable public private protected internal epic_internal suspends decides transacts computes varies converges reads writes allocates localizes native native_callable')],
+    ['lit', kw('true false Self')], ['num', NUM], ['fn', /\b[A-Za-z_]\w*(?=(?:<\w+>)*\s*[(\[])/], ['type', /\b[a-z_]\w*_(?:device|component)\b|\b[A-Z]\w*\b/]],
+  json: [['key', /"(?:[^"\\\n]|\\.)*"(?=\s*:)/], ['str', DQ], ['lit', kw('true false null')], ['num', /-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/]],
+  html: [['com', /<!--[\s\S]*?(?:-->|$)/], ['tag', /<\/?[\w:-]+|\/?>/], ['attr', /\b[\w:-]+(?==)/], ['str', DQ], ['str', SQ]],
+  css: [['com', /\/\*[\s\S]*?(?:\*\/|$)/], ['str', DQ], ['str', SQ], ['meta', /@[\w-]+/], ['key', /[\w-]+(?=\s*:[^;{}\n]*[;}\n])/], ['tag', /[.#]?[\w-]+(?=[^{};]*\{)/], ['num', /#[\da-fA-F]{3,8}\b|-?\b\d+(?:\.\d+)?(?:px|em|rem|%|vh|vw|s|ms|deg|fr)?\b/]],
+  sql: [['com', /--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)/], ['str', SQ], ['str', DQ],
+    ['kw', /\b(?:select|from|where|and|or|not|insert|into|values|update|set|delete|create|table|drop|alter|add|index|join|left|right|inner|outer|on|group|by|order|having|limit|offset|as|distinct|union|all|primary|key|foreign|references|null|is|in|like|between|case|when|then|else|end|with|returning|default|exists)\b/i], ['num', NUM], ['fn', FN]],
+  yaml: [['com', HASH_COMMENT], ['key', /^[ \t-]*[\w.-]+(?=[ \t]*[:=])/m], ['str', DQ], ['str', SQ], ['lit', kw('true false null yes no on off')], ['num', NUM]],
+  diff: [['meta', /^(?:@@[^\n]*|diff [^\n]*|index [^\n]*|--- [^\n]*|\+\+\+ [^\n]*)/m], ['add', /^\+[^\n]*/m], ['del', /^-[^\n]*/m]],
+};
+const ALIAS = { js: 'js', javascript: 'js', jsx: 'js', ts: 'js', tsx: 'js', typescript: 'js', mjs: 'js', cjs: 'js', node: 'js',
+  c: 'c', cpp: 'c', 'c++': 'c', h: 'c', hpp: 'c', cs: 'c', csharp: 'c', java: 'c', go: 'c', golang: 'c', rust: 'c', rs: 'c', swift: 'c', kotlin: 'c', kt: 'c', php: 'c', dart: 'c', scala: 'c', hlsl: 'c', glsl: 'c',
+  python: 'py', py: 'py', python3: 'py', ruby: 'py', rb: 'py',
+  bash: 'sh', shell: 'sh', zsh: 'sh', sh: 'sh', console: 'sh', powershell: 'sh', ps1: 'sh', pwsh: 'sh', bat: 'sh', cmd: 'sh', dockerfile: 'sh',
+  verse: 'verse', json: 'json', jsonc: 'json', json5: 'json', html: 'html', xml: 'html', svg: 'html', vue: 'html', css: 'css', scss: 'css', less: 'css',
+  sql: 'sql', yaml: 'yaml', yml: 'yaml', toml: 'yaml', ini: 'yaml', diff: 'diff', patch: 'diff' };
+const compiled = new Map();
+export function highlight(code, lang) {
+  const key = ALIAS[String(lang || '').toLowerCase()];
+  if (!key || code.length > 200000) return esc(code);
+  if (!compiled.has(key)) {
+    const spec = SPECS[key];
+    compiled.set(key, { spec, re: new RegExp(spec.map(([, r]) => `(${r.source})`).join('|'), 'gm' + (spec.some(([, r]) => r.flags.includes('i')) ? 'i' : '')) });
+  }
+  const { spec, re } = compiled.get(key);
+  let out = '', last = 0;
+  for (const m of code.matchAll(re)) {
+    if (!m[0]) continue;
+    const k = m.findIndex((g, n) => n > 0 && g !== undefined) - 1;
+    out += esc(code.slice(last, m.index)) + `<span class="t-${spec[k][0]}">${esc(m[0])}</span>`;
+    last = m.index + m[0].length;
+  }
+  return out + esc(code.slice(last));
+}
+// the file's language from its name, for diffs and previews
+export const langOf = file => { const ext = String(file || '').split('.').pop().toLowerCase(); return ALIAS[ext] ? ext : ''; };
 
 export function markdown(src) {
   return blocks(String(src ?? '').replace(/\r\n?/g, '\n').split('\n'));

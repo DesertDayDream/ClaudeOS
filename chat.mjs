@@ -60,10 +60,12 @@ const MAX_IMAGE = 3.7 * 1024 * 1024; // the API takes images up to 5 MB once bas
 const MAX_UPLOAD = 500 * 1024 * 1024;
 const newId = () => crypto.randomBytes(6).toString('hex');
 // what every chat can do besides Claude Code's own tools (approval-mcp.mjs serves these)
-const DESK_ALLOWED = ['terminal_read', 'terminal_list', 'terminal_stop', 'publish_artifact', 'start_session', 'message_session'];
+const DESK_ALLOWED = ['terminal_read', 'terminal_list', 'terminal_stop', 'publish_artifact', 'start_session', 'message_session', 'show_preview', 'list_scheduled'];
 const DESK_PROMPT = `ClaudeOS desk tools (mcp__claudeos__*):
 - terminal_run / terminal_read / terminal_stop: long-running commands (dev servers, watchers, builds) in the user's Terminal tab, where they can watch and stop them. Short commands stay in Bash.
 - publish_artifact: when a page would be clearer than chat text (a report, dashboard, comparison, mock-up, small tool), write one self-contained .html file and publish it; give the user the link it returns.
+- show_preview: after starting a dev server, show it live in the preview panel beside the chat.
+- schedule_task / list_scheduled / delete_scheduled: run a prompt later or on repeat (reminders, daily reports); each run is a new chat in this brain.
 - start_session / message_session: hand a task of its own (a separate fix, a long investigation, work in another folder) to a side session that runs in parallel; its report comes back here. Quick things stay here.
 The chat renders markdown: a link to a file ([report](out/report.html)) opens it rendered in a preview panel (HTML, SVG, PDF, images, Markdown, CSV, code), ![alt](path/to/image.png) shows an image inline, and \`\`\`html / \`\`\`svg / \`\`\`mermaid blocks get a Preview button. Link the files you make.`;
 const TOOL_NAMES = ['browser', 'chrome', 'computer'];
@@ -78,6 +80,21 @@ function toolEntry(name, input = {}) {
   const edits = name === 'MultiEdit' ? input.edits || [] : [input];
   return { text, file, edits: edits.slice(0, 20).map(e => ({ old: cut(e.old_string), new: cut(e.new_string) })) };
 }
+// Claude's plan as a checklist: TodoWrite replaces the list, TaskCreate / TaskUpdate change one item
+const TODO_TOOLS = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate']);
+// a subagent: its steps are listed under it instead of in the chat's own tool lines
+const AGENT_TOOLS = new Set(['Task', 'Agent']);
+// Claude Code's own commands that only make sense in its terminal UI; the rest (skills, /compact,
+// /init, /review, custom commands) work when sent as a message
+const UI_COMMANDS = new Set(['add-dir', 'agents', 'auto-mode-setup', 'autocompact', 'bashes', 'bug', 'chrome', 'clear', 'color', 'config', 'cost', 'doctor', 'exit',
+  'export', 'extra-usage', 'fast', 'feedback', 'focus', 'heapdump', 'help', 'hooks', 'ide', 'install-github-app', 'keybindings', 'login', 'logout', 'mcp', 'memory',
+  'migrate-installer', 'mobile', 'model', 'effort', 'output-style', 'passes', 'permissions', 'plugin', 'privacy-settings', 'release-notes', 'reload-plugins',
+  'reload-skills', 'rename', 'resume', 'rewind', 'sandbox', 'status', 'statusline', 'stickers', 'tasks', 'terminal-setup', 'theme', 'todos', 'upgrade', 'usage',
+  'usage-credits', 'vim', 'remote-env', 'list-agents', 'team-onboarding', 'design-consent', 'design-revoke', 'skill-doctor', 'workflow-launch-exec', 'import', 'insights']);
+// rewinding a chat restores files from Claude Code's checkpoints, which it keeps only with this on
+const CHECKPOINTS = { CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: 'true' };
+// Claude's plan as a checklist (TaskCreate / TaskUpdate), which print mode leaves out unless asked
+const TODO_ENV = { CLAUDE_CODE_ENABLE_TODO_TOOLS: '1' };
 const killTree = proc => execFile('taskkill', ['/pid', String(proc.pid), '/T', '/F'], () => {});
 const clip = (s, n) => (s = String(s || '').replace(/\s+/g, ' ').trim()).length > n ? s.slice(0, n - 1) + '…' : s;
 
@@ -86,6 +103,9 @@ export function toolSummary(name, input = {}) {
   if (name === 'mcp__claudeos__post_brief') return `Briefing the team: ${input.title || 'new brief'} (${(input.tasks || []).map(t => t.employee).join(', ')})`;
   if (name === 'mcp__claudeos__start_session') return `Started a side session: ${input.title || ''}`;
   if (name === 'mcp__claudeos__message_session') return `Messaged a side session: ${String(input.message || '').slice(0, 100)}`;
+  if (name === 'mcp__claudeos__show_preview') return `Showing ${input.url || 'a page'} in the preview panel`;
+  if (name === 'mcp__claudeos__schedule_task') return `Schedule “${input.title || 'a task'}” (${input.repeat || ''}${input.time ? ` at ${input.time}` : ''}${input.date ? ` on ${input.date}` : ''}${input.day ? ` on ${input.day}` : ''})`;
+  if (name === 'mcp__claudeos__delete_scheduled') return `Delete scheduled task ${input.id || ''}`;
   if (name === 'mcp__claudeos__publish_artifact') return `Published an artifact: ${input.title || ''}`;
   if (name === 'mcp__claudeos__update_app') return input.rollback ? 'Roll ClaudeOS back to the previous build (dist/ClaudeOS.old.exe) once every chat is done' : 'Restart ClaudeOS into the new build (dist/ClaudeOS.new.exe) once every chat is done';
   if (name === 'mcp__claudeos__terminal_run') return `Terminal: ${String(input.command || '').slice(0, 120)}`;
@@ -102,7 +122,19 @@ export function toolSummary(name, input = {}) {
   return `${name}${target ? ': ' + String(target).slice(0, 120) : ''}`;
 }
 
-export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, helper, memoryServer, browserServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], projects = () => [], onIdle = () => {}, notify = () => {} }) {
+// Which @mentions in a message are real files in the chat's folder (quoted paths may have spaces).
+export function mentionedFiles(text, folder) {
+  const out = [];
+  for (const m of String(text || '').matchAll(/(?:^|\s)@(?:"([^"]+)"|([^\s"]+))/g)) {
+    const rel = (m[1] || m[2]).replace(/[),.;:!?]+$/, '');
+    const abs = path.resolve(folder, rel);
+    try { if (fs.statSync(abs).isFile() && !out.includes(abs)) out.push(abs); } catch { /* not a file */ }
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
+export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, helper, memoryServer, browserServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], projects = () => [], onIdle = () => {}, notify = () => {}, onLimits = () => {} }) {
   // the brain's chats: which one the page shows, the model/effort picked, and a row per saved chat
   const indexFile = path.join(dir, 'index.json');
   let index = { current: null, options: {}, chats: {} };
@@ -135,6 +167,17 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     return first ? clip(first.text, 60) : 'New chat';
   }
   function emit(ev) { broadcast('chat', ev); }
+  // the slash commands Claude Code offers in this brain (skills, plugin commands, its own), from the
+  // init event a chat's Claude sends when it starts; kept so the menu works before the next start
+  function setCommands(ev) {
+    const skills = new Set(ev.skills || []);
+    const list = (ev.slash_commands || []).filter(n => !UI_COMMANDS.has(n) && !n.startsWith('__'))
+      .map(name => ({ name, kind: skills.has(name) ? 'skill' : 'command' }));
+    if (JSON.stringify(list) === JSON.stringify(index.commands)) return;
+    index.commands = list;
+    saveIndex();
+    emit({ kind: 'commands', commands: list });
+  }
   const anyBusy = () => [...convs.values()].some(c => c.busy());
   function rows() {
     return Object.entries(index.chats).filter(([, m]) => !m.employee).map(([id, m]) => ({ id, ...m, busy: !!convs.get(id)?.busy() }))
@@ -295,7 +338,15 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       if (opts.model) args.push('--model', opts.model);
       if (opts.effort) args.push('--effort', opts.effort);
       if (state.mode) args.push('--permission-mode', state.mode);
+      // each message comes back with its id, which rewinding to it needs
+      args.push('--replay-user-messages');
       return { args, key: JSON.stringify(args) };
+    }
+    // where the next start picks the conversation up: the whole session, or (after a rewind) only up to
+    // the last entry of the reply before the message that was edited
+    function resumeArgs() {
+      if (!state.sessionId) return [];
+      return ['--resume', state.sessionId, ...(state.resumeAt ? ['--resume-session-at', state.resumeAt] : [])];
     }
 
     // Start (or keep) this chat's Claude process, so the next message only has to be written to it.
@@ -303,9 +354,9 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       const { args, key } = launch();
       if (live && live.key !== key && !run) { const old = live; live = null; killTree(old.proc); }
       if (live) { idleTimer(); return live; }
-      const proc = spawn('claude', [...args, ...(state.sessionId ? ['--resume', state.sessionId] : [])], {
+      const proc = spawn('claude', [...args, ...resumeArgs()], {
         cwd: state.folder || cwd,
-        env: { ...process.env, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000),
+        env: { ...process.env, ...CHECKPOINTS, ...TODO_ENV, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000),
           // in the brain, memories go to the brain, never Claude Code's own auto-memory (also off in each
           // brain's settings); a project chat keeps the project's memory, like Claude Desktop
           ...(state.folder ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1' } : { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' }) },
@@ -320,7 +371,12 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         while ((nl = buf.indexOf('\n')) >= 0) {
           const line = buf.slice(0, nl).trim();
           buf = buf.slice(nl + 1);
-          if (line && run?.live === me) { try { handle(JSON.parse(line)); } catch { /* not JSON */ } }
+          if (!line) continue;
+          let ev;
+          try { ev = JSON.parse(line); } catch { continue; /* not JSON */ }
+          if (ev.type === 'system' && ev.subtype === 'init') setCommands(ev);
+          if (ev.type === 'rate_limit_event' && ev.rate_limit_info) onLimits(ev.rate_limit_info);
+          if (run?.live === me) { try { handle(ev); } catch { /* a malformed event */ } }
         }
       });
       proc.stderr.on('data', d => { me.stderr = (me.stderr + d).slice(-4000); });
@@ -349,6 +405,9 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
 
     // The message as Claude gets it: the text, where the attachments are, and the images themselves.
     function content(text, files) {
+      // @file mentions: tell Claude where they are, so it reads them
+      const mentioned = mentionedFiles(text, state.folder || cwd);
+      if (mentioned.length) text = `${text}\n\n(Files the user mentioned with @: ${mentioned.join(', ')})`;
       if (!files.length) return text;
       const note = `Attached (saved in the brain folder; images are already included below, read the other files with your tools):\n${files.map(f => `- ${path.join(cwd, f.path)}`).join('\n')}`;
       const blocks = [{ type: 'text', text: `${text || 'Have a look at the attached files.'}\n\n${note}` }];
@@ -372,13 +431,15 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         attached.push(a);
       }
       if (!text && !attached.length) return { error: 'Empty message.' };
-      push(wrap ? { role: 'user', text: 'Wrap up & start fresh', wrap: true }
+      const asked = push(wrap ? { role: 'user', text: 'Wrap up & start fresh', wrap: true }
         : { role: 'user', text: label || text, ...(from ? { from } : {}), ...(attached.length ? { files: attached } : {}) });
 
       const reply = push({ role: 'assistant', text: '', tools: [], streaming: true });
       let me;
       try { me = ensureLive(); } catch (err) { me = null; }
-      run = { live: me, reply, streamed: new Set(), current: null, stopped: false, wrap, fromParent, first: null, last: null, result: null };
+      // asked: the message, which gets Claude Code's id for it (rewinding to it); agents: subagents by tool id;
+      // pending: tool ids waiting for their result (a new task's number)
+      run = { live: me, reply, asked, agents: new Map(), pending: new Map(), streamed: new Set(), current: null, stopped: false, wrap, fromParent, first: null, last: null, result: null };
       clearTimeout(me?.idle);
       send1({ kind: 'busy', busy: true, any: true });
       save();
@@ -395,10 +456,45 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       send1({ kind: 'update', id: run.reply.id, fields });
     }
 
+    // Claude's checklist after a TodoWrite / TaskCreate / TaskUpdate (null: not a list change)
+    function todosAfter(name, input = {}, toolId) {
+      const list = (run.reply.todos || state.todos || []).map(t => ({ ...t }));
+      if (name === 'TodoWrite') return (input.todos || []).slice(0, 50).map((t, n) => ({ id: String(n + 1), text: clip(t.content || t.subject, 160), active: clip(t.activeForm, 160), status: t.status || 'pending' }));
+      if (name === 'TaskCreate') {
+        // its number comes with the result; until then it's known by the tool call
+        const t = { id: `?${toolId}`, text: clip(input.subject || input.description, 160), active: clip(input.activeForm, 160), status: 'pending' };
+        run.pending.set(toolId, 'task');
+        return [...list, t].slice(-50);
+      }
+      if (name === 'TaskUpdate') {
+        const t = list.find(x => x.id === String(input.taskId));
+        if (!t) return null;
+        if (input.status === 'deleted') return list.filter(x => x !== t);
+        if (input.status) t.status = input.status;
+        if (input.subject) t.text = clip(input.subject, 160);
+        if (input.activeForm) t.active = clip(input.activeForm, 160);
+        return list;
+      }
+      return null;
+    }
+    function setTodos(list) {
+      if (!list) return;
+      state.todos = list;
+      update({ todos: list });
+    }
+    // a subagent's entry in the tool list: { agent: { id, type, text, steps, state } }
+    function agentUpdate(toolId, change) {
+      const tools = run.reply.tools.map(t => t?.agent?.id === toolId ? { agent: { ...t.agent, ...change(t.agent) } } : t);
+      update({ tools });
+    }
+    const resultText = c => typeof c === 'string' ? c : Array.isArray(c) ? c.map(b => b.text || '').join('\n') : '';
+
     function handle(ev) {
       if (!run) return;
       if (ev.session_id && ev.session_id !== state.sessionId) { state.sessionId = ev.session_id; }
+      const parent = ev.parent_tool_use_id || null; // set on a subagent's own messages
       if (ev.type === 'stream_event') {
+        if (parent) return;
         const e = ev.event || {};
         if (e.type === 'message_start') run.current = e.message?.id;
         if (e.type === 'content_block_delta' && e.delta?.type === 'text_delta') {
@@ -408,8 +504,37 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         }
         return;
       }
+      if (ev.type === 'user') {
+        const c = ev.message?.content;
+        const results = Array.isArray(c) ? c.filter(b => b.type === 'tool_result') : [];
+        // the message we sent, echoed back with its id: rewinding to it (and its files) uses that id
+        if (!results.length && !parent && ev.uuid && !run.asked.uuid) { run.asked.uuid = ev.uuid; return; }
+        if (ev.uuid && !parent) run.lastEntry = ev.uuid;
+        for (const r of results) {
+          if (run.agents.has(r.tool_use_id)) {
+            agentUpdate(r.tool_use_id, () => ({ state: r.is_error ? 'failed' : 'done' }));
+            run.agents.delete(r.tool_use_id);
+          }
+          if (run.pending.get(r.tool_use_id) === 'task') {
+            run.pending.delete(r.tool_use_id);
+            const n = resultText(r.content).match(/#?(\d+)/)?.[1];
+            const list = (run.reply.todos || []).map(t => t.id === `?${r.tool_use_id}` ? { ...t, id: n || t.id.slice(1, 9) } : t);
+            setTodos(r.is_error ? list.filter(t => t.id !== `?${r.tool_use_id}`) : list);
+          }
+        }
+        return;
+      }
       if (ev.type === 'assistant') {
         const msg = ev.message || {};
+        // a subagent's step goes under it, not in the reply
+        if (parent) {
+          if (!run.agents.has(parent)) return;
+          for (const block of msg.content || []) {
+            if (block.type === 'tool_use') agentUpdate(parent, a => ({ steps: [...a.steps, toolSummary(block.name, block.input)].slice(-40), count: (a.count || 0) + 1 }));
+          }
+          return;
+        }
+        if (ev.uuid) run.lastEntry = ev.uuid;
         // the first API call shows whether the cache was still warm, the last one how big the context is now
         if (msg.usage) { run.first ||= msg.usage; run.last = msg.usage; }
         for (const block of msg.content || []) {
@@ -417,9 +542,15 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
             run.reply.text += block.text;
             send1({ kind: 'delta', id: run.reply.id, text: block.text });
           }
-          if (block.type === 'tool_use' && block.name !== 'mcp__claudeos__approve') {
-            update({ tools: [...run.reply.tools, toolEntry(block.name, block.input)] });
+          if (block.type !== 'tool_use' || block.name === 'mcp__claudeos__approve') continue;
+          if (TODO_TOOLS.has(block.name)) { setTodos(todosAfter(block.name, block.input, block.id)); continue; }
+          if (AGENT_TOOLS.has(block.name)) {
+            const i = block.input || {};
+            run.agents.set(block.id, true);
+            update({ tools: [...run.reply.tools, { agent: { id: block.id, type: i.subagent_type || 'general-purpose', text: clip(i.description || i.prompt, 120), steps: [], count: 0, state: 'running', background: !!i.run_in_background } }] });
+            continue;
           }
+          update({ tools: [...run.reply.tools, toolEntry(block.name, block.input)] });
         }
         // separate text from consecutive assistant turns
         if (run.reply.text && !run.reply.text.endsWith('\n\n')) {
@@ -446,6 +577,14 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         emit({ kind: 'approval-done', id: aid, allowed: false });
       }
       const fields = { streaming: false, text: run.reply.text.trim() };
+      // the reply's last entry in Claude Code's session: a rewind to the message after it resumes here
+      if (run.lastEntry) fields.endUuid = run.lastEntry;
+      // the session has moved on from a rewind point once Claude got the message
+      if (run.live && run.asked.uuid) state.resumeAt = null;
+      // subagents still listed as running when the turn ended (stopped, or left in the background)
+      if (run.reply.tools.some(t => t?.agent?.state === 'running')) {
+        fields.tools = run.reply.tools.map(t => t?.agent?.state === 'running' && !t.agent.background ? { agent: { ...t.agent, state: run.stopped ? 'stopped' : 'done' } } : t);
+      }
       if (run.stopped) fields.note = 'Stopped.';
       if (error && !run.reply.error) fields.error = error;
       const usage = measure();
@@ -535,6 +674,61 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       if (run.live) killTree(run.live.proc); else finish(null);
     }
 
+    // Rewind: go back to one of your messages and send it again (retry) or changed (edit). The
+    // conversation picks up from the reply before it, and with files: true the files Claude changed
+    // since then go back to how they were (Claude Code's checkpoints).
+    async function rewind(msgId, { text = null, files = null, restoreFiles = false } = {}) {
+      if (run) return { error: 'Claude is still answering. Wait for it, or press Stop.' };
+      const i = state.messages.findIndex(m => m.id === msgId && m.role === 'user');
+      if (i < 0) return { error: 'That message is gone.' };
+      const m = state.messages[i];
+      if (m.wrap || m.from) return { error: 'Only your own messages can be edited or retried.' };
+      let prev = null;
+      for (let j = i - 1; j >= 0 && !prev; j--) if (state.messages[j].role === 'assistant' && !state.messages[j].carry) prev = state.messages[j];
+      if (prev && !prev.endUuid) return { error: 'This part of the chat is from before ClaudeOS could rewind. Edit a newer message, or start a new chat.' };
+      text = text == null ? m.text : String(text).trim();
+      files = files == null ? (m.files || []) : files;
+      if (!text && !files.length) return { error: 'Empty message.' };
+      let restored = null;
+      if (restoreFiles) {
+        if (!m.uuid || !state.sessionId) return { error: 'Claude Code has no checkpoint for that message, so its files can\'t be restored. Rewind without restoring files?' };
+        await coolAndWait();
+        restored = await rewindFiles(m.uuid);
+        if (restored.error) return restored;
+      } else await coolAndWait();
+      state.messages = state.messages.slice(0, i);
+      if (prev) state.resumeAt = prev.endUuid;
+      else { state.sessionId = null; state.resumeAt = null; state.context = null; }
+      state.todos = [...state.messages].reverse().find(x => x.todos)?.todos || null;
+      save();
+      send1({ kind: 'reset' });
+      const r = send(text, { files });
+      return r.error ? r : { ok: true, restored: restored?.text || null };
+    }
+    function coolAndWait() {
+      if (!live) return Promise.resolve();
+      const me = live;
+      live = null;
+      clearTimeout(me.idle);
+      return new Promise(resolve => {
+        if (me.proc.exitCode != null) return resolve();
+        me.proc.once('close', resolve);
+        killTree(me.proc);
+        setTimeout(resolve, 5000);
+      });
+    }
+    // claude --resume <session> --rewind-files <message id> puts the files back and exits
+    function rewindFiles(uuid) {
+      return new Promise(resolve => {
+        execFile('claude', ['--resume', state.sessionId, '--rewind-files', uuid], { cwd: state.folder || cwd, env: { ...process.env, ...CHECKPOINTS }, windowsHide: true, timeout: 120000 },
+          (err, stdout, stderr) => {
+            const text = String(stdout || '').trim();
+            if (err) resolve({ error: `Couldn't restore the files: ${(String(stderr || '').trim() || text || err.message).split('\n').pop()}` });
+            else resolve({ ok: true, text });
+          });
+      });
+    }
+
     // A brief is done: its reports go to the Manager as a message of their own, once the chat is free.
     // A side session's turn ends the same way. from: 'team' | 'session'
     function report(title, text, from = 'team') {
@@ -550,7 +744,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
 
     function snapshot() {
       return { id, title: index.chats[id]?.title || 'New chat', messages: state.messages, busy: !!run, context: state.context, folder: state.folder,
-        tools: state.tools || {}, parent: state.parent || null, mode: state.mode || '', options: state.options || {} };
+        tools: state.tools || {}, parent: state.parent || null, mode: state.mode || '', options: state.options || {}, todos: state.todos || null };
     }
     // an employee's own model and effort (the Manager's chats share the brain's, set with setOptions)
     function setOwnOptions({ model = '', effort = '' } = {}) {
@@ -615,7 +809,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     }
     // the text a search looks through
     const text = () => state.messages.map(m => m.text).join('\n');
-    return { id, send, stop, wrapUp, report, startWith, snapshot, text, setFolder, setTools, setMode, setupSession, setEmployee, setOwnOptions, parentOf, warm, cool, file,
+    return { id, send, stop, wrapUp, rewind, report, startWith, snapshot, text, setFolder, setTools, setMode, setupSession, setEmployee, setOwnOptions, parentOf, warm, cool, file,
       folder: () => state.folder || cwd, tools: () => state.tools || {},
       busy: () => !!run, empty: () => !state.messages.length, employee: () => state.employee,
       idleSince: () => (live && !run ? live.since : null) };
@@ -698,6 +892,20 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     listChanged();
     return { ok: true, text: `Started side session “${index.chats[c.id].title}” (id ${c.id}). It runs on its own; its report will come back to this chat as a message when it finishes. The user can open it from the Chats list.` };
   }
+  // A scheduled task's run: a new chat of its own in the Chats list, started with the task's prompt.
+  function startScheduled({ id: scheduleId, title, prompt, folder }) {
+    const busyRun = Object.entries(index.chats).find(([cid, m]) => m.schedule === scheduleId && convs.get(cid)?.busy());
+    if (busyRun) return { error: 'its last run is still working' };
+    if (folder) { try { if (!fs.statSync(folder).isDirectory()) throw 0; } catch { return { error: `no such folder: ${folder}` }; } }
+    const c = conv(newId());
+    c.setupSession({ parent: null, folder: folder && path.relative(path.resolve(folder), cwd) !== '' ? path.resolve(folder) : null, tools: {} });
+    const day = new Date().toLocaleDateString([], { month: 'short', day: 'numeric' });
+    index.chats[c.id] = { title: clip(`${title} · ${day}`, 70), renamed: true, created: Date.now(), updated: Date.now(), count: 0, schedule: scheduleId };
+    const r = c.send(String(prompt || ''), { from: 'schedule' });
+    if (r.error) { delete index.chats[c.id]; convs.delete(c.id); return r; }
+    listChanged();
+    return { ok: true, chat: c.id };
+  }
   function messageSession({ chat: parentId, session, message }) {
     const c = convs.get(String(session || ''));
     if (!c || c.parentOf() !== parentId) return { error: `No side session ${session} started from this chat.` };
@@ -769,17 +977,20 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
   function snapshot() {
     const c = current(), own = c.employee();
     return { ...c.snapshot(), approvals: [...approvals.values()].map(a => a.card), options: own ? c.snapshot().options : index.options || {}, any: anyBusy(),
-      employee: own ? { name: own.name, skill: own.skill, dept: own.dept } : null };
+      employee: own ? { name: own.name, skill: own.skill, dept: own.dept } : null, commands: index.commands || [] };
   }
 
   return {
     // the open chat
     send: (text, opts) => current().send(text, opts), stop: () => current().stop(), wrapUp: () => current().wrapUp(),
+    rewind: (msgId, opts) => current().rewind(msgId, opts),
     busy: () => current().busy(), currentId: () => current().id,
     // all of them
     setFolder: f => current().setFolder(f), setTools: t => current().setTools(t), setMode: m => current().setMode(m), warm: () => current().warm(), upload, attachmentFile,
-    startSession, messageSession, chatFolder, employeeChat, empChatId, view, owns: chatId => convs.has(chatId),
+    startSession, startScheduled, messageSession, chatFolder, employeeChat, empChatId, view, owns: chatId => convs.has(chatId),
     open, newChat, rename, remove, list, report, anyBusy, stopAll: () => { for (const c of convs.values()) { c.stop(); c.cool(); } },
+    // idle chats start a fresh Claude at their next message (new plugins, skills or settings load then)
+    coolAll: () => { for (const c of convs.values()) c.cool(); },
     setOptions, requestApproval, answerApproval, dropOthersApprovals, snapshot,
   };
 }

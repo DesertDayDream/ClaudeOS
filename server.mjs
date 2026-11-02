@@ -10,6 +10,9 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { exec } from 'node:child_process';
 import { createChat } from './chat.mjs';
+import { findFiles } from './files.mjs';
+import { createSchedules } from './schedules.mjs';
+import { createPlugins } from './plugins.mjs';
 import { runHandoff } from './handoff.mjs';
 import { createManager } from './manager.mjs';
 import { createTerminals } from './terminals.mjs';
@@ -346,9 +349,36 @@ async function desk(tool, a) {
     if (!r.error && a.rollback) return { text: `ClaudeOS goes back to the previous build ${r.waiting ? 'as soon as every chat (this one included) has finished its turn' : 'now'}. End your turn now; the page reloads by itself.` };
     return r.error ? r : { text: r.waiting ? 'ClaudeOS restarts into the new build as soon as every chat (this one included) has finished its turn. End your turn now; the page reloads by itself, and the user sees which build is running.' : 'ClaudeOS is restarting into the new build now.' };
   }
+  if (tool === 'show_preview') {
+    const url = String(a.url || '').trim();
+    if (!/^https?:\/\/[^\s]+$/i.test(url)) return { error: 'Give a full http:// or https:// address, like http://localhost:5173.' };
+    broadcast('preview-url', { url });
+    return { text: `Showing ${url} in the preview panel beside the chat.` };
+  }
+  if (tool === 'schedule_task') {
+    const folder = owner.chatFolder(a.chat);
+    const r = schedules.save(brainOfChat(owner), { title: a.title, prompt: a.prompt, repeat: a.repeat, time: a.time, date: a.date, day: a.day, every: a.every_hours, folder: a.folder || folder });
+    return r.error ? r : { text: `Scheduled “${r.task.title}” (id ${r.task.id}): ${r.task.when}. Next run ${r.task.nextRun ? new Date(r.task.nextRun).toLocaleString() : 'never'}. Each run is a new chat in this brain; ClaudeOS must be running. The user can change it from the ⏰ button in the chat.` };
+  }
+  if (tool === 'list_scheduled') {
+    const l = schedules.list(brainOfChat(owner));
+    return { text: l.length ? l.map(s => `- ${s.id}: ${s.title} · ${s.when}${s.enabled ? '' : ' (paused)'}${s.nextRun ? ` · next ${new Date(s.nextRun).toLocaleString()}` : ''}`).join('\n') : 'No scheduled tasks in this brain.' };
+  }
+  if (tool === 'delete_scheduled') { const r = schedules.remove(brainOfChat(owner), String(a.id || '')); return r.error ? r : { text: 'Deleted.' }; }
   if (tool === 'start_session') return owner.startSession(a);
   if (tool === 'message_session') return owner.messageSession(a);
   return { error: `Unknown desk tool ${tool}.` };
+}
+
+// The account's usage limits (5-hour and weekly windows), as Claude Code reports them with each reply.
+// Kept on disk so the page shows the last known numbers after a restart.
+const LIMITS_FILE = path.join(DATA, 'limits.json');
+let limits = null;
+try { limits = JSON.parse(fs.readFileSync(LIMITS_FILE, 'utf8')); } catch { /* none yet */ }
+function setLimits(info) {
+  limits = { ...info, at: Date.now() };
+  try { fs.writeFileSync(LIMITS_FILE, JSON.stringify(limits)); } catch { /* shown anyway */ }
+  broadcast('limits', limits);
 }
 
 // each brain's chats (any number, each its own conversation); the page shows the active brain's
@@ -363,7 +393,7 @@ function chatFor(brain) {
       othersWorking: () => managerFor(brain).busy(), team: () => teamOf(brain), projects: () => projectsOf(brain),
       // the chat is the Manager: when it stops, the Manager desk stops typing and unbriefed requests wait again
       onIdle: chatId => managerFor(brain).chatDone(chatId),
-      notify: n => notify({ ...n, brain: brain.name }) }));
+      notify: n => notify({ ...n, brain: brain.name }), onLimits: setLimits }));
   }
   return chats.get(brain.id);
 }
@@ -445,6 +475,12 @@ function managerFor(brain) {
   }
   return managers.get(brain.id);
 }
+// Claude Code plugins, browsed and installed from the page
+const plugins = createPlugins({ broadcast: (e, d) => broadcast(e, d) });
+// scheduled tasks: each run is a new chat in the task's brain
+const schedules = createSchedules({ file: path.join(DATA, 'schedules.json'), broadcast: (e, d) => broadcast(e, d),
+  run: s => { const b = brains.find(s.brain); return b ? chatFor(b).startScheduled(s) : { error: 'its brain is gone' }; } });
+const brainOfChat = owner => [...chats.entries()].find(([, c]) => c === owner)?.[0] || '';
 const anyBusy = () => [...chats.values()].some(c => c.anyBusy()) || [...managers.values()].some(m => m.busy());
 const memoryEditor = createMemoryEditor({ claudeDir: CLAUDE, dataDir: DATA, memoryFileOf });
 // only memories the active brain is showing right now can be opened, so an id can't reach other files
@@ -593,6 +629,15 @@ async function handleApi(req, res, url) {
   }
   if (url.pathname === '/api/integrations' && req.method === 'GET') return json(res, 200, integrationsView(active));
   if (url.pathname === '/api/chat' && req.method === 'GET') return json(res, 200, chat ? chat.snapshot() : { messages: [], busy: false, approvals: [] });
+  if (url.pathname === '/api/limits' && req.method === 'GET') return json(res, 200, { limits });
+  if (url.pathname === '/api/plugins' && req.method === 'GET') return json(res, 200, await plugins.view({ fresh: url.searchParams.get('fresh') === '1' }));
+  if (url.pathname === '/api/schedules' && req.method === 'GET') return json(res, 200, { list: active ? schedules.list(active.id) : [], folder: chat ? chat.chatFolder(chat.currentId()) : null });
+  // @mentions: files in the open chat's folder
+  if (url.pathname === '/api/chat/files' && req.method === 'GET') {
+    if (!chat) return json(res, 200, { files: [] });
+    const dir = chat.chatFolder(chat.currentId());
+    return json(res, 200, { dir, files: await findFiles(dir, url.searchParams.get('q') || '') });
+  }
   if (url.pathname === '/api/chats' && req.method === 'GET') return json(res, 200, chat ? chat.list(url.searchParams.get('q') || '') : { chats: [] });
   if (url.pathname === '/api/employee' && req.method === 'GET') return json(res, 200, active ? employeeView(active, url.searchParams.get('id') || '') : { error: 'Set up a brain first.' });
   if (url.pathname === '/api/manager' && req.method === 'GET') return json(res, 200, active ? managerFor(active).snapshot() : { inbox: [], files: [], briefs: [], busy: false });
@@ -634,6 +679,12 @@ async function handleApi(req, res, url) {
     if (r.error) return json(res, 200, r);
     if (desktop.settings().hotkey !== before) restartTray();
     return json(res, 200, await settingsView());
+  }
+  if (url.pathname.startsWith('/api/plugins/')) {
+    const act = { install: plugins.install, uninstall: plugins.uninstall, enable: plugins.enable, disable: plugins.disable, marketplace: plugins.marketplace }[url.pathname.slice('/api/plugins/'.length)];
+    const r = act ? await act(body) : { error: 'not found' };
+    if (r.ok) for (const c of chats.values()) c.coolAll();
+    return json(res, 200, r);
   }
   // the Terminal and Artifacts tabs
   if (url.pathname === '/api/terminal/run') return json(res, 200, terminals.run({ command: body.command, tab: body.tab, cwd: body.cwd || (active ? chatFor(active).chatFolder(chat.currentId()) : HOME) }));
@@ -702,6 +753,10 @@ async function handleApi(req, res, url) {
   }
   if (!chat && (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/brief' || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/handoff') || url.pathname.startsWith('/api/skills') || url.pathname === '/api/org' || url.pathname.startsWith('/api/employee'))) return json(res, 200, { error: 'Set up a brain first.' });
   if (url.pathname === '/api/chat') return json(res, 200, chat.send(body.text, { files: body.files }));
+  if (url.pathname === '/api/schedules/save') return json(res, 200, schedules.save(active.id, body));
+  if (url.pathname === '/api/schedules/delete') return json(res, 200, schedules.remove(active.id, String(body.id || '')));
+  if (url.pathname === '/api/schedules/run') return json(res, 200, await schedules.run(active.id, String(body.id || '')));
+  if (url.pathname === '/api/chat/rewind') return json(res, 200, await chat.rewind(String(body.id || ''), { text: body.text ?? null, files: Array.isArray(body.files) ? body.files : null, restoreFiles: !!body.restoreFiles }));
   if (url.pathname === '/api/chat/warm') { chat.warm(); return json(res, 200, { ok: true }); }
   if (url.pathname === '/api/chat/tools') return json(res, 200, chat.setTools(body.tools || {}));
   if (url.pathname === '/api/chat/mode') return json(res, 200, chat.setMode(String(body.mode || '')));
@@ -776,7 +831,7 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health'
     || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief' || url.pathname === '/api/org' || url.pathname.startsWith('/api/employee')
-    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname === '/api/git' || url.pathname.startsWith('/api/git/') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file' || url.pathname === '/api/preview' || url.pathname === '/api/settings' || url.pathname === '/api/update') {
+    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname === '/api/git' || url.pathname.startsWith('/api/git/') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file' || url.pathname === '/api/preview' || url.pathname === '/api/settings' || url.pathname === '/api/update' || url.pathname === '/api/limits' || url.pathname.startsWith('/api/schedules') || url.pathname.startsWith('/api/plugins')) {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));
   }
   if (url.pathname === '/api/state') {
