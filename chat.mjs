@@ -115,6 +115,8 @@ export function cleanOptions({ engine = '', model = '', effort = '', codexModel 
 }
 
 // No engine picked: Claude, unless this PC has only Codex (then the page shows Codex picked too).
+// each employee's own chat (kept out of the Chats list) has an id made from their skill's
+export const employeeChatId = skillId => 'emp-' + crypto.createHash('sha1').update(String(skillId)).digest('hex').slice(0, 12);
 export const withEngine = o => o.engine || defaultEngine() !== 'codex' ? o : { ...o, engine: 'codex' };
 
 export function toolSummary(name, input = {}) {
@@ -920,6 +922,9 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       if (r.error) return { ...r, options: state.options || {} };
       state.options = r.options;
       if (state.messages.length) save();
+      // kept in the index too, so the team view knows how they think before their first message
+      index.empOptions = { ...index.empOptions, [state.employee.id]: r.options };
+      saveIndex();
       cool();
       send1({ kind: 'options', options: state.options });
       return { ok: true, options: state.options };
@@ -1082,7 +1087,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
   }
   // ---------- an employee's own chat box ----------
   // One chat per employee, kept out of the Chats list. emp: { id, skill, name, invokeAs, dept, cabinet }
-  const empChatId = skillId => 'emp-' + crypto.createHash('sha1').update(String(skillId)).digest('hex').slice(0, 12);
+  const empChatId = employeeChatId;
   function employeeChat(emp) {
     const c = conv(empChatId(emp.id));
     c.setEmployee(emp);

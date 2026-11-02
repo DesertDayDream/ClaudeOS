@@ -8,6 +8,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { events } from '/events.js';
 import { APPS, appForServer, normServer } from './apps.js';
 import * as office from './office.js';
+import { mindScore, recordScore, intelligence, modelFamily } from './minds.js';
 
 const TOKEN = window.CLAUDEOS_TOKEN;
 async function api(path, body) {
@@ -411,6 +412,62 @@ function setBubble(s, text, color) {
   s.material.map.needsUpdate = true;
 }
 
+// ---------- how intelligent an employee is (minds.js) ----------
+// One score from the model and effort they think with, how their runs went, and their SKILL.md.
+const MODEL_NAMES = { fable: 'Fable', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' };
+function mindOf(s) {
+  const m = state.minds?.[s.id] || { engine: 'claude', model: '', effort: '', from: 'manager' };
+  const rec = recordScore(work.runs.get(s.id) || []);
+  const mind = mindScore(m);
+  const craft = s.craft ? s.craft.score : undefined;
+  const fam = modelFamily(m.model);
+  const model = m.engine === 'codex' ? `Codex ${m.model || 'default model'}` : fam ? MODEL_NAMES[fam] : m.model || 'Claude Code default model';
+  const from = m.modelFrom === 'skill' ? 'set in their SKILL.md' : m.from === 'own' ? 'their own pick' : "the Manager's pick";
+  return { score: intelligence({ mind, record: rec.score, craft }), mind, record: rec, craft, settings: m,
+    mindText: `${model} · ${m.effort ? m.effort + ' effort' : 'default effort'} (${from})` };
+}
+const scoreColor = n => n >= 75 ? '#7ee0a8' : n >= 50 ? '#f2c14e' : '#f08a7e';
+function mindTip(s) {
+  const i = mindOf(s), c = s.craft;
+  return `Intelligence ${i.score}/100\n• Model and effort: ${i.mindText}\n• Track record: ${i.record.runs ? `${i.record.done} of ${i.record.runs} runs done` : 'no runs yet'}`
+    + (c ? `\n• SKILL.md: ${c.words.toLocaleString()} words, ${c.sections} sections, ${c.examples} examples, ${c.files} bundled files` : '');
+}
+// the brain over their head, filled up to their score
+function brainSprite() {
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 112;
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false, opacity: 0.6 }));
+  s.scale.set(1.6, 0.7, 1);
+  s.position.y = 2.2;
+  s.userData = { canvas: c, score: null };
+  return s;
+}
+function drawBrain(sprite, score) {
+  if (sprite.userData.score === score) return;
+  sprite.userData.score = score;
+  const c = sprite.userData.canvas, g = c.getContext('2d');
+  g.clearRect(0, 0, c.width, c.height);
+  // the emoji, with the part above the score dimmed: a brain that fills up
+  const icon = document.createElement('canvas');
+  icon.width = icon.height = 104;
+  const ig = icon.getContext('2d');
+  ig.font = '84px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif';
+  ig.textAlign = 'center'; ig.textBaseline = 'middle';
+  ig.fillText('🧠', 52, 58);
+  const top = 12, bottom = 96, line = bottom - (bottom - top) * score / 100;
+  ig.globalCompositeOperation = 'source-atop';
+  ig.fillStyle = 'rgba(150,155,180,0.78)';
+  ig.fillRect(0, 0, icon.width, line);
+  g.drawImage(icon, 8, 4);
+  g.font = '700 58px system-ui, Segoe UI, sans-serif';
+  g.textBaseline = 'middle';
+  g.fillStyle = scoreColor(score);
+  g.fillText(String(score), 124, 60);
+  sprite.material.map.needsUpdate = true;
+}
+
 // ---------- apps an employee is connected to ----------
 // From its SKILL.md (integration tools it calls, or apps it names) and from the integrations
 // (MCP servers) it really used in its runs. Each is matched to the integrations Claude has here.
@@ -503,6 +560,8 @@ function addEmployee(skill, delay) {
   body.add(eyes);
   const label = labelSprite(employeeName(skill), skill.name, color);
   root.add(label);
+  const brainIcon = brainSprite();
+  root.add(brainIcon);
   const bubble = bubbleSprite();
   root.add(bubble);
   const appStrip = appsSprite();
@@ -533,7 +592,7 @@ function addEmployee(skill, delay) {
   }
   root.scale.setScalar(0.0001);
   empGroup.add(root);
-  employees.set(skill.id, { root, body, sphere, eyes, label, bubble, appStrip, color, aura, beam, sparks, station, screen, cabinet, data: skill, born: performance.now() + delay,
+  employees.set(skill.id, { root, body, sphere, eyes, label, brainIcon, bubble, appStrip, color, aura, beam, sparks, station, screen, cabinet, data: skill, born: performance.now() + delay,
     slot: 0, busyAmt: 0, blinkAt: performance.now() + 1500 + Math.random() * 4000, phase: Math.random() * 6 });
 }
 
@@ -900,7 +959,7 @@ function apply(next) {
   layoutEmployees(next.org);
 
   state = { ...next, skills: allSkills };
-  for (const e of employees.values()) drawApps(e.appStrip, appsOf(e.data));
+  for (const e of employees.values()) { drawApps(e.appStrip, appsOf(e.data)); drawBrain(e.brainIcon, mindOf(e.data).score); }
   firstLoad = false;
   if (selectWhenHired && employees.has(selectWhenHired)) { selected = selectWhenHired; selectWhenHired = null; }
   renderPanel();
@@ -928,7 +987,7 @@ function renderPanel() {
       : lastRun ? `<div class="now ${lastRun.status}">${esc(lastRun.prompt || 'a task')} · ${ago(lastRun.end || lastRun.last)}</div>` : '';
     return `<div class="emp ${busy ? 'busy' : ''} ${selected === s.id ? 'sel' : ''}" data-id="${esc(s.id)}"${s.source !== 'contractor' ? ' draggable="true"' : ''}>
       <div class="dot" style="background:${hex(SOURCE_COLORS[s.source] ?? SOURCE_COLORS.plugin)}"></div>
-      <div class="who">${esc(employeeName(s))}${appsOf(s).slice(0, 5).map(appBadge).join('')}</div>
+      <div class="who">${esc(employeeName(s))}<span class="iq" title="${esc(mindTip(s))}" style="color:${scoreColor(mindOf(s).score)}">🧠${mindOf(s).score}</span>${appsOf(s).slice(0, 5).map(appBadge).join('')}</div>
       <div class="load">${busy ? 'working' : n ? `${n} job${n > 1 ? 's' : ''}` : 'idle'}</div>
       <div class="role">${esc(s.name)}</div>${now}</div>`;
   };
@@ -1050,7 +1109,7 @@ const openRuns = new Set(); // runs whose full answer is showing
 function renderBoard(el, s) {
   let html = `${s.source === 'contractor' ? office.backBar() : office.tabs('profile')}<h3>${esc(employeeName(s))} · ${esc(s.name)}</h3>
     <div class="k">${esc(SOURCE_TITLES[s.source] || s.source)}${s.owner ? ' · ' + esc(s.owner) : ''} · ${work.load.get(s.id) || 0} jobs</div>
-    <div class="desc">${esc(s.description)}</div>`;
+    <div class="desc">${esc(s.description)}</div>${mindHtml(s)}`;
   const apps = appsOf(s);
   if (apps.length) {
     html += `<div class="runs-h">Apps</div><div class="apps-l">${apps.map(a => `<div class="row">${appBadge(a)}
@@ -1073,6 +1132,17 @@ function renderBoard(el, s) {
   }
   el.innerHTML = html;
   el.classList.add('board');
+}
+// Their intelligence and what it's made of, with what would raise it
+function mindHtml(s) {
+  const i = mindOf(s), c = s.craft;
+  const bar = (label, v, detail, tip) => `<div class="mbar" title="${esc(tip)}"><span>${label}</span><i><b style="width:${Math.round((v ?? 0) * 100)}%"></b></i><em>${v === undefined ? '–' : Math.round(v * 100)}</em><small>${esc(detail)}</small></div>`;
+  const r = i.record;
+  return `<div class="runs-h">Intelligence <b class="iqbig" style="color:${scoreColor(i.score)}">🧠 ${i.score}</b></div><div class="mind">
+    ${bar('Model', i.mind, i.mindText, 'A stronger model or more effort raises this. Pick them in their own chat box (their desk).')}
+    ${bar('Record', r.score, r.runs ? `${r.done} of ${r.runs} runs done${r.failed ? `, ${r.failed} failed` : ''}` : 'no runs yet: it grows as they finish work', 'Runs that finish well raise this; it counts more the more runs there are.')}
+    ${c ? bar('SKILL.md', c.score, `${c.words.toLocaleString()} words · ${c.sections} sections · ${c.examples} examples · ${c.files} files`, 'Clear instructions, a description that says when to use it, sections, steps, examples and bundled scripts raise this.') : ''}
+  </div>`;
 }
 // What the employee is on now, then the runs Claude handed them (from the activity hook)
 function runsHtml(s) {
@@ -1892,7 +1962,7 @@ function animate() {
     const guest = e.visitor && now < e.visitor.until && employees.get(e.visitor.id);
     if (guest && !busy) look = guest.body.getWorldPosition(visitLook);
     e.body.lookAt(look);
-    e.bubble.position.set(e.body.position.x, 2.25 + e.body.position.y - 0.28, e.body.position.z);
+    e.bubble.position.set(e.body.position.x, 2.85 + e.body.position.y - 0.28, e.body.position.z);
     if (busy !== e.screen.userData.busy || (busy && now - e.screen.userData.drawnAt > 110) || (!busy && now - e.screen.userData.drawnAt > 400)) {
       drawScreen(e.screen, busy, t);
       e.screen.userData.busy = busy;
@@ -1903,6 +1973,7 @@ function animate() {
     e.sphere.material.emissiveIntensity = 0.08 + e.busyAmt * (0.6 + Math.sin(t * 6 + e.phase) * 0.25);
     e.aura.material.opacity = e.busyAmt * 0.35;
     e.label.material.opacity = 0.5 + e.busyAmt * 0.45 + (selected === e.data.id ? 0.3 : 0);
+    e.brainIcon.material.opacity = Math.min(1, 0.6 + e.busyAmt * 0.35 + (selected === e.data.id ? 0.4 : 0));
     if (busy) setBubble(e.bubble, work.busy.get(e.data.id).prompt || 'working…', e.color);
     else if (talk) setBubble(e.bubble, talk, e.color);
     e.talkAmt = (e.talkAmt || 0) + (((talk && !busy) ? 1 : 0) - (e.talkAmt || 0)) * Math.min(1, dt * 4);

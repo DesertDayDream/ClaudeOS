@@ -9,7 +9,8 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { exec, spawn } from 'node:child_process';
-import { createChat } from './chat.mjs';
+import { createChat, employeeChatId, withEngine } from './chat.mjs';
+import { craftOf } from './public/minds.js';
 import { codexModels, codexStatus, codexCommand, codexLimits } from './codex.mjs';
 import { findFiles } from './files.mjs';
 import { createSchedules } from './schedules.mjs';
@@ -146,6 +147,22 @@ function collectBrain(brain) {
   return out;
 }
 
+// the other files a skill brings (scripts, references, assets), not counting SKILL.md
+function skillFiles(dir, max = 200) {
+  const out = [];
+  const walk = (d, depth) => {
+    let items;
+    try { items = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const it of items) {
+      if (out.length >= max || it.name.startsWith('.') || it.name === 'node_modules' || it.name === '__pycache__') continue;
+      const rel = path.relative(dir, path.join(d, it.name));
+      if (it.isDirectory()) { if (depth < 3) walk(path.join(d, it.name), depth + 1); } else if (rel !== 'SKILL.md') out.push(rel);
+    }
+  };
+  walk(dir, 0);
+  return out;
+}
+
 function skillsIn(dir, source, owner) {
   const out = [];
   for (const name of listDirs(dir)) {
@@ -163,6 +180,9 @@ function skillsIn(dir, source, owner) {
       description: fm.description || '',
       source, owner: owner || null, file,
       apps: appsInText(text), // integrations its SKILL.md uses or names
+      craft: craftOf(text, fm.description, skillFiles(path.join(dir, name))), // what its SKILL.md gives it to work with
+      // a model or effort the SKILL.md itself asks for
+      ...(fm.model && fm.model !== 'inherit' ? { model: fm.model } : {}), ...(fm.effort ? { effort: fm.effort } : {}),
       created: st ? Math.round(st.birthtimeMs || st.mtimeMs) : 0,
     });
   }
@@ -207,6 +227,42 @@ function collectSkills(brain) {
   skills.push(...teamSkills(brain));
   const seen = new Set();
   return skills.filter(s => !seen.has(s.id) && seen.add(s.id));
+}
+
+// How each employee thinks: the model and effort of their own chat box if they have one, else the Manager's
+// (whose chats hand them most work); a model in the SKILL.md wins. JSON files are read again only when they change.
+const jsonCache = new Map();
+function readJsonCached(file) {
+  const st = statSafe(file);
+  if (!st) return null;
+  const hit = jsonCache.get(file);
+  if (hit && hit.mtime === st.mtimeMs) return hit.value;
+  let value = null;
+  try { value = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* half-written: next time */ }
+  jsonCache.set(file, { mtime: st.mtimeMs, value });
+  return value;
+}
+function mindsOf(brain, skills) {
+  const dir = path.join(DATA, 'chats', brain.id);
+  const idx = readJsonCached(path.join(dir, 'index.json')) || {};
+  const user = readJsonCached(path.join(CLAUDE, 'settings.json')) || {};
+  const pick = o => o.engine === 'codex' ? { engine: 'codex', model: o.codexModel || '', effort: o.codexEffort || '' } : { engine: 'claude', model: o.model || '', effort: o.effort || '' };
+  const manager = pick(withEngine(idx.options || {}));
+  const out = {};
+  for (const s of skills) {
+    const ownOpts = idx.empOptions?.[s.id] || readJsonCached(path.join(dir, employeeChatId(s.id) + '.json'))?.options;
+    const own = ownOpts && (ownOpts.model || ownOpts.effort || ownOpts.engine || ownOpts.codexModel) ? pick(withEngine(ownOpts)) : null;
+    const base = own || manager;
+    const m = { engine: base.engine, model: base.model, effort: base.effort, from: own ? 'own' : 'manager' };
+    if (m.engine === 'claude') {
+      if (s.model) Object.assign(m, { model: s.model, modelFrom: 'skill' });
+      if (s.effort) Object.assign(m, { effort: s.effort, effortFrom: 'skill' });
+      if (!m.model && user.model) Object.assign(m, { model: user.model, modelFrom: 'settings' });
+      if (!m.effort && user.effortLevel) Object.assign(m, { effort: user.effortLevel, effortFrom: 'settings' });
+    }
+    out[s.id] = m;
+  }
+  return out;
 }
 
 function collectActivity(brain) {
@@ -275,6 +331,7 @@ function snapshot() {
     brain: { id: brain.id, name: brain.name, path: brain.path, home: !!brain.home },
     brains: list,
     memories: [...collectBrain(brain), ...collectMemories(brain)], skills, names: { ...nameSkills(skills) },
+    minds: mindsOf(brain, skills),
     // linked brains: their shared brain (read-only here), their own team, and whether they're working for us
     linked: brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, path: b.path, busy: handoffs.has(b.id),
       memories: collectBrain(b), skills: teamSkills(b) })),
@@ -336,7 +393,7 @@ let last = snapshot();
 let lastKey = keyOf(last);
 const clients = new Set();
 function keyOf(s) {
-  return JSON.stringify([s.brain?.id, s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id), s.activity.length && s.activity[s.activity.length - 1], s.org]);
+  return JSON.stringify([s.brain?.id, s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id + s.craft?.score), s.minds, s.activity.length && s.activity[s.activity.length - 1], s.org]);
 }
 function refresh() {
   checkIntegrations(brains.active());
