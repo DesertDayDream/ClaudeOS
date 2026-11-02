@@ -317,6 +317,7 @@ const gitPane = createGit();
 // GitHub (gh) and other sign-ins that aren't MCP servers; shown with the integrations
 const accounts = createAccounts({ open: url => openWindow(url, { appWindow: false }), broadcast: done => {
   if (done) broadcast('account-login', done);
+  broadcast('accounts', accounts.view());
   broadcast('integrations', integrationsView(brains.active()));
 } });
 const ARTIFACT_PORT = Number(process.env.ARTIFACT_PORT || PORT + 10);
@@ -614,6 +615,8 @@ async function handleApi(req, res, url) {
   }
   if (url.pathname === '/api/fs' && req.method === 'GET') return json(res, 200, listFolder(url.searchParams.get('dir') || ''));
   if (url.pathname === '/api/health' && req.method === 'GET') return json(res, 200, await health());
+  // sign-ins for this PC (Claude, Codex, GitHub); the sign-in screen uses them before any brain exists
+  if (url.pathname === '/api/accounts' && req.method === 'GET') return json(res, 200, { accounts: accounts.view() });
   const active = brains.active();
   const chat = active ? chatFor(active) : null;
   if (url.pathname === '/api/memory' && req.method === 'GET') {
@@ -680,6 +683,7 @@ async function handleApi(req, res, url) {
     return json(res, 200, await chat.upload(req, url.searchParams.get('name')));
   }
   const body = await readJson(req);
+  if (url.pathname === '/api/accounts') return json(res, 200, await accounts.act(String(body.key || ''), String(body.act || ''), body.code));
   // the desk tools a chat's Claude calls (approval-mcp.mjs), for whichever brain that chat is in
   if (url.pathname.startsWith('/api/desk/')) return json(res, 200, await desk(url.pathname.slice('/api/desk/'.length), body));
   // install the new build beside the exe, go back to the previous one, or stop waiting to
@@ -795,7 +799,7 @@ async function handleApi(req, res, url) {
       r = await saveKey(body.name, body.remove ? null : body.value, allowed);
     }
     else if (what === 'account') {
-      r = await accounts.act(String(body.key || ''), String(body.act || ''));
+      r = await accounts.act(String(body.key || ''), String(body.act || ''), body.code);
       broadcast('integrations', integrationsView(active));
       return json(res, 200, r);
     }
@@ -841,7 +845,7 @@ async function handleApi(req, res, url) {
 const server = http.createServer((req, res) => {
   if (!LOCAL_HOSTS.has(req.headers.host)) { res.writeHead(421); return res.end('wrong host'); }
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health'
+  if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health' || url.pathname === '/api/accounts'
     || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief' || url.pathname === '/api/org' || url.pathname.startsWith('/api/employee')
     || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname === '/api/git' || url.pathname.startsWith('/api/git/') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file' || url.pathname === '/api/preview' || url.pathname === '/api/settings' || url.pathname === '/api/update' || url.pathname === '/api/limits' || url.pathname.startsWith('/api/codex') || url.pathname.startsWith('/api/schedules') || url.pathname.startsWith('/api/plugins')) {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));

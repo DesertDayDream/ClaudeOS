@@ -1387,7 +1387,9 @@ events.addEventListener('integrations', e => {
 events.addEventListener('account-login', e => {
   const r = JSON.parse(e.data);
   if (r.cancelled) return;
-  toast(r.ok ? `Signed in to GitHub as ${r.user}` : 'GitHub sign-in didn’t finish', null, null, r.ok ? 'git push, pull requests and CI work from now on.' : r.text);
+  const t = r.title || 'GitHub';
+  toast(r.ok ? `Signed in to ${t} as ${r.user}` : `${t} sign-in didn’t finish`, null, null,
+    r.ok ? (r.key === 'claude' ? 'Your chats and employees run on this account.' : r.key === 'codex' ? 'Codex chats run on this account.' : 'git push, pull requests and CI work from now on.') : r.text);
 });
 // another part of the page (the Git tab) asks for the Apps panel
 document.addEventListener('claudeos:open-apps', () => openApps());
@@ -1418,20 +1420,23 @@ function renderAppsPanel(el) {
   let html = `<h3>Apps</h3><div class="k">What Claude can reach from ${esc(state.brain?.name || 'this brain')}. Employees use these through their skills.
     <button class="btn mini" data-ap="refresh" ${d.checking ? 'disabled' : ''}>${d.checking ? 'Checking…' : 'Refresh'}</button>
     <button class="btn mini" data-ap="plugins" title="Browse and install Claude Code plugins: skills, commands, agents and MCP servers from marketplaces">Plugins…</button></div>`;
-  // accounts for tools on this PC (GitHub's gh), each with a one-click sign-in
+  // accounts for this PC (Claude, Codex, GitHub's gh), each with a one-click sign-in and sign-out
   html += `<div class="runs-h">Accounts</div><div class="apps-l">`;
   for (const a of d.accounts || []) {
-    const st = a.readOnly ? (a.state === 'signed-in' ? `<em class="connected" title="${esc(a.switchHelp)}">signed in as ${esc(a.user)}</em>`
-        : a.state === 'missing' ? `<em class="failed">not installed</em><a class="btn mini" href="${esc(a.install)}" target="_blank" rel="noopener">Get it</a>`
-        : a.state === 'checking' ? '<em>checking…</em>'
-        : `<em class="needs">not signed in</em><button class="btn mini" data-ap="copy" data-text="${esc(a.signIn)}" title="Copy the sign-in command, then run it in the Terminal tab">Copy: ${esc(a.signIn)}</button>`)
-      : a.state === 'signed-in' ? `<em class="connected">signed in as ${esc(a.user)}</em><button class="btn mini" data-ap="acct" data-act="logout" data-key="${esc(a.key)}" title="Sign ${esc(a.user)} out of GitHub on this PC">Sign out</button>`
+    const st = a.state === 'signed-in' ? `<em class="connected">signed in as ${esc(a.user)}</em><button class="btn mini" data-ap="acct" data-act="logout" data-key="${esc(a.key)}" title="Sign ${esc(a.user)} out of ${esc(a.title)} on this PC">Sign out</button>`
       : a.state === 'missing' ? `<em class="failed">not installed</em><a class="btn mini" href="${esc(a.install)}" target="_blank" rel="noopener">Get it</a>`
       : a.state === 'checking' ? '<em>checking…</em>'
-      : a.flow ? `<em>waiting for GitHub…</em><button class="btn mini" data-ap="acct" data-act="cancel" data-key="${esc(a.key)}">Cancel</button>`
+      : a.flow ? `<em>waiting for ${a.ai ? 'your browser' : 'GitHub'}…</em><button class="btn mini" data-ap="acct" data-act="cancel" data-key="${esc(a.key)}">Cancel</button>`
       : `<em class="needs">${a.state === 'expired' ? `${esc(a.user)}'s sign-in expired` : 'not signed in'}</em><button class="btn mini primary" data-ap="acct" data-act="login" data-key="${esc(a.key)}">Sign in</button>`;
     html += `<div class="row">${logo(a.key, a.title, a.state !== 'signed-in')}<div><b>${esc(a.title)}</b><span>${esc(a.what)}</span></div><div class="acts">${st}</div></div>`;
-    if (a.flow?.code) html += `<div class="ap-box ap-code">Enter this code on the GitHub page that just opened:
+    // Claude / Codex: the CLI opens the sign-in page; the link is here too, and Claude's page may hand back a code to paste
+    if (a.ai && a.flow) html += `<div class="ap-box ap-code">${a.flow.url
+      ? `Finish signing in to ${esc(a.title)} in your browser. This finishes by itself.
+        <div class="code-line"><a class="btn mini" href="${esc(a.flow.url)}" target="_blank" rel="noopener">Open the sign-in page again</a></div>
+        ${a.flow.paste ? `<div class="note">If the page shows a code instead, paste it here:</div>
+        <div class="code-line"><input class="f" data-keyin="acct-${esc(a.key)}" placeholder="Code from the sign-in page" autocomplete="off" spellcheck="false"><button class="btn mini primary" data-ap="acctcode" data-key="${esc(a.key)}">Continue</button></div>` : ''}`
+      : `Starting the ${esc(a.title)} sign-in…`}</div>`;
+    else if (a.flow?.code) html += `<div class="ap-box ap-code">Enter this code on the GitHub page that just opened:
       <div class="code-line"><code class="otc">${esc(a.flow.code)}</code><button class="btn mini" data-ap="copy" data-text="${esc(a.flow.code)}">Copy</button><a class="btn mini" href="${esc(a.flow.url)}" target="_blank" rel="noopener">Open github.com/login/device</a></div>
       <div class="note">Then click Authorize. This finishes by itself, and git push uses the same sign-in.</div></div>`;
     else if (a.flow) html += `<div class="ap-box ap-code">Asking GitHub for a code…</div>`;
@@ -1496,7 +1501,19 @@ document.getElementById('detail').addEventListener('click', async e => {
   if (act === 'open') { appsPanel.open = appsPanel.open === btn.dataset.key ? null : btn.dataset.key; appsPanel.err = ''; return redraw(); }
   if (act === 'refresh') return api('/api/integrations/refresh', {});
   if (act === 'plugins') return document.dispatchEvent(new CustomEvent('claudeos:plugins'));
-  if (act === 'acct') { const r = await api('/api/integrations/account', { key: btn.dataset.key, act: btn.dataset.act }); if (r.error) toast(r.error); return; }
+  if (act === 'acct') {
+    if (btn.dataset.key === 'claude' && btn.dataset.act === 'logout'
+      && !confirm('Sign out of Claude on this PC?\n\nEvery chat and employee in ClaudeOS runs on this sign-in, so they stop working until you sign in again (Apps → Accounts → Sign in).')) return;
+    const r = await api('/api/integrations/account', { key: btn.dataset.key, act: btn.dataset.act });
+    if (r.error) toast(r.error);
+    return;
+  }
+  if (act === 'acctcode') {
+    const input = btn.closest('.ap-box')?.querySelector('[data-keyin]');
+    const r = await api('/api/integrations/account', { key: btn.dataset.key, act: 'code', code: input?.value || '' });
+    if (r.error) toast(r.error); else { btn.textContent = 'Checking…'; btn.disabled = true; }
+    return;
+  }
   if (act === 'copy') { navigator.clipboard?.writeText(btn.dataset.text).then(() => { btn.textContent = 'Copied'; }); return; }
   if (act === 'savekey' || act === 'rmkey') {
     const input = btn.closest('.ap-key')?.querySelector('[data-keyin]');

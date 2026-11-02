@@ -11,8 +11,9 @@ const run = (cmd, args, timeout = 20000) => new Promise(resolve =>
   execFile(cmd, args, { windowsHide: true, timeout }, (err, out, errOut) =>
     resolve({ ok: !err, missing: err?.code === 'ENOENT', text: String(out || '') + String(errOut || '') })));
 
-// Claude Code and Codex: which account each is signed in to here (shown only; signing Claude out
-// from inside ClaudeOS would stop its own chats, so that stays a terminal command).
+// Claude Code and Codex: which account each is signed in to here, with sign-in and sign-out.
+// Each CLI runs its own browser sign-in and keeps its own credentials; ClaudeOS only starts it,
+// shows the link, and (for Claude) passes on a code the sign-in page shows, if it asks for one.
 const plan = p => p ? ' · ' + p[0].toUpperCase() + p.slice(1) : '';
 
 async function claudeAccount() {
@@ -42,7 +43,21 @@ function codexAccount() {
   return j.OPENAI_API_KEY ? { state: 'signed-in', user: 'an OpenAI API key' } : { state: 'signed-out' };
 }
 
+// Codex comes from npm as codex.cmd, which needs the shell; the arguments are fixed text.
+const AI = {
+  claude: { name: 'Claude', cmd: 'claude', login: ['auth', 'login', '--claudeai'], logout: ['auth', 'logout'], shell: false,
+    url: /https:\/\/claude\.(?:com|ai)\/\S*oauth\S*/ },
+  codex: { name: 'Codex', cmd: 'codex', login: ['login'], logout: ['logout'], shell: process.platform === 'win32',
+    url: /https:\/\/auth\.openai\.com\/\S+/ },
+};
+// stop the CLI and anything it started (a shell's child keeps Codex's localhost port otherwise)
+function stop(proc) {
+  if (process.platform === 'win32' && proc.pid) execFile('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true }, () => {});
+  else proc.kill();
+}
+
 export function createAccounts({ broadcast, open }) {
+  const aiFlows = {}; // key -> { proc, url, text, timer, cancelled }
   let github = { state: 'checking' };
   let claudeAcct = { state: 'checking' };
   let codexAcct = { state: 'checking' };
@@ -67,14 +82,74 @@ export function createAccounts({ broadcast, open }) {
       what: 'Pushing to GitHub, pull requests and CI in the Git tab',
       install: 'https://cli.github.com',
     }, {
-      key: 'claude', title: 'Claude', ...claudeAcct, readOnly: true,
+      key: 'claude', title: 'Claude', ...claudeAcct, ai: true, flow: aiView('claude'),
       what: 'Claude Code, which runs your chats and employees',
-      install: 'https://claude.com/claude-code', signIn: 'claude auth login', switchHelp: 'To switch accounts: claude auth logout, then claude auth login',
+      install: 'https://claude.com/claude-code',
     }, {
-      key: 'codex', title: 'Codex', ...codexAcct, readOnly: true,
+      key: 'codex', title: 'Codex', ...codexAcct, ai: true, flow: aiView('codex'),
       what: 'OpenAI Codex, for chats that run on Codex',
-      install: 'https://developers.openai.com/codex/cli', signIn: 'codex login', switchHelp: 'To switch accounts: codex logout, then codex login',
+      install: 'https://developers.openai.com/codex/cli',
     }];
+  }
+  function aiView(key) {
+    const f = aiFlows[key];
+    return f ? { url: f.url, paste: key === 'claude', starting: !f.url } : null;
+  }
+
+  async function recheck(key) {
+    if (key === 'claude') claudeAcct = await claudeAccount();
+    else codexAcct = codexAccount();
+  }
+  const acctOf = key => key === 'claude' ? claudeAcct : codexAcct;
+
+  function aiLogin(key) {
+    const a = AI[key];
+    if (acctOf(key).state === 'missing') return { error: `${a.name} isn't installed on this PC.` };
+    if (aiFlows[key]) { if (aiFlows[key].url) open(aiFlows[key].url); return { ok: true, already: true }; }
+    const proc = spawn(a.cmd, a.login, { windowsHide: true, shell: a.shell, stdio: ['pipe', 'pipe', 'pipe'] });
+    const f = aiFlows[key] = { proc, url: '', text: '' };
+    // the CLI opens the browser itself; the page shows the link too, in case it didn't
+    const read = d => {
+      f.text = (f.text + d).slice(-4000);
+      const url = f.text.match(a.url)?.[0];
+      if (url && !f.url) { f.url = url; broadcast(); }
+    };
+    proc.stdout.on('data', read);
+    proc.stderr.on('data', read);
+    f.timer = setTimeout(() => stop(proc), 15 * 60 * 1000);
+    const finish = async () => {
+      if (aiFlows[key] !== f) return;
+      clearTimeout(f.timer);
+      delete aiFlows[key];
+      await recheck(key);
+      const now = acctOf(key);
+      broadcast({ key, title: a.name, ok: now.state === 'signed-in', user: now.user, cancelled: f.cancelled,
+        text: now.state === 'signed-in' ? '' : f.text.replace(/https?:\/\/\S+/g, '').replace(/^.*prompted >\s*/m, '').trim().split('\n').pop()?.slice(0, 200) });
+    };
+    proc.on('exit', finish);
+    proc.on('error', err => { f.text += err.message; finish(); });
+    broadcast();
+    return { ok: true };
+  }
+
+  // the code Claude's sign-in page shows when it can't hand the sign-in back by itself
+  function aiCode(key, code) {
+    const f = aiFlows[key];
+    code = String(code || '').trim();
+    if (!f) return { error: 'No sign-in is running. Press Sign in again.' };
+    if (!/^[\w#.~-]{8,400}$/.test(code)) return { error: "That doesn't look like a sign-in code. Copy the whole code from the page." };
+    f.proc.stdin.write(code + '\n');
+    return { ok: true };
+  }
+
+  async function aiLogout(key) {
+    const a = AI[key];
+    if (aiFlows[key]) { aiFlows[key].cancelled = true; stop(aiFlows[key].proc); }
+    const r = await new Promise(resolve => execFile(a.cmd, a.logout, { windowsHide: true, shell: a.shell, timeout: 20000 },
+      (err, out, errOut) => resolve({ ok: !err, text: String(out || '') + String(errOut || '') })));
+    await recheck(key);
+    broadcast();
+    return acctOf(key).state !== 'signed-in' ? { ok: true } : { error: r.text.trim().split('\n').pop() || `${a.name} sign-out failed.` };
   }
 
   function login() {
@@ -125,7 +200,15 @@ export function createAccounts({ broadcast, open }) {
     return r.ok || github.state === 'signed-out' ? { ok: true } : { error: r.text.trim().split('\n').pop() || 'GitHub sign-out failed.' };
   }
 
-  async function act(key, what) {
+  async function act(key, what, code) {
+    if (AI[key]) {
+      if (what === 'login') return aiLogin(key);
+      if (what === 'code') return aiCode(key, code);
+      if (what === 'cancel') { const f = aiFlows[key]; if (f) { f.cancelled = true; stop(f.proc); } return { ok: true }; }
+      if (what === 'logout') return aiLogout(key);
+      if (what === 'check') { await recheck(key); broadcast(); return { ok: true }; }
+      return { error: 'Unknown action.' };
+    }
     if (key !== 'github') return { error: 'Unknown account.' };
     if (what === 'login') return login();
     if (what === 'cancel') return cancel();

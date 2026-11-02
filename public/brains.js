@@ -1,5 +1,6 @@
 // Brain switcher: switch between brains, create a new one, or set up an existing folder as one.
-// On first run (no brains yet) it opens the welcome screen instead.
+// On first run (no brains yet) it opens the welcome screen instead, after the Claude sign-in screen
+// if this PC isn't signed in to Claude yet.
 import { events } from '/events.js';
 
 const TOKEN = window.CLAUDEOS_TOKEN;
@@ -40,7 +41,7 @@ events.addEventListener('message', ev => {
     if (modal?.dataset.kind === 'welcome') closeModal();
   } else {
     document.title = 'ClaudeOS';
-    if (!modal) welcome();
+    if (!modal) needsSignIn() ? signinDialog() : welcome();
   }
   if (!menu.hidden) renderMenu();
 });
@@ -66,7 +67,7 @@ function openMenu(open) {
 }
 btn.addEventListener('click', e => { e.stopPropagation(); openMenu(menu.hidden); });
 document.addEventListener('click', e => { if (!menu.hidden && !menu.contains(e.target)) openMenu(false); });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') { openMenu(false); if (modal?.dataset.kind !== 'welcome') closeModal(); } });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { openMenu(false); if (modal && modal.dataset.kind !== 'welcome') closeModal(); } });
 
 menu.addEventListener('click', async e => {
   const rm = e.target.closest('[data-rm]');
@@ -90,14 +91,18 @@ menu.addEventListener('click', async e => {
 
 // ---------- dialogs ----------
 let modal = null;
-function closeModal() { modal?.remove(); modal = null; if (!current && list.length === 0) welcome(); }
+function closeModal() {
+  if (modal?.dataset.kind === 'signin') signinSkipped = true;
+  modal?.remove(); modal = null;
+  if (!current && list.length === 0) welcome();
+}
 function showModal(html, kind) {
   modal?.remove();
   modal = document.createElement('div');
   modal.className = 'modal';
   modal.dataset.kind = kind;
   modal.innerHTML = `<div class="dialog" role="dialog" aria-modal="true">${html}</div>`;
-  if (kind !== 'welcome') modal.addEventListener('mousedown', e => { if (e.target === modal) closeModal(); });
+  if (kind !== 'welcome' && kind !== 'signin') modal.addEventListener('mousedown', e => { if (e.target === modal) closeModal(); });
   document.body.appendChild(modal);
   return modal.querySelector('.dialog');
 }
@@ -181,6 +186,71 @@ async function newDialog({ first = false } = {}) {
   };
 }
 const welcome = () => newDialog({ first: true });
+
+// ---------- Claude sign-in ----------
+// Every chat and employee runs on Claude Code's sign-in, so a PC without one gets this screen first:
+// on a new install before the welcome screen, and on any later start while signed out.
+// "Skip for now" lasts until ClaudeOS is opened again.
+let claudeAcct = null;
+let signinSkipped = sessionStorage.getItem('claudeos.signinSkipped') === '1';
+const needsSignIn = () => !signinSkipped && !!claudeAcct && ['signed-out', 'expired', 'missing'].includes(claudeAcct.state);
+
+function setAccounts(accounts) {
+  claudeAcct = (accounts || []).find(a => a.key === 'claude') || null;
+  if (modal?.dataset.kind === 'signin') {
+    if (claudeAcct?.state === 'signed-in') { modal.remove(); modal = null; if (!current && list.length === 0) welcome(); }
+    else signinDialog();
+  } else if ((!modal || modal.dataset.kind === 'welcome') && needsSignIn()) signinDialog();
+}
+api('/api/accounts').then(r => setAccounts(r.accounts));
+events.addEventListener('accounts', e => setAccounts(JSON.parse(e.data)));
+
+function signinDialog() {
+  const a = claudeAcct || { state: 'checking' };
+  const f = a.flow;
+  // a redraw (the sign-in moving on) keeps a half-pasted code
+  const old = modal?.dataset.kind === 'signin' && modal.querySelector('#siCode');
+  const typed = old?.value || '', focused = old && document.activeElement === old;
+  const body = a.state === 'missing'
+    ? `<div class="note warn">Claude Code isn't installed on this PC yet. Install it from <a href="https://claude.com/claude-code" target="_blank" rel="noopener">claude.com/claude-code</a>, then press Check again.</div>`
+    : f?.url ? `<div class="note">Finish signing in in your browser. This screen moves on by itself once you're in.
+        <div class="code-line"><a class="btn mini" href="${esc(f.url)}" target="_blank" rel="noopener">Open the sign-in page again</a></div></div>
+      <label for="siCode">If the page shows a code instead, paste it here</label>
+      <div class="code-line"><input type="text" id="siCode" placeholder="Code from the sign-in page" autocomplete="off" spellcheck="false"><button class="btn primary" id="siSend">Continue</button></div>`
+    : f ? `<div class="note">Opening the Claude sign-in page in your browser…</div>`
+    : `<div class="note">Use the account with your Claude subscription (Pro, Max, Team or Enterprise). The sign-in page opens in your browser; ClaudeOS never sees your password.</div>`;
+  const main = a.state === 'missing' ? '<button class="btn primary" id="siCheck">Check again</button>'
+    : f ? '<button class="btn" id="siCancel">Cancel</button>'
+    : `<button class="btn primary" id="siGo" ${a.state === 'checking' ? 'disabled' : ''}>Sign in with Claude</button>`;
+  const d = showModal(`
+    <h2>Sign in to Claude</h2>
+    <p class="sub">ClaudeOS runs on Claude: every chat, memory and employee uses your Claude account. Sign in once and this PC stays signed in.</p>
+    ${body}
+    <div class="actions"><span class="msg-err" id="siErr"></span><button class="btn" data-skip>Skip for now</button>${main}</div>`, 'signin');
+  const err = d.querySelector('#siErr');
+  const act = async (what, extra) => {
+    err.textContent = '';
+    const r = await api('/api/accounts', { key: 'claude', act: what, ...extra });
+    if (r.error) err.textContent = r.error;
+    return r;
+  };
+  d.querySelector('[data-skip]').onclick = () => { sessionStorage.setItem('claudeos.signinSkipped', '1'); closeModal(); };
+  d.querySelector('#siGo')?.addEventListener('click', () => act('login'));
+  d.querySelector('#siCancel')?.addEventListener('click', () => act('cancel'));
+  d.querySelector('#siCheck')?.addEventListener('click', () => act('check'));
+  const code = d.querySelector('#siCode');
+  if (code) {
+    code.value = typed;
+    if (focused) code.focus();
+    const send = async () => {
+      const b = d.querySelector('#siSend');
+      const r = await act('code', { code: code.value });
+      if (!r.error) { b.textContent = 'Checking…'; b.disabled = true; }
+    };
+    d.querySelector('#siSend').onclick = send;
+    code.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+  }
+}
 
 // Which other brains the current one is linked to. A link goes one way: this brain gets to use the other.
 function linkDialog() {
