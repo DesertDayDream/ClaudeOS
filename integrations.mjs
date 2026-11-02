@@ -97,3 +97,93 @@ export function loginIntegration(brain, server, onDone) {
   return { ok: true };
 }
 export const isSigningIn = server => signingIn.has(server);
+
+// ---------- API keys ----------
+// Some apps sign in with a key instead of a browser: their config says `Bearer ${FAL_KEY}` and
+// Claude Code fills it in from the environment. These find the ${NAME}s an integration needs and
+// save a pasted key as a Windows user variable (and in ClaudeOS's own environment, which every chat
+// inherits from its next message). The key is never written to a log or sent back to the page.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+// where to get a key, for the ones we know
+export const KEY_HELP = {
+  FAL_KEY: 'https://fal.ai/dashboard/keys',
+  OPENAI_API_KEY: 'https://platform.openai.com/api-keys',
+  ANTHROPIC_API_KEY: 'https://console.anthropic.com/settings/keys',
+  GITHUB_TOKEN: 'https://github.com/settings/tokens',
+  GITHUB_PERSONAL_ACCESS_TOKEN: 'https://github.com/settings/tokens',
+  ELEVENLABS_API_KEY: 'https://elevenlabs.io/app/settings/api-keys',
+  REPLICATE_API_TOKEN: 'https://replicate.com/account/api-tokens',
+  BRAVE_API_KEY: 'https://api-dashboard.search.brave.com/app/keys',
+};
+const readJson = file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
+const norm = p => String(p || '').replace(/[\\]/g, '/').replace(/\/+$/, '').toLowerCase();
+
+// the config Claude Code uses for one server: a plugin's, the brain's .mcp.json, or ~/.claude.json
+function serverConfig(brainPath, server) {
+  const home = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+  const plugin = server.match(/^plugin:([^:]+):(.+)$/);
+  if (plugin) {
+    const installed = readJson(path.join(home, 'plugins', 'installed_plugins.json'))?.plugins || {};
+    for (const [id, installs] of Object.entries(installed)) {
+      if (id.split('@')[0] !== plugin[1]) continue;
+      for (const { installPath } of installs || []) {
+        const fromFile = readJson(path.join(installPath, '.mcp.json'));
+        const manifest = readJson(path.join(installPath, '.claude-plugin', 'plugin.json'))?.mcpServers;
+        for (const c of [fromFile?.mcpServers || fromFile, typeof manifest === 'object' ? manifest : null, typeof manifest === 'string' ? readJson(path.join(installPath, manifest))?.mcpServers : null]) {
+          if (c?.[plugin[2]]) return c[plugin[2]];
+        }
+      }
+    }
+    return null;
+  }
+  const project = readJson(path.join(brainPath, '.mcp.json'))?.mcpServers?.[server];
+  const user = readJson(path.join(os.homedir(), '.claude.json'));
+  const local = Object.entries(user?.projects || {}).find(([p]) => norm(p) === norm(brainPath))?.[1]?.mcpServers?.[server];
+  return local || project || user?.mcpServers?.[server] || null;
+}
+
+// the ${NAME}s a server needs that have no default (${NAME:-default} works without one)
+export function keysFor(brainPath, server) {
+  if (/^claude\.ai /.test(server)) return [];
+  const cfg = serverConfig(brainPath, server);
+  if (!cfg) return [];
+  const names = new Set();
+  for (const m of JSON.stringify(cfg).matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}/g)) if (!m[2]) names.add(m[1]);
+  // a stdio server given an empty -e KEY= needs that key too
+  for (const [k, v] of Object.entries(cfg.env || {})) if (v === '' && /key|token|secret/i.test(k)) names.add(k);
+  return [...names];
+}
+
+const KEY_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const PROTECTED = /^(PATH|PATHEXT|COMSPEC|SYSTEMROOT|WINDIR|TEMP|TMP|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|PSMODULEPATH|NODE_OPTIONS|CLAUDEOS_.*|CLAUDE_CONFIG_DIR)$/i;
+
+// Saves (or with value null, removes) a key. `allowed` is the names the integrations need: nothing else can be set.
+export function saveKey(name, value, allowed) {
+  name = String(name || '');
+  if (!KEY_NAME.test(name) || PROTECTED.test(name) || !allowed.includes(name)) return Promise.resolve({ error: 'No integration here needs that key.' });
+  if (value != null) {
+    value = String(value).trim();
+    if (!value) return Promise.resolve({ error: 'Paste the key first.' });
+    if (/[\r\n]/.test(value) || value.length > 8192) return Promise.resolve({ error: 'That doesn’t look like a key (it has line breaks or is very long).' });
+  }
+  // the value goes through stdin, never on a command line other programs can read
+  const script = value == null
+    ? `[Environment]::SetEnvironmentVariable($env:K_NAME, $null, 'User')`
+    : `$v = [Console]::In.ReadToEnd(); [Environment]::SetEnvironmentVariable($env:K_NAME, $v, 'User')`;
+  return new Promise(resolve => {
+    const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+      { windowsHide: true, env: { ...process.env, K_NAME: name }, stdio: ['pipe', 'ignore', 'pipe'] });
+    let err = '';
+    ps.stderr.on('data', d => { err += d; });
+    ps.on('error', e => resolve({ error: e.message }));
+    ps.on('exit', code => {
+      if (code !== 0) return resolve({ error: `Windows didn't save it: ${err.trim().split('\n').pop() || code}` });
+      if (value == null) delete process.env[name]; else process.env[name] = value;
+      resolve({ ok: true });
+    });
+    ps.stdin.end(value ?? '');
+  });
+}

@@ -85,7 +85,7 @@ function draw() {
 
   let prs, ci;
   if (!gh) prs = ci = '<div class="gnone">Loading from GitHub…</div>';
-  else if (gh.error) prs = ci = `<div class="gnone">${esc(gh.error)}</div>`;
+  else if (gh.error) prs = ci = `<div class="gnone">${esc(gh.error)}${gh.signIn ? ' <button type="button" class="btn mini primary" data-act="ghlogin">Sign in to GitHub</button>' : ''}</div>`;
   else {
     const cur = gh.current;
     const curHtml = cur ? `<div class="gpr cur"><div class="gpr-t"><a href="${esc(cur.url)}" target="_blank" rel="noopener">#${cur.number} ${esc(cur.title)}</a></div>
@@ -156,6 +156,8 @@ el.addEventListener('click', async e => {
   const b = e.target.closest('[data-act]');
   if (!b) return;
   const a = b.dataset.act, p = b.dataset.path;
+  // the sign-in runs in the Apps panel, which shows GitHub's one-time code
+  if (a === 'ghlogin') { document.dispatchEvent(new CustomEvent('claudeos:open-apps')); const r = await api('/api/integrations/account', { key: 'github', act: 'login' }); if (r.error) alert(r.error); return; }
   if (a === 'refresh') { busy = 'refresh'; draw(); await refreshDiffs(); busy = ''; return load({ github: true, fresh: true }); }
   if (a === 'pick') {
     let recent = [];

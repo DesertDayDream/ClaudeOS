@@ -82,8 +82,7 @@ export function createGit() {
     if (list.missing) value = { error: 'GitHub CLI (gh) is not installed. Get it from cli.github.com to see pull requests and CI here.' };
     else if (!list.ok) {
       const e = list.err;
-      value = { error: /auth login|not logged|authentication/i.test(e) ? 'Sign in to GitHub once: run `gh auth login` in the Terminal tab.'
-        : /no git remotes|none of the git remotes|not a github/i.test(e) ? 'This repository has no GitHub remote, so there are no pull requests or CI runs to show.'
+      value = /auth login|not logged|authentication/i.test(e) ? { error: 'Sign in to GitHub once to see pull requests and CI here.', signIn: true } : { error: /no git remotes|none of the git remotes|not a github/i.test(e) ? 'This repository has no GitHub remote, so there are no pull requests or CI runs to show.'
         : firstLine(e) };
     } else {
       const parse = s => { try { return JSON.parse(s); } catch { return null; } };

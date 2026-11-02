@@ -22,7 +22,8 @@ import { createSkillEditor } from './skill-edit.mjs';
 import { createOrg } from './org.mjs';
 import { ensureCabinet, findCabinet, cabinetTree } from './cabinets.mjs';
 import { appsInText, appForServer } from './public/apps.js';
-import { CATALOG, CONNECTORS_URL, addIntegration, removeIntegration, loginIntegration, isSigningIn } from './integrations.mjs';
+import { CATALOG, CONNECTORS_URL, KEY_HELP, addIntegration, removeIntegration, loginIntegration, isSigningIn, keysFor, saveKey } from './integrations.mjs';
+import { createAccounts } from './accounts.mjs';
 import { createRegistry, setupBrain, repairHooks, listFolder, slugFor, samePath, inside } from './brains.mjs';
 import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile } from './runtime.mjs';
 import { startTray } from './tray.mjs';
@@ -250,7 +251,9 @@ function checkIntegrations(brain, force) {
       const tail = line.slice(dash + 3);
       const status = /✔|connected/i.test(tail) && !/fail|not connected/i.test(tail) ? 'connected'
         : /approv/i.test(tail) ? 'needs approval' : /fail/i.test(tail) ? 'failed' : /auth/i.test(tail) ? 'needs sign-in' : 'failed';
-      list.push({ server, key: appForServer(server), status, detail: tail.replace(/^[^\w]+/, '').slice(0, 200) });
+      // keys it reads from the environment (${FAL_KEY}), and whether the browser sign-in can fix it
+      const keys = status === 'connected' ? [] : keysFor(brain.path, server);
+      list.push({ server, key: appForServer(server), status, keys, remote: /https?:\/\//.test(line.slice(at, dash)), detail: tail.replace(/^[^\w]+/, '').slice(0, 200) });
     }
     const again = integrations.again;
     integrations = { brainId: brain.id, at: Date.now(), list: err && !list.length ? integrations.list : list, running: false };
@@ -261,8 +264,9 @@ function checkIntegrations(brain, force) {
 }
 function integrationsView(brain) {
   const list = integrations.brainId === brain?.id ? integrations.list : [];
-  return { list: list.map(i => ({ ...i, signingIn: isSigningIn(i.server) })), checking: integrations.running,
-    checked: integrations.brainId === brain?.id ? integrations.at : 0, catalog: CATALOG, connectorsUrl: CONNECTORS_URL };
+  return { list: list.map(i => ({ ...i, signingIn: isSigningIn(i.server), keys: (i.keys || []).map(name => ({ name, set: !!process.env[name], help: KEY_HELP[name] || '' })) })),
+    checking: integrations.running, checked: integrations.brainId === brain?.id ? integrations.at : 0, catalog: CATALOG, connectorsUrl: CONNECTORS_URL,
+    accounts: accounts.view() };
 }
 // the page asks for a fresh check after changing something; a check already running counts
 function recheck(brain) {
@@ -306,6 +310,11 @@ const LOCAL_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`]);
 // (served on their own port, so a page can never reach this one's token or API).
 const terminals = createTerminals({ broadcast, data: DATA });
 const gitPane = createGit();
+// GitHub (gh) and other sign-ins that aren't MCP servers; shown with the integrations
+const accounts = createAccounts({ open: url => openWindow(url, { appWindow: false }), broadcast: done => {
+  if (done) broadcast('account-login', done);
+  broadcast('integrations', integrationsView(brains.active()));
+} });
 const ARTIFACT_PORT = Number(process.env.ARTIFACT_PORT || PORT + 10);
 const previews = createPreviews({ port: () => ARTIFACT_PORT, broadcast });
 const artifacts = createArtifacts({ dir: path.join(DATA, 'artifacts'), port: ARTIFACT_PORT, broadcast, extra: previews.handle });
@@ -710,9 +719,19 @@ async function handleApi(req, res, url) {
     if (!active) return json(res, 200, { error: 'Set up a brain first.' });
     const what = url.pathname.split('/').pop();
     let r;
-    if (what === 'refresh') r = { ok: true };
+    if (what === 'refresh') { r = { ok: true }; accounts.check(); }
     else if (what === 'add') r = await addIntegration(active, body);
     else if (what === 'remove') r = await removeIntegration(active, String(body.server || ''));
+    // an API key an integration needs (only names an integration here asks for can be set)
+    else if (what === 'key') {
+      const allowed = integrations.brainId === active.id ? integrations.list.flatMap(i => i.keys || []) : [];
+      r = await saveKey(body.name, body.remove ? null : body.value, allowed);
+    }
+    else if (what === 'account') {
+      r = await accounts.act(String(body.key || ''), String(body.act || ''));
+      broadcast('integrations', integrationsView(active));
+      return json(res, 200, r);
+    }
     else if (what === 'login') {
       const server = String(body.server || '');
       if (!/^[\w.: -]{1,80}$/.test(server)) return json(res, 200, { error: 'Unknown integration.' });

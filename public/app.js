@@ -1373,6 +1373,13 @@ events.addEventListener('integrations', e => {
   appsPanel.data = JSON.parse(e.data);
   if (selected === APPS_PANEL) renderDetail();
 });
+events.addEventListener('account-login', e => {
+  const r = JSON.parse(e.data);
+  if (r.cancelled) return;
+  toast(r.ok ? `Signed in to GitHub as ${r.user}` : 'GitHub sign-in didn’t finish', null, null, r.ok ? 'git push, pull requests and CI work from now on.' : r.text);
+});
+// another part of the page (the Git tab) asks for the Apps panel
+document.addEventListener('claudeos:open-apps', () => openApps());
 events.addEventListener('integration-login', e => {
   const r = JSON.parse(e.data);
   toast(r.ok ? `Signed in: ${r.server}` : `Sign-in didn't finish for ${r.server}`, null, null, r.ok ? 'Its employees can use it from your next message.' : r.text);
@@ -1386,10 +1393,12 @@ function logo(key, fallback, off) {
 function renderAppsPanel(el) {
   const d = appsPanel.data;
   // live updates re-render the panel; keep a half-filled form as it is
-  const sig = JSON.stringify([d?.list, d?.checking, appsPanel.open, appsPanel.err, appsPanel.busy, appsPanel.scope]);
+  const sig = JSON.stringify([d?.list, d?.accounts, d?.checking, appsPanel.open, appsPanel.err, appsPanel.busy, appsPanel.scope]);
   if (el.dataset.mode === 'apps' && appsPanel.drawn === sig) return;
   const typing = el.querySelector('#apName, #apTarget, #apExtra');
   const keep = typing && { name: el.querySelector('#apName')?.value, target: el.querySelector('#apTarget')?.value, extra: el.querySelector('#apExtra')?.value };
+  // a key half pasted in survives the redraw too
+  const keysTyped = Object.fromEntries([...el.querySelectorAll('[data-keyin]')].filter(i => i.value).map(i => [i.dataset.keyin, i.value]));
   appsPanel.drawn = sig;
   el.dataset.mode = 'apps';
   delete el.dataset.for;
@@ -1397,16 +1406,39 @@ function renderAppsPanel(el) {
   const have = new Set(d.list.map(i => i.key).filter(Boolean));
   let html = `<h3>Apps</h3><div class="k">What Claude can reach from ${esc(state.brain?.name || 'this brain')}. Employees use these through their skills.
     <button class="btn mini" data-ap="refresh" ${d.checking ? 'disabled' : ''}>${d.checking ? 'Checking…' : 'Refresh'}</button></div>`;
+  // accounts for tools on this PC (GitHub's gh), each with a one-click sign-in
+  html += `<div class="runs-h">Accounts</div><div class="apps-l">`;
+  for (const a of d.accounts || []) {
+    const st = a.state === 'signed-in' ? `<em class="connected">signed in as ${esc(a.user)}</em><button class="btn mini" data-ap="acct" data-act="logout" data-key="${esc(a.key)}" title="Sign ${esc(a.user)} out of GitHub on this PC">Sign out</button>`
+      : a.state === 'missing' ? `<em class="failed">not installed</em><a class="btn mini" href="${esc(a.install)}" target="_blank" rel="noopener">Get it</a>`
+      : a.state === 'checking' ? '<em>checking…</em>'
+      : a.flow ? `<em>waiting for GitHub…</em><button class="btn mini" data-ap="acct" data-act="cancel" data-key="${esc(a.key)}">Cancel</button>`
+      : `<em class="needs">${a.state === 'expired' ? `${esc(a.user)}'s sign-in expired` : 'not signed in'}</em><button class="btn mini primary" data-ap="acct" data-act="login" data-key="${esc(a.key)}">Sign in</button>`;
+    html += `<div class="row">${logo(a.key, a.title, a.state !== 'signed-in')}<div><b>${esc(a.title)}</b><span>${esc(a.what)}</span></div><div class="acts">${st}</div></div>`;
+    if (a.flow?.code) html += `<div class="ap-box ap-code">Enter this code on the GitHub page that just opened:
+      <div class="code-line"><code class="otc">${esc(a.flow.code)}</code><button class="btn mini" data-ap="copy" data-text="${esc(a.flow.code)}">Copy</button><a class="btn mini" href="${esc(a.flow.url)}" target="_blank" rel="noopener">Open github.com/login/device</a></div>
+      <div class="note">Then click Authorize. This finishes by itself, and git push uses the same sign-in.</div></div>`;
+    else if (a.flow) html += `<div class="ap-box ap-code">Asking GitHub for a code…</div>`;
+  }
+  html += `</div>`;
   html += `<div class="runs-h">Connected to Claude · ${d.list.length}</div><div class="apps-l">`;
   if (!d.list.length) html += `<div class="empty">${d.checking ? 'Checking your integrations…' : 'None yet. Add one below.'}</div>`;
   for (const i of d.list) {
-    const m = appMeta(i.key, i.server);
+    const m = appMeta(i.key, i.server.replace(/^plugin:[^:]+:/, ''));
     const fixed = /^(claude\.ai |plugin:)/.test(i.server);
+    const keys = i.keys || [];
+    // a remote app that failed without asking for a key usually needs its browser sign-in again
     const act = i.signingIn ? `<em>signing in…</em>`
-      : i.status === 'needs sign-in' ? `<button class="btn mini primary" data-ap="login" data-server="${esc(i.server)}">Sign in</button>` : '';
+      : i.status === 'needs sign-in' ? `<button class="btn mini primary" data-ap="login" data-server="${esc(i.server)}">Sign in</button>`
+      : i.status === 'failed' && i.remote && !keys.length ? `<button class="btn mini" data-ap="login" data-server="${esc(i.server)}" title="Open the sign-in page in your browser again">Sign in again</button>` : '';
     html += `<div class="row">${logo(i.key, i.server, i.status !== 'connected')}
-      <div><b>${esc(m.title)}</b><span title="${esc(i.detail)}">${esc(i.server)}${i.status === 'connected' ? '' : ' · ' + esc(i.detail)}</span></div>
-      <div class="acts"><em class="${i.status.split(' ')[0]}">${esc(i.status)}</em>${act}${fixed ? '' : `<button class="btn mini danger" data-ap="remove" data-server="${esc(i.server)}" title="Remove from Claude Code">×</button>`}</div></div>`;
+      <div><b>${esc(m.title)}</b><span title="${esc(i.detail)}">${esc(i.server)}${i.status === 'connected' || (i.keys || []).length ? '' : ' · ' + esc(i.detail)}</span></div>
+      <div class="acts"><em class="${i.status.split(' ')[0]}">${esc(keys.some(k => !k.set) ? 'needs a key' : i.status)}</em>${act}${fixed ? '' : `<button class="btn mini danger" data-ap="remove" data-server="${esc(i.server)}" title="Remove from Claude Code">×</button>`}</div></div>`;
+    // apps that sign in with an API key: paste it once, ClaudeOS keeps it as a Windows user variable
+    for (const k of keys) {
+      html += `<div class="ap-box ap-key"><div><b>${esc(m.title)}</b> signs in with a key, <code>${esc(k.name)}</code>. ${k.set ? 'One is saved, but it was refused: paste a new one.' : 'Paste yours and it works from your next message.'}${k.help ? ` <a href="${esc(k.help)}" target="_blank" rel="noopener">Get a key</a>` : ''}</div>
+        <div class="code-line"><input class="f" type="password" data-keyin="${esc(k.name)}" placeholder="${esc(k.name)}" autocomplete="off" spellcheck="false"><button class="btn mini primary" data-ap="savekey" data-name="${esc(k.name)}">Save</button>${k.set ? `<button class="btn mini" data-ap="rmkey" data-name="${esc(k.name)}" title="Delete the saved key from this PC">Remove</button>` : ''}</div></div>`;
+    }
   }
   html += `</div><div class="runs-h">Add an app</div><div class="ap-grid">`;
   for (const c of d.catalog.filter(c => !have.has(c.key))) {
@@ -1434,6 +1466,7 @@ function renderAppsPanel(el) {
   }
   el.innerHTML = html;
   if (keep) for (const [id, v] of [['#apName', keep.name], ['#apTarget', keep.target], ['#apExtra', keep.extra]]) if (el.querySelector(id) && v != null) el.querySelector(id).value = v;
+  for (const i of el.querySelectorAll('[data-keyin]')) if (keysTyped[i.dataset.keyin]) i.value = keysTyped[i.dataset.keyin];
 }
 
 document.getElementById('detail').addEventListener('change', e => { if (e.target.id === 'apScope') appsPanel.scope = e.target.value; });
@@ -1446,6 +1479,18 @@ document.getElementById('detail').addEventListener('click', async e => {
   const redraw = () => { appsPanel.drawn = ''; renderDetail(); };
   if (act === 'open') { appsPanel.open = appsPanel.open === btn.dataset.key ? null : btn.dataset.key; appsPanel.err = ''; return redraw(); }
   if (act === 'refresh') return api('/api/integrations/refresh', {});
+  if (act === 'acct') { const r = await api('/api/integrations/account', { key: btn.dataset.key, act: btn.dataset.act }); if (r.error) toast(r.error); return; }
+  if (act === 'copy') { navigator.clipboard?.writeText(btn.dataset.text).then(() => { btn.textContent = 'Copied'; }); return; }
+  if (act === 'savekey' || act === 'rmkey') {
+    const input = btn.closest('.ap-key')?.querySelector('[data-keyin]');
+    if (act === 'rmkey' && !confirm(`Delete the saved ${btn.dataset.name} from this PC?`)) return;
+    btn.disabled = true;
+    const r = await api('/api/integrations/key', act === 'rmkey' ? { name: btn.dataset.name, remove: true } : { name: btn.dataset.name, value: input?.value || '' });
+    btn.disabled = false;
+    if (r.error) return toast(r.error);
+    if (input) input.value = '';
+    return toast(act === 'rmkey' ? `Removed ${btn.dataset.name}` : `Saved ${btn.dataset.name}`, null, null, act === 'rmkey' ? '' : 'Checking that it connects…');
+  }
   if (act === 'login') { const r = await api('/api/integrations/login', { server: btn.dataset.server }); if (r.error) toast(r.error); return; }
   if (act === 'remove') {
     if (!confirm(`Remove ${btn.dataset.server} from Claude Code? Employees that use it stop reaching it.`)) return;
