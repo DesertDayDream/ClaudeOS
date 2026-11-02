@@ -918,7 +918,7 @@ function renderPanel() {
 
   const team = document.getElementById('teamList'); // the briefs (queue.js) are on the Activity tab
   const groups = ['project', 'personal', 'plugin', 'contractor'];
-  let html = state.brain ? `<div class="team-acts"><button class="btn" data-hire title="Write a new SKILL.md in ${esc(state.brain.name)}/.claude/skills">+ Hire</button><button class="btn" data-newdept title="A room in the building for a group of employees and their projects">+ Department</button><button class="btn" data-apps title="Connect Claude to Gmail, Notion, Blender and more">+ App</button></div>` : '';
+  let html = state.brain ? `<div class="team-acts"><button class="btn" data-hire title="Write a new SKILL.md in ${esc(state.brain.name)}/.claude/skills">+ Hire</button><button class="btn" data-newdept title="A room in the building for a group of employees and their projects">+ Department</button></div>` : '';
   const byWork = (a, b) => (work.busy.has(b.id) - work.busy.has(a.id)) || ((work.load.get(b.id) || 0) - (work.load.get(a.id) || 0)) || a.name.localeCompare(b.name);
   const row = s => {
     const n = work.load.get(s.id) || 0;
@@ -988,6 +988,16 @@ function renderDetail() {
   // an employee's desk takes over the whole side panel; everything else is the Manager's panel
   const aside = document.querySelector('aside');
   aside.classList.toggle('emp', employees.has(selected));
+  // the Apps tab: while the Apps panel is open it fills the side panel; leaving it brings back the tab you were on
+  const appsFull = selected === APPS_PANEL;
+  if (appsFull !== aside.classList.contains('apps-full')) {
+    if (appsFull) {
+      tabBeforeApps = document.querySelector('aside header button[aria-selected="true"]')?.dataset.tab || 'chat';
+      if (tabBeforeApps === 'apps') tabBeforeApps = 'chat';
+      for (const x of document.querySelectorAll('aside header button')) x.setAttribute('aria-selected', String(x.dataset.tab === 'apps'));
+    } else if (document.querySelector('aside header [data-tab="apps"]')?.getAttribute('aria-selected') === 'true') showTab(tabBeforeApps);
+    aside.classList.toggle('apps-full', appsFull);
+  }
   // an employee's Chat tab is the chat box itself, showing their conversation
   const chatWith = employees.has(selected) && employees.get(selected).data.source !== 'contractor' && deskView === 'chat' ? selected : null;
   aside.classList.toggle('emp-chat', !!chatWith);
@@ -1359,6 +1369,7 @@ document.getElementById('detail').addEventListener('click', async e => {
 // Add Claude's integrations from the page: pick an app with a known address, turn on a claude.ai
 // connector, or paste any MCP address or command. Remote apps then sign in once in the browser.
 const APPS_PANEL = '__apps__';
+let tabBeforeApps = 'chat';
 let appsPanel = { data: null, open: null, err: '', busy: false, scope: 'local', drawn: '' };
 
 async function openApps(key) {
@@ -1657,11 +1668,16 @@ document.getElementById('memList').addEventListener('click', e => {
 document.querySelector('aside header').addEventListener('click', e => {
   const b = e.target.closest('button');
   if (!b) return;
-  for (const x of document.querySelectorAll('aside header button')) x.setAttribute('aria-selected', String(x === b));
-  for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.id === b.dataset.tab);
+  // Apps is its own tab: the Apps panel fills the side panel (renderDetail sets that up)
+  if (b.dataset.tab === 'apps') return openApps();
+  showTab(b.dataset.tab);
+  if (selected === APPS_PANEL) { selected = null; renderPanel(); }
 });
+function showTab(name) {
+  for (const x of document.querySelectorAll('aside header button')) x.setAttribute('aria-selected', String(x.dataset.tab === name));
+  for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.id === name);
+}
 document.getElementById('team').addEventListener('click', async e => {
-  if (e.target.closest('[data-apps]')) return openApps();
   if (e.target.closest('[data-newdept]')) return openDept(NEW_DEPT);
   const dh = e.target.closest('[data-dept]');
   if (dh) return openDept(dh.dataset.dept);

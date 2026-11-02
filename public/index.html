@@ -121,6 +121,9 @@
   .pform { border-top: 1px solid var(--line); margin-top: 8px; }
   /* an employee's desk replaces the Manager's panel (its tabs and their contents) */
   aside.emp > header, aside.emp > .tab { display: none !important; }
+  /* the Apps tab: the Apps panel takes the whole side panel under the tab bar */
+  aside.apps-full > .tab { display: none !important; }
+  aside.apps-full #detail.on { flex: 1; min-height: 0; max-height: none; border-top: 0; padding-top: 10px; overflow-y: auto; }
   aside.emp #detail.on { flex: 1; max-height: none; border-top: 0; display: flex; flex-direction: column; padding-top: 10px; overflow-y: auto; }
   aside.emp { display: flex; flex-direction: column; }
   /* the desk is exactly the panel's width: long paths, code and log lines wrap or scroll inside it */
@@ -754,6 +757,7 @@
     <button data-tab="term" aria-selected="false" title="Terminals you and Claude share">Terminal</button>
     <button data-tab="git" aria-selected="false" title="Branch, changes, worktrees, pull requests and CI of the chat's repository">Git</button>
     <button data-tab="arts" aria-selected="false" title="Pages Claude published">Artifacts</button>
+    <button data-tab="apps" aria-selected="false" title="Connect Claude to Gmail, Notion, Blender and more">Apps</button>
   </header>
   <div class="tab on" id="chat">
     <div class="chatbar">
