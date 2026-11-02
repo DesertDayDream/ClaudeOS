@@ -82,21 +82,61 @@ export async function removeIntegration(brain, server) {
 }
 
 // Opens the app's sign-in page in the browser and waits (up to 5 minutes) for it to finish.
-const signingIn = new Map();
-export function loginIntegration(brain, server, onDone) {
+// `claude mcp login` only runs in a terminal, so it gets a hidden one (node-pty, as in the Terminal tab).
+// The page gets the link too, in case the browser didn't open, and can pass on the address the
+// browser ended up at if the sign-in can't hand itself back.
+const signingIn = new Map(); // server -> { proc, url, cancelled }
+let loadPty = null;
+export const setPtyLoader = fn => { loadPty = fn; };
+const plain = s => s.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\x1b[()][\w]/g, '');
+export function loginIntegration(brain, server, onDone, onChange = () => {}) {
   if (signingIn.has(server)) return { ok: true, already: true };
-  const proc = spawn('claude', ['mcp', 'login', server], { cwd: brain.path, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-  let text = '';
-  proc.stdout.on('data', d => { text += d; });
-  proc.stderr.on('data', d => { text += d; });
-  const timer = setTimeout(() => proc.kill(), 5 * 60 * 1000);
-  signingIn.set(server, proc);
-  const finish = code => { clearTimeout(timer); signingIn.delete(server); onDone({ ok: code === 0, text: text.trim().slice(-300) }); };
-  proc.on('exit', finish);
-  proc.on('error', () => finish(1));
+  let proc;
+  try {
+    proc = loadPty().spawn(process.platform === 'win32' ? 'claude.exe' : 'claude', ['mcp', 'login', server],
+      { name: 'xterm', cols: 4000, rows: 40, cwd: brain.path, env: process.env, ...(process.platform === 'win32' ? { useConpty: true } : {}) });
+  } catch (err) { return { error: `Couldn't start the sign-in: ${err.message}` }; }
+  const f = { proc, url: '' };
+  let raw = '';
+  proc.onData(d => {
+    raw = (raw + d).slice(-16000);
+    const url = plain(raw).match(/https?:\/\/(?!localhost|127\.0\.0\.1)[^\s"'<>\\]+/)?.[0];
+    if (url && !f.url) { f.url = url; onChange(); }
+  });
+  const timer = setTimeout(() => { try { proc.kill(); } catch {} }, 5 * 60 * 1000);
+  signingIn.set(server, f);
+  proc.onExit(({ exitCode }) => {
+    if (signingIn.get(server) !== f) return;
+    clearTimeout(timer); signingIn.delete(server);
+    const text = plain(raw).replace(/https?:\/\/\S+/g, '').split(/\r?\n/).map(l => l.trim()).filter(l => l && !/^\[mcp-sdk\]/.test(l));
+    onDone({ ok: exitCode === 0 && !f.cancelled, cancelled: f.cancelled, text: (text.pop() || '').slice(0, 300) });
+  });
   return { ok: true };
 }
 export const isSigningIn = server => signingIn.has(server);
+export const signInLink = server => signingIn.get(server)?.url || '';
+export function cancelLogin(server) {
+  const f = signingIn.get(server);
+  if (f) { f.cancelled = true; try { f.proc.kill(); } catch {} }
+  return { ok: true };
+}
+// the address the browser ended up at (localhost/callback?code=…), for when it can't reach ClaudeOS by itself
+export function sendLoginRedirect(server, address) {
+  const f = signingIn.get(server);
+  address = String(address || '').trim();
+  if (!f) return { error: 'No sign-in is running for that app. Press Sign in again.' };
+  if (!/^https?:\/\/\S+[?&]code=\S+$/.test(address) || address.length > 4000) return { error: 'Paste the whole address from the browser’s address bar (it has code= in it).' };
+  f.proc.write(address + '\r');
+  return { ok: true };
+}
+
+// Signs Claude Code out of an app that signed in through the browser (clears its saved sign-in).
+export async function logoutIntegration(brain, server) {
+  const r = await claude(['mcp', 'logout', server], brain.path, 30000);
+  const last = r.text.trim().split('\n').pop() || '';
+  if (!r.ok || /^No MCP server named/i.test(r.text.trim())) return { error: last.slice(0, 200) || 'Sign-out failed.' };
+  return { ok: true, text: last.slice(0, 200) };
+}
 
 // ---------- API keys ----------
 // Some apps sign in with a key instead of a browser: their config says `Bearer ${FAL_KEY}` and
@@ -151,7 +191,8 @@ export function keysFor(brainPath, server) {
   const cfg = serverConfig(brainPath, server);
   if (!cfg) return [];
   const names = new Set();
-  for (const m of JSON.stringify(cfg).matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}/g)) if (!m[2]) names.add(m[1]);
+  // CLAUDE_PLUGIN_ROOT and the like are filled in by Claude Code itself, not keys to paste
+  for (const m of JSON.stringify(cfg).matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}/g)) if (!m[2] && !/^CLAUDE_/.test(m[1])) names.add(m[1]);
   // a stdio server given an empty -e KEY= needs that key too
   for (const [k, v] of Object.entries(cfg.env || {})) if (v === '' && /key|token|secret/i.test(k)) names.add(k);
   return [...names];

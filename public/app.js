@@ -1395,6 +1395,7 @@ events.addEventListener('account-login', e => {
 document.addEventListener('claudeos:open-apps', () => openApps());
 events.addEventListener('integration-login', e => {
   const r = JSON.parse(e.data);
+  if (r.cancelled) return;
   toast(r.ok ? `Signed in: ${r.server}` : `Sign-in didn't finish for ${r.server}`, null, null, r.ok ? 'Its employees can use it from your next message.' : r.text);
 });
 
@@ -1423,12 +1424,14 @@ function renderAppsPanel(el) {
   // accounts for this PC (Claude, Codex, GitHub's gh), each with a one-click sign-in and sign-out
   html += `<div class="runs-h">Accounts</div><div class="apps-l">`;
   for (const a of d.accounts || []) {
-    const st = a.state === 'signed-in' ? `<em class="connected">signed in as ${esc(a.user)}</em><button class="btn mini" data-ap="acct" data-act="logout" data-key="${esc(a.key)}" title="Sign ${esc(a.user)} out of ${esc(a.title)} on this PC">Sign out</button>`
+    const st = a.state === 'signed-in' ? `<em class="connected">signed in</em><button class="btn mini" data-ap="acct" data-act="logout" data-key="${esc(a.key)}" title="Sign ${esc(a.user)} out of ${esc(a.title)} on this PC">Sign out</button>`
       : a.state === 'missing' ? `<em class="failed">not installed</em><a class="btn mini" href="${esc(a.install)}" target="_blank" rel="noopener">Get it</a>`
       : a.state === 'checking' ? '<em>checking…</em>'
       : a.flow ? `<em>waiting for ${a.ai ? 'your browser' : 'GitHub'}…</em><button class="btn mini" data-ap="acct" data-act="cancel" data-key="${esc(a.key)}">Cancel</button>`
       : `<em class="needs">${a.state === 'expired' ? `${esc(a.user)}'s sign-in expired` : 'not signed in'}</em><button class="btn mini primary" data-ap="acct" data-act="login" data-key="${esc(a.key)}">Sign in</button>`;
-    html += `<div class="row">${logo(a.key, a.title, a.state !== 'signed-in')}<div><b>${esc(a.title)}</b><span>${esc(a.what)}</span></div><div class="acts">${st}</div></div>`;
+    // signed in: the account shows under the name; otherwise what it's for
+    const sub = a.state === 'signed-in' && a.user ? `<span title="${esc(a.what)}">${esc(a.user)}</span>` : `<span>${esc(a.what)}</span>`;
+    html += `<div class="row">${logo(a.key, a.title, a.state !== 'signed-in')}<div><b>${esc(a.title)}</b>${sub}</div><div class="acts">${st}</div></div>`;
     // Claude / Codex: the CLI opens the sign-in page; the link is here too, and Claude's page may hand back a code to paste
     if (a.ai && a.flow) html += `<div class="ap-box ap-code">${a.flow.url
       ? `Finish signing in to ${esc(a.title)} in your browser. This finishes by itself.
@@ -1448,15 +1451,30 @@ function renderAppsPanel(el) {
     const m = appMeta(i.key, i.server.replace(/^plugin:[^:]+:/, ''));
     const fixed = /^(claude\.ai |plugin:)/.test(i.server);
     const keys = i.keys || [];
-    // a remote app that failed without asking for a key usually needs its browser sign-in again
-    const act = i.signingIn ? `<em>signing in…</em>`
-      : i.status === 'needs sign-in' ? `<button class="btn mini primary" data-ap="login" data-server="${esc(i.server)}">Sign in</button>`
-      : i.status === 'failed' && i.remote && !keys.length ? `<button class="btn mini" data-ap="login" data-server="${esc(i.server)}" title="Open the sign-in page in your browser again">Sign in again</button>` : '';
-    html += `<div class="row">${logo(i.key, i.server, i.status !== 'connected')}
-      <div><b>${esc(m.title)}</b><span title="${esc(i.detail)}">${esc(i.server)}${i.status === 'connected' || (i.keys || []).length ? '' : ' · ' + esc(i.detail)}</span></div>
-      <div class="acts"><em class="${i.status.split(' ')[0]}">${esc(keys.some(k => !k.set) ? 'needs a key' : i.status)}</em>${act}${fixed ? '' : `<button class="btn mini danger" data-ap="remove" data-server="${esc(i.server)}" title="Remove from Claude Code">×</button>`}</div></div>`;
+    // Every app works like the accounts above: Sign in, waiting for your browser (Cancel), signed in (Sign out).
+    // How it signs in: with a key (pasted once), in the browser (remote apps and claude.ai connectors),
+    // or not at all (a local app that runs on this PC).
+    const how = keys.length ? 'key' : i.remote ? 'browser' : 'local';
+    const s = esc(i.server), on = i.status === 'connected';
+    const keyMissing = keys.some(k => !k.set);
+    const st = i.signingIn ? `<em>waiting for your browser…</em><button class="btn mini" data-ap="cancel-login" data-server="${s}">Cancel</button>`
+      : how === 'key' ? (on && !keyMissing ? `<em class="connected">signed in with a key</em><button class="btn mini" data-ap="keyout" data-server="${s}" data-names="${esc(keys.map(k => k.name).join(','))}" title="Delete the saved key from this PC">Sign out</button>`
+        : `<em class="needs">${keyMissing ? 'needs a key' : 'key refused'}</em>`)
+      : how === 'browser' ? (on ? `<em class="connected">signed in</em><button class="btn mini" data-ap="logout" data-server="${s}" title="Sign Claude out of ${esc(m.title)} on this PC">Sign out</button>`
+        : i.status === 'needs approval' ? `<em class="needs">needs approval</em>`
+        : `<em class="needs">${i.status === 'needs sign-in' ? 'not signed in' : 'sign-in failed'}</em><button class="btn mini primary" data-ap="login" data-server="${s}">${i.status === 'needs sign-in' ? 'Sign in' : 'Sign in again'}</button>`)
+      : `<em class="${on ? 'connected' : i.status.split(' ')[0]}" title="Runs on this PC; it has no account to sign in to">${on ? 'on this PC · no sign-in' : esc(i.status)}</em>`;
+    html += `<div class="row">${logo(i.key, i.server, !on)}
+      <div><b>${esc(m.title)}</b><span title="${esc(i.detail)}">${s}${on || keys.length ? '' : ' · ' + esc(i.detail)}</span></div>
+      <div class="acts">${st}${fixed ? '' : `<button class="btn mini danger" data-ap="remove" data-server="${s}" title="Remove from Claude Code">×</button>`}</div></div>`;
+    if (i.signingIn) html += `<div class="ap-box ap-code">${i.signInUrl
+      ? `Finish signing in to ${esc(m.title)} in your browser. This finishes by itself.
+        <div class="code-line"><a class="btn mini" href="${esc(i.signInUrl)}" target="_blank" rel="noopener">Open the sign-in page again</a></div>
+        <div class="note">If the browser ends on a page that won't load, copy its address and paste it here:</div>
+        <div class="code-line"><input class="f" data-keyin="redirect-${s}" placeholder="http://localhost:…/callback?code=…" autocomplete="off" spellcheck="false"><button class="btn mini primary" data-ap="login-redirect" data-server="${s}">Continue</button></div>`
+      : `Opening the ${esc(m.title)} sign-in page in your browser…`}</div>`;
     // apps that sign in with an API key: paste it once, ClaudeOS keeps it as a Windows user variable
-    for (const k of keys) {
+    for (const k of on && !keyMissing ? [] : keys) {
       html += `<div class="ap-box ap-key"><div><b>${esc(m.title)}</b> signs in with a key, <code>${esc(k.name)}</code>. ${k.set ? 'One is saved, but it was refused: paste a new one.' : 'Paste yours and it works from your next message.'}${k.help ? ` <a href="${esc(k.help)}" target="_blank" rel="noopener">Get a key</a>` : ''}</div>
         <div class="code-line"><input class="f" type="password" data-keyin="${esc(k.name)}" placeholder="${esc(k.name)}" autocomplete="off" spellcheck="false"><button class="btn mini primary" data-ap="savekey" data-name="${esc(k.name)}">Save</button>${k.set ? `<button class="btn mini" data-ap="rmkey" data-name="${esc(k.name)}" title="Delete the saved key from this PC">Remove</button>` : ''}</div></div>`;
     }
@@ -1525,7 +1543,30 @@ document.getElementById('detail').addEventListener('click', async e => {
     if (input) input.value = '';
     return toast(act === 'rmkey' ? `Removed ${btn.dataset.name}` : `Saved ${btn.dataset.name}`, null, null, act === 'rmkey' ? '' : 'Checking that it connects…');
   }
-  if (act === 'login') { const r = await api('/api/integrations/login', { server: btn.dataset.server }); if (r.error) toast(r.error); return; }
+  if (act === 'login' || act === 'cancel-login') { const r = await api(`/api/integrations/${act}`, { server: btn.dataset.server }); if (r.error) toast(r.error); return; }
+  if (act === 'login-redirect') {
+    const input = btn.closest('.ap-box')?.querySelector('[data-keyin]');
+    const r = await api('/api/integrations/login-redirect', { server: btn.dataset.server, address: input?.value || '' });
+    if (r.error) toast(r.error); else { btn.textContent = 'Checking…'; btn.disabled = true; }
+    return;
+  }
+  if (act === 'logout') {
+    if (!confirm(`Sign out of ${btn.dataset.server}?\n\nEmployees that use it can't reach it until you sign in again.`)) return;
+    btn.disabled = true;
+    const r = await api('/api/integrations/logout', { server: btn.dataset.server });
+    btn.disabled = false;
+    return r.error ? toast(r.error) : toast(`Signed out: ${btn.dataset.server}`, null, null, 'Press Sign in to use it again.');
+  }
+  if (act === 'keyout') {
+    const names = btn.dataset.names.split(',').filter(Boolean);
+    if (!confirm(`Sign out of ${btn.dataset.server}?\n\nThis deletes its saved key (${names.join(', ')}) from this PC. Paste a key again to sign back in.`)) return;
+    btn.disabled = true;
+    for (const name of names) {
+      const r = await api('/api/integrations/key', { name, remove: true });
+      if (r.error) { btn.disabled = false; return toast(r.error); }
+    }
+    return toast(`Signed out: ${btn.dataset.server}`, null, null, 'Its key is deleted from this PC.');
+  }
   if (act === 'remove') {
     if (!confirm(`Remove ${btn.dataset.server} from Claude Code? Employees that use it stop reaching it.`)) return;
     const r = await api('/api/integrations/remove', { server: btn.dataset.server });

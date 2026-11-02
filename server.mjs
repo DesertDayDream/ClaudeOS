@@ -26,10 +26,10 @@ import { createSkillEditor } from './skill-edit.mjs';
 import { createOrg } from './org.mjs';
 import { ensureCabinet, findCabinet, cabinetTree } from './cabinets.mjs';
 import { appsInText, appForServer } from './public/apps.js';
-import { CATALOG, CONNECTORS_URL, KEY_HELP, addIntegration, removeIntegration, loginIntegration, isSigningIn, keysFor, saveKey } from './integrations.mjs';
+import { CATALOG, CONNECTORS_URL, KEY_HELP, addIntegration, removeIntegration, loginIntegration, isSigningIn, signInLink, cancelLogin, sendLoginRedirect, logoutIntegration, keysFor, saveKey, setPtyLoader } from './integrations.mjs';
 import { createAccounts } from './accounts.mjs';
 import { createRegistry, setupBrain, repairHooks, listFolder, slugFor, samePath, inside } from './brains.mjs';
-import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile } from './runtime.mjs';
+import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile, loadNodePty } from './runtime.mjs';
 import { startTray } from './tray.mjs';
 import { createDesktop, openPage as openWindow, showPage as showWindow } from './desktop.mjs';
 import { createUpdater } from './update.mjs';
@@ -39,6 +39,8 @@ const CLAUDE = path.resolve(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.c
 const PORT = Number(process.env.PORT || 4747);
 const DATA = path.resolve(process.env.CLAUDEOS_HOME || path.join(HOME, '.claudeos'));
 const ACTIVITY = path.join(DATA, 'activity.jsonl');
+let ptyModule = null;
+setPtyLoader(() => (ptyModule ||= loadNodePty(DATA)));
 const TEMPLATES = templatesDir(DATA);
 const HOOK = hookCommand(DATA);
 const brains = createRegistry({ file: path.join(DATA, 'brains.json') });
@@ -256,7 +258,7 @@ function checkIntegrations(brain, force) {
       const status = /✔|connected/i.test(tail) && !/fail|not connected/i.test(tail) ? 'connected'
         : /approv/i.test(tail) ? 'needs approval' : /fail/i.test(tail) ? 'failed' : /auth/i.test(tail) ? 'needs sign-in' : 'failed';
       // keys it reads from the environment (${FAL_KEY}), and whether the browser sign-in can fix it
-      const keys = status === 'connected' ? [] : keysFor(brain.path, server);
+      const keys = keysFor(brain.path, server);
       list.push({ server, key: appForServer(server), status, keys, remote: /https?:\/\//.test(line.slice(at, dash)), detail: tail.replace(/^[^\w]+/, '').slice(0, 200) });
     }
     const again = integrations.again;
@@ -268,7 +270,7 @@ function checkIntegrations(brain, force) {
 }
 function integrationsView(brain) {
   const list = integrations.brainId === brain?.id ? integrations.list : [];
-  return { list: list.map(i => ({ ...i, signingIn: isSigningIn(i.server), keys: (i.keys || []).map(name => ({ name, set: !!process.env[name], help: KEY_HELP[name] || '' })) })),
+  return { list: list.map(i => ({ ...i, signingIn: isSigningIn(i.server), signInUrl: signInLink(i.server), keys: (i.keys || []).map(name => ({ name, set: !!process.env[name], help: KEY_HELP[name] || '' })) })),
     checking: integrations.running, checked: integrations.brainId === brain?.id ? integrations.at : 0, catalog: CATALOG, connectorsUrl: CONNECTORS_URL,
     accounts: accounts.view() };
 }
@@ -806,9 +808,15 @@ async function handleApi(req, res, url) {
     else if (what === 'login') {
       const server = String(body.server || '');
       if (!/^[\w.: -]{1,80}$/.test(server)) return json(res, 200, { error: 'Unknown integration.' });
-      r = loginIntegration(active, server, done => { broadcast('integration-login', { server, ...done }); recheck(active); });
+      r = loginIntegration(active, server, done => { broadcast('integration-login', { server, ...done }); recheck(active); },
+        () => broadcast('integrations', integrationsView(active)));
       broadcast('integrations', integrationsView(active));
       return json(res, 200, r);
+    } else if (what === 'cancel-login' || what === 'logout' || what === 'login-redirect') {
+      const server = String(body.server || '');
+      if (!/^[\w.: -]{1,80}$/.test(server)) return json(res, 200, { error: 'Unknown integration.' });
+      if (what === 'login-redirect') return json(res, 200, sendLoginRedirect(server, body.address));
+      r = what === 'logout' ? await logoutIntegration(active, server) : cancelLogin(server);
     } else return json(res, 404, { error: 'not found' });
     if (!r.error) recheck(active);
     broadcast('integrations', integrationsView(active));
