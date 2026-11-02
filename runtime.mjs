@@ -54,11 +54,30 @@ export function templatesDir(dataDir) {
   return dir;
 }
 
+// node-pty, the real console behind the Terminal tab. It has native parts (ConPTY), so the exe
+// carries its files and unpacks them into the data folder once per build; the app folder loads it
+// from node_modules. Loaded through createRequire so the exe's bundler leaves it alone.
+export function loadNodePty(dataDir) {
+  if (!IS_EXE) return createRequire(import.meta.url)('node-pty');
+  const manifest = JSON.parse(asset('manifest.json').toString('utf8'));
+  const dir = path.join(dataDir, 'app', `node-pty-${manifest.build}`);
+  if (!fs.existsSync(path.join(dir, '.complete'))) {
+    for (const rel of manifest.nodePty || []) {
+      const to = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.writeFileSync(to, asset(`node-pty/${rel}`));
+    }
+    fs.writeFileSync(path.join(dir, '.complete'), '');
+  }
+  return createRequire(path.join(dir, 'package.json'))('./lib/index.js');
+}
+
 // A file of the page (index.html, app.js, …), or null if there is none.
 export function pageFile(rel) {
   if (IS_EXE) return asset(`www${rel}`);
   let base = path.join(ROOT, 'public');
   if (rel.startsWith('/vendor/three/')) { base = path.join(ROOT, 'node_modules', 'three'); rel = rel.slice('/vendor/three'.length); }
+  else if (rel.startsWith('/vendor/xterm/')) { base = path.join(ROOT, 'node_modules', '@xterm'); rel = rel.slice('/vendor/xterm'.length); }
   const file = path.normalize(path.join(base, decodeURIComponent(rel)));
   if (!file.startsWith(base + path.sep)) return null;
   try { return fs.readFileSync(file); } catch { return null; }

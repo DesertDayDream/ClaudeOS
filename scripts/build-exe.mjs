@@ -30,10 +30,35 @@ await build({
   entryPoints: [path.join(ROOT, 'public', 'app.js')], outfile: path.join(WORK, 'www', 'app.js'),
   bundle: true, format: 'esm', target: 'es2022', minify: true, external: ['/events.js', '/markdown.js', '/preview.js'], logLevel: 'warning',
 });
+// desk.js with xterm.js inside (the Terminal tab), and xterm's stylesheet where the page links it
+await build({
+  entryPoints: [path.join(ROOT, 'public', 'desk.js')], outfile: path.join(WORK, 'www', 'desk.js'),
+  bundle: true, format: 'esm', target: 'es2022', minify: true, external: ['/events.js'], logLevel: 'warning',
+});
 const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8').replace(/<script type="importmap">[\s\S]*?<\/script>\s*/, '');
 fs.writeFileSync(path.join(WORK, 'www', 'index.html'), html);
-const assets = { 'www/index.html': path.join(WORK, 'www', 'index.html'), 'www/app.js': path.join(WORK, 'www', 'app.js') };
-for (const f of fs.readdirSync(path.join(ROOT, 'public'))) if ((f.endsWith('.js') && f !== 'app.js') || f.endsWith('.png')) assets[`www/${f}`] = path.join(ROOT, 'public', f);
+const assets = { 'www/index.html': path.join(WORK, 'www', 'index.html'), 'www/app.js': path.join(WORK, 'www', 'app.js'), 'www/desk.js': path.join(WORK, 'www', 'desk.js'),
+  'www/vendor/xterm/xterm/css/xterm.css': path.join(ROOT, 'node_modules', '@xterm', 'xterm', 'css', 'xterm.css') };
+for (const f of fs.readdirSync(path.join(ROOT, 'public'))) if ((f.endsWith('.js') && !assets[`www/${f}`]) || f.endsWith('.png')) assets[`www/${f}`] = path.join(ROOT, 'public', f);
+
+// node-pty (the Terminal tab's console): its JS and this platform's native parts, unpacked at run time
+const PTY = path.join(ROOT, 'node_modules', 'node-pty');
+const nodePty = ['package.json'];
+(function walk(dir, rel) {
+  for (const e of fs.readdirSync(path.join(PTY, dir), { withFileTypes: true })) {
+    const r = `${rel}/${e.name}`;
+    if (e.isDirectory()) walk(path.join(dir, e.name), r);
+    else if (!/\.(map|pdb)$|\.test\.js$/.test(e.name)) nodePty.push(r);
+  }
+})('lib', 'lib');
+(function walk(dir, rel) {
+  for (const e of fs.readdirSync(path.join(PTY, dir), { withFileTypes: true })) {
+    const r = `${rel}/${e.name}`;
+    if (e.isDirectory()) walk(path.join(dir, e.name), r);
+    else if (!/\.pdb$/.test(e.name)) nodePty.push(r);
+  }
+})(path.join('prebuilds', `${process.platform}-${process.arch}`), `prebuilds/${process.platform}-${process.arch}`);
+for (const r of nodePty) assets[`node-pty/${r}`] = path.join(PTY, r);
 
 // 3. brain templates
 const templates = [];
@@ -48,7 +73,7 @@ const templates = [];
 const hash = crypto.createHash('sha1');
 for (const f of Object.values(assets).concat(path.join(WORK, 'claudeos.cjs'))) hash.update(fs.readFileSync(f));
 const build_ = hash.digest('hex').slice(0, 10);
-fs.writeFileSync(path.join(WORK, 'manifest.json'), JSON.stringify({ build: build_, templates }));
+fs.writeFileSync(path.join(WORK, 'manifest.json'), JSON.stringify({ build: build_, templates, nodePty }));
 assets['manifest.json'] = path.join(WORK, 'manifest.json');
 
 // 4. the blob, injected into a copy of this Node
@@ -87,7 +112,7 @@ function brand(file) {
   vi.setStringValues({ lang, codepage: 1200 }, {
     ProductName: 'ClaudeOS', FileDescription: 'ClaudeOS', InternalName: 'ClaudeOS', OriginalFilename: 'ClaudeOS.exe',
     CompanyName: 'ClaudeOS', FileVersion: version, ProductVersion: version,
-    LegalCopyright: 'Includes Node.js (MIT) and three.js (MIT)',
+    LegalCopyright: 'Includes Node.js, three.js, xterm.js and node-pty (MIT)',
   });
   vi.outputToResourceEntries(res.entries);
   res.outputResource(exe);

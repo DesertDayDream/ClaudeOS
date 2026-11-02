@@ -14,6 +14,11 @@ async function run() {
     await import('./approval-mcp.mjs');
   } else if (sub === 'computer-mcp') {
     await import('./computer-mcp.mjs');
+  } else if (process.argv.some(a => /conpty_console_list_agent/.test(a))) {
+    // node-pty forks this helper (as our own exe) to list a console's processes; with the bundled
+    // ConPTY it shouldn't, but if it does, answer with just the shell instead of starting a second ClaudeOS
+    process.send?.({ consoleProcessList: [Number(process.argv.at(-1)) || 0].filter(Boolean) });
+    process.exit(0);
   } else if (sub === 'memory-server') {
     // inside the exe its own "am I the program?" check always says yes; make it say no, and start it here once
     process.argv[1] = '';

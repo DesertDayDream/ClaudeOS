@@ -1,39 +1,69 @@
-// The Terminal tab: shell tabs both the user and Claude can run commands in, with live output.
-// Each tab keeps one PowerShell (bash elsewhere) running, so `cd`, variables and functions carry
-// over from one command to the next, like a real terminal. Each command goes to the shell's stdin as
-// one line (encoded, so multi-line scripts work) followed by a marker line that says it's done, its
-// exit code and the folder the shell is in now. While a command runs, what you type goes to its stdin,
-// so a program that asks a question gets the answer. Full-screen programs (vim, htop) need a real
-// console and don't work here. Claude starts commands through the chat's claudeos MCP tools
-// (terminal_run asks the user first, like Bash), the user types them in the tab.
-import { spawn, execFile, execFileSync } from 'node:child_process';
+// The Terminal tab: real console tabs both the user and Claude use, like the terminal in Claude
+// Desktop or VS Code. Each tab is a pseudo-console (ConPTY through node-pty) running PowerShell
+// (bash elsewhere), so full-screen programs (vim, htop, less, Claude Code itself), colours, Tab
+// completion and Ctrl+C all work. The page draws it with xterm.js; here a headless xterm keeps the
+// same screen, so a page that opens later (or Claude, through terminal_read) sees what is on it.
+// A small prompt hook (VS Code's OSC 633 shell-integration codes) tells us when a command has
+// finished, its exit code and the folder the shell is in. Claude starts commands through the chat's
+// claudeos MCP tools (terminal_run asks the user first, like Bash); the user types in the tab.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { execFile, execFileSync } from 'node:child_process';
+import headless from '@xterm/headless';
+import serialize from '@xterm/addon-serialize';
+import { loadNodePty } from './runtime.mjs';
 
-const MAX_CHARS = 200000; // output kept per tab
 const MAX_TABS = 12;
+const SCROLLBACK = 5000;
 const WIN = process.platform === 'win32';
 const b64 = s => Buffer.from(s, 'utf8').toString('base64');
-// PowerShell 7 when it's installed (shorter errors), else Windows PowerShell; looked up once
+// PowerShell 7 when it's installed, else Windows PowerShell; looked up once
 let shellExe;
 function powershell() {
   if (!shellExe) { try { execFileSync('where', ['pwsh'], { windowsHide: true, stdio: 'ignore' }); shellExe = 'pwsh.exe'; } catch { shellExe = 'powershell.exe'; } }
   return shellExe;
 }
 
-export function createTerminals({ broadcast }) {
-  const tabs = new Map(); // id -> { id, title, cwd, out, shell, busy, by, started, command, code }
+// The prompt hook. It wraps the user's own prompt (their profile still loads) and puts two
+// invisible codes in front of it: D;<exit code> (the last command is done) and P;Cwd=<folder>.
+const PWSH_INIT = `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding
+$global:__claudeosPrompt = $function:prompt
+function global:prompt {
+  $ok = $?; $c = if ($ok) { 0 } elseif ($global:LASTEXITCODE) { $global:LASTEXITCODE } else { 1 }; $global:LASTEXITCODE = 0
+  $e = [char]27; $b = [char]7
+  "$e]633;D;$c$b$e]633;P;Cwd=$((Get-Location).ProviderPath)$b" + (& $global:__claudeosPrompt)
+}`;
+const BASH_INIT = `[ -f ~/.bashrc ] && . ~/.bashrc
+__claudeos_prompt() { printf '\\033]633;D;%s\\007\\033]633;P;Cwd=%s\\007' "$?" "$PWD"; }
+PROMPT_COMMAND="__claudeos_prompt\${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+`;
 
-  const view = t => ({ id: t.id, title: t.title, cwd: t.cwd, running: !!t.busy, by: t.by, command: t.command || '', code: t.code ?? null });
+export function createTerminals({ broadcast, data }) {
+  const tabs = new Map(); // id -> tab (see open)
+  let pty = null;
+  const nodePty = () => (pty ||= loadNodePty(data));
+
+  const view = t => ({ id: t.id, title: t.title, cwd: t.cwd, running: !!t.busy, by: t.by, command: t.command || '', code: t.code ?? null, alive: !!t.proc });
   const emit = ev => broadcast('terminal', ev);
-  function append(t, text) {
-    if (!text) return;
-    t.out = (t.out + text).slice(-MAX_CHARS);
-    emit({ kind: 'out', id: t.id, text });
+  const tabsChanged = () => emit({ kind: 'tabs', tabs: list() });
+
+  // What the console printed: into the headless screen, and to the pages (a few ms batched, so a
+  // full-screen redraw is one event, not hundreds). seq lets a page that loaded a snapshot skip what's in it.
+  function output(t, text) {
+    t.screen.write(text);
+    t.changes++;
+    t.queued += text;
+    t.flush ||= setTimeout(() => {
+      t.flush = null;
+      t.seq++;
+      emit({ kind: 'out', id: t.id, seq: t.seq, data: t.queued });
+      t.queued = '';
+    }, 6);
   }
 
-  function open({ title = '', cwd, by = 'you' } = {}) {
+  function open({ title = '', cwd, by = 'you', cols = 100, rows = 30 } = {}) {
     if (tabs.size >= MAX_TABS) {
       // the oldest tab with nothing running makes room
       const old = [...tabs.values()].find(t => !t.busy);
@@ -41,65 +71,69 @@ export function createTerminals({ broadcast }) {
       close(old.id);
     }
     try { if (!fs.statSync(cwd).isDirectory()) throw 0; } catch { return { error: `No such folder: ${cwd}` }; }
-    const t = { id: crypto.randomBytes(3).toString('hex'), title: String(title || path.basename(cwd) || 'Terminal').slice(0, 40), cwd, out: '', shell: null, busy: false, by, started: Date.now() };
+    const screen = new headless.Terminal({ cols, rows, scrollback: SCROLLBACK, allowProposedApi: true });
+    const ser = new serialize.SerializeAddon();
+    screen.loadAddon(ser);
+    const t = {
+      id: crypto.randomBytes(3).toString('hex'), title: String(title || path.basename(cwd) || 'Terminal').slice(0, 40), cwd, by, started: Date.now(),
+      screen, ser, cols, rows, proc: null, ready: false, waiting: [], busy: false, command: '', code: null, runs: 0,
+      seq: 0, changes: 0, queued: '', flush: null,
+    };
+    screen.parser.registerOscHandler(633, d => { marker(t, d); return true; });
     tabs.set(t.id, t);
-    emit({ kind: 'tabs', tabs: list() });
+    const r = start(t);
+    if (r.error) { tabs.delete(t.id); return r; }
+    tabsChanged();
     return { ok: true, tab: view(t) };
   }
 
-  // The tab's shell, started in the tab's folder the first time it's needed (and again after `exit`
-  // or a Stop that had to end it).
-  function shellOf(t) {
-    if (t.shell) return t.shell;
-    const mark = `__claudeos_${crypto.randomBytes(4).toString('hex')}__`;
-    const proc = WIN
-      ? spawn(powershell(), ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-'], { cwd: t.cwd, windowsHide: true, env: { ...process.env, FORCE_COLOR: '0' } })
-      : spawn('bash', ['--norc', '--noprofile', '-s'], { cwd: t.cwd, env: { ...process.env, FORCE_COLOR: '0' } });
-    const sh = { proc, mark, pending: '' };
-    t.shell = sh;
-    // UTF-8 both ways, so names and output with accents come through; no colour codes (the tab is plain text)
-    if (WIN) proc.stdin.write('[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; if ($PSStyle) { $PSStyle.OutputRendering = \'PlainText\' }\n');
-    const done = new RegExp(`\\r?\\n?${mark}(-?\\d+) (.*?)\\r?\\n`);
-    proc.stdout.on('data', d => {
-      sh.pending += d;
-      let m;
-      while ((m = sh.pending.match(done))) {
-        append(t, sh.pending.slice(0, m.index));
-        sh.pending = sh.pending.slice(m.index + m[0].length);
-        finished(t, Number(m[1]), m[2]);
+  // The tab's shell, in the tab's folder (again after `exit`: the next key or command starts a new one).
+  function start(t) {
+    let proc;
+    try {
+      const opts = { name: 'xterm-256color', cols: t.cols, rows: t.rows, cwd: t.cwd, env: { ...process.env, TERM_PROGRAM: 'ClaudeOS', COLORTERM: 'truecolor' } };
+      if (WIN) {
+        proc = nodePty().spawn(powershell(), ['-NoLogo', '-NoExit', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(PWSH_INIT, 'utf16le').toString('base64')],
+          { ...opts, useConpty: true, useConptyDll: true });
+      } else {
+        const rc = path.join(os.tmpdir(), 'claudeos-bashrc');
+        fs.writeFileSync(rc, BASH_INIT);
+        proc = nodePty().spawn('bash', ['--rcfile', rc, '-i'], opts);
       }
-      // keep back only what could be the start of a marker; a prompt without a newline shows at once
-      let keep = 0;
-      const at = sh.pending.indexOf(mark);
-      if (at >= 0) keep = sh.pending.length - Math.max(0, at - (sh.pending[at - 1] === '\n' ? (sh.pending[at - 2] === '\r' ? 2 : 1) : 0));
-      else for (let n = Math.min(sh.pending.length, mark.length + 2); n > 0; n--) {
-        if (mark.startsWith(sh.pending.slice(-n).replace(/^\r?\n?/, ''))) { keep = n; break; }
-      }
-      append(t, sh.pending.slice(0, sh.pending.length - keep));
-      sh.pending = sh.pending.slice(sh.pending.length - keep);
+    } catch (err) { return { error: `Couldn't start a console: ${err.message}` }; }
+    t.proc = proc; t.ready = false;
+    proc.onData(d => { if (t.proc === proc) output(t, d); });
+    proc.onExit(() => {
+      if (t.proc !== proc) return;
+      t.proc = null; t.ready = false;
+      if (t.busy) finished(t, -1);
+      if (tabs.has(t.id)) { output(t, '\r\n\x1b[2m[The shell ended. Press a key to start a new one.]\x1b[0m\r\n'); tabsChanged(); }
     });
-    proc.stderr.on('data', d => append(t, String(d)));
-    proc.stdin.on('error', () => { /* it quit; 'close' says so */ });
-    const gone = () => {
-      if (t.shell !== sh) return;
-      t.shell = null;
-      append(t, sh.pending);
-      if (t.busy) finished(t, -1, t.cwd);
-    };
-    proc.on('error', err => { append(t, `${err.message}\n`); gone(); });
-    proc.on('close', gone);
-    return sh;
+    return { ok: true };
   }
 
-  function finished(t, code, cwd) {
+  // the prompt hook's codes: D = the last command is done (a prompt is up), P = the folder
+  function marker(t, d) {
+    const [kind, ...rest] = d.split(';');
+    const arg = rest.join(';');
+    if (kind === 'P' && arg.startsWith('Cwd=')) {
+      const cwd = arg.slice(4);
+      if (cwd && cwd !== t.cwd) { t.cwd = cwd; tabsChanged(); }
+    } else if (kind === 'D') {
+      // the shell's first prompt: now it takes the command sent while it started
+      if (!t.ready) { t.ready = true; for (const line of t.waiting.splice(0)) t.proc?.write(line); return; }
+      if (t.busy) finished(t, Number(arg) || 0);
+    }
+  }
+
+  function finished(t, code) {
     t.busy = false;
     t.code = code;
-    if (cwd && cwd !== t.cwd) t.cwd = cwd;
-    if (code) append(t, `[exited with code ${code}]\n`);
-    emit({ kind: 'tabs', tabs: list() });
+    tabsChanged();
   }
 
-  // run a command in a tab (a new one when none is given); returns at once, output streams
+  // Run a command in a tab (a new one when none is given), as if typed at its prompt; returns at
+  // once, output streams. A multi-line script goes in encoded, so it runs as one command.
   function run({ command, tab, title, cwd, by = 'you' }) {
     command = String(command || '').trim();
     if (!command) return { error: 'No command.' };
@@ -107,77 +141,113 @@ export function createTerminals({ broadcast }) {
     if (tab && !t) return { error: `No terminal tab ${tab}.` };
     if (!t) { const r = open({ title: title || command.split(/\s+/)[0], cwd, by }); if (r.error) return r; t = tabs.get(r.tab.id); }
     if (t.busy) return { error: `Tab "${t.title}" is still running "${t.command}". Stop it, or use another tab.` };
-    const sh = shellOf(t);
-    t.busy = true; t.command = command; t.code = null; t.by = by; t.runs = (t.runs || 0) + 1;
-    append(t, `${t.out ? '\n' : ''}${WIN ? 'PS ' : ''}${t.cwd}${WIN ? '>' : ' $'} ${command}\n`);
-    // dot-sourced, so what the command defines stays in the shell; the marker carries the exit code
-    // (a native program's, or 1 when a PowerShell command wrote an error) and the folder
-    const line = WIN
-      ? `$global:LASTEXITCODE = 0; $Error.Clear(); try { . ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(command)}')))) 2>&1 } catch { $_ }; ` +
-        `"${sh.mark}$(if ($LASTEXITCODE) { $LASTEXITCODE } elseif (@($Error | Where-Object { $_.FullyQualifiedErrorId -ne 'NativeCommandError' }).Count) { 1 } else { 0 }) $((Get-Location).ProviderPath)"\n`
-      : `eval "$(printf %s '${b64(command)}' | base64 -d)"; printf '\\n${sh.mark}%s %s\\n' "$?" "$PWD"\n`;
-    try { sh.proc.stdin.write(line); } catch (err) { append(t, `${err.message}\n`); finished(t, -1, t.cwd); }
-    emit({ kind: 'tabs', tabs: list() });
+    if (!t.proc) { const r = start(t); if (r.error) return r; }
+    const multi = command.includes('\n');
+    const line = !multi ? command
+      : WIN ? `. ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(command)}'))))`
+      : `eval "$(printf %s '${b64(command)}' | base64 -d)"`;
+    t.busy = true; t.command = command; t.code = null; t.by = by; t.runs++;
+    if (t.ready) t.proc.write(`${line}\r`); else t.waiting.push(`${line}\r`);
+    tabsChanged();
     return { ok: true, tab: view(t) };
   }
 
-  // text typed while a command runs goes to that program's stdin
-  function input({ tab, text }) {
+  // Keys from the page, as the terminal sends them (escape codes and all). Enter at a prompt starts
+  // a command, so the tab shows it running until the next prompt.
+  function input({ tab, data }) {
     const t = tabs.get(tab);
     if (!t) return { error: `No terminal tab ${tab}.` };
-    if (!t.busy || !t.shell) return { error: 'Nothing is running in that tab.' };
-    append(t, `${text}\n`);
-    try { t.shell.proc.stdin.write(`${text}\n`); } catch (err) { return { error: err.message }; }
+    if (!t.proc) { const r = start(t); return r.error ? r : { ok: true }; }
+    if (!t.busy && t.ready && /\r/.test(data)) {
+      const typed = currentLine(t);
+      if (typed) { t.busy = true; t.command = typed; t.code = null; t.by = 'you'; t.runs++; tabsChanged(); }
+    }
+    try { t.proc.write(data); } catch (err) { return { error: err.message }; }
+    return { ok: true };
+  }
+  // what's typed after the prompt on the cursor's line ("PS C:\x> git status" -> "git status")
+  function currentLine(t) {
+    const b = t.screen.buffer.active;
+    const text = b.getLine(b.baseY + b.cursorY)?.translateToString(true) || '';
+    return text.replace(/^.*?(?:PS [^>]*>|[$#>]) ?/, '').trim().slice(0, 200);
+  }
+
+  function resize({ tab, cols, rows }) {
+    const t = tabs.get(tab);
+    if (!t) return { error: `No terminal tab ${tab}.` };
+    cols = Math.max(20, Math.min(500, Number(cols) || 0)); rows = Math.max(5, Math.min(200, Number(rows) || 0));
+    if (cols === t.cols && rows === t.rows) return { ok: true };
+    t.cols = cols; t.rows = rows;
+    t.screen.resize(cols, rows);
+    try { t.proc?.resize(cols, rows); } catch { /* it just quit */ }
     return { ok: true };
   }
 
-  // the last lines of a tab; with wait, holds on until new output arrives or the time is up
+  // The tab as plain text, the last lines; with wait, holds on until new output arrives, the command
+  // finishes or the time is up.
   async function read({ tab, lines = 200, wait = 0 }) {
     const t = tabs.get(tab);
     if (!t) return { error: `No terminal tab ${tab}.` };
     if (wait > 0 && t.busy) {
-      const before = t.out.length;
+      const before = t.changes;
       const until = Date.now() + Math.min(Number(wait) || 0, 60000);
-      while (Date.now() < until && t.out.length === before && t.busy) await new Promise(r => setTimeout(r, 200));
+      while (Date.now() < until && t.changes === before && t.busy) await new Promise(r => setTimeout(r, 200));
+      await new Promise(r => setTimeout(r, 150)); // let the rest of a burst land
     }
     const n = Math.max(1, Math.min(2000, Number(lines) || 200));
-    return { ok: true, tab: view(t), text: t.out.split('\n').slice(-n).join('\n') };
+    return { ok: true, tab: view(t), text: text(t).split('\n').slice(-n).join('\n') };
+  }
+  function text(t) {
+    const b = t.screen.buffer.active, out = [];
+    for (let i = 0; i < b.length; i++) {
+      const l = b.getLine(i);
+      if (l?.isWrapped && out.length) out[out.length - 1] += l.translateToString(true);
+      else out.push(l?.translateToString(true) ?? '');
+    }
+    while (out.length && !out.at(-1).trim()) out.pop();
+    return out.join('\n');
   }
 
-  // Ctrl+C: end what the command started and keep the shell. A command that started no program (a
-  // PowerShell loop) can only be ended with its shell; the next command starts a new one in that folder.
+  // Ctrl+C, as if pressed in the tab. Something that ignores it (or a hung shell) is ended with
+  // its whole process tree a moment later, and the next key or command starts a new shell.
   function stop(id) {
     const t = tabs.get(id);
     if (!t) return { error: `No terminal tab ${id}.` };
-    if (!t.busy || !t.shell) return { ok: true };
-    const sh = t.shell, runs = t.runs;
-    append(t, '^C\n');
-    if (!WIN) { execFile('pkill', ['-INT', '-P', String(sh.proc.pid)], () => {}); return { ok: true }; }
-    execFile('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-      // the shell's own conhost isn't the command
-      `(Get-CimInstance Win32_Process -Filter "ParentProcessId=${sh.proc.pid} AND Name<>'conhost.exe'").ProcessId -join ' '`], { windowsHide: true }, (err, out) => {
-      const kids = String(out || '').trim().split(/\s+/).filter(p => /^\d+$/.test(p));
-      if (kids.length) for (const pid of kids) execFile('taskkill', ['/pid', pid, '/T', '/F'], { windowsHide: true }, () => {});
-      // still busy a moment later: the command was PowerShell itself, so the shell goes
-      setTimeout(() => {
-        if (t.shell !== sh || !t.busy || t.runs !== runs) return;
-        execFile('taskkill', ['/pid', String(sh.proc.pid), '/T', '/F'], { windowsHide: true }, () => {});
-        append(t, '[the shell was restarted; variables set in it are gone]\n');
-      }, kids.length ? 1500 : 0);
-    });
+    if (!t.busy || !t.proc) return { ok: true };
+    const proc = t.proc, runs = t.runs;
+    try { proc.write('\x03'); } catch { /* gone */ }
+    setTimeout(() => {
+      if (t.proc !== proc || !t.busy || t.runs !== runs) return;
+      kill(proc);
+    }, 2500);
     return { ok: true };
+  }
+  function kill(proc) {
+    const pid = proc.pid;
+    if (WIN) execFile('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true }, () => { try { proc.kill(); } catch { /* gone */ } });
+    else try { proc.kill('SIGKILL'); } catch { /* gone */ }
   }
   function close(id) {
     const t = tabs.get(id);
     if (!t) return { error: `No terminal tab ${id}.` };
     tabs.delete(id);
-    if (t.shell) execFile(WIN ? 'taskkill' : 'kill', WIN ? ['/pid', String(t.shell.proc.pid), '/T', '/F'] : ['-9', String(t.shell.proc.pid)], { windowsHide: true }, () => {});
-    emit({ kind: 'tabs', tabs: list() });
+    clearTimeout(t.flush);
+    if (t.proc) kill(t.proc);
+    t.proc = null;
+    t.screen.dispose();
+    tabsChanged();
     return { ok: true };
   }
   const list = () => [...tabs.values()].map(view);
-  function snapshot() { return { tabs: [...tabs.values()].map(t => ({ ...view(t), out: t.out })) }; }
+  // each tab's screen (colours, scrollback, an open vim) for a page that just loaded
+  // (what's batched goes out first, and the headless screen catches up, so seq marks exactly what's in it)
+  async function snapshot() {
+    const all = [...tabs.values()];
+    for (const t of all) if (t.flush) { clearTimeout(t.flush); t.flush = null; t.seq++; emit({ kind: 'out', id: t.id, seq: t.seq, data: t.queued }); t.queued = ''; }
+    await Promise.all(all.map(t => new Promise(r => t.screen.write('', r))));
+    return { tabs: all.filter(t => tabs.has(t.id)).map(t => ({ ...view(t), cols: t.cols, rows: t.rows, seq: t.seq, screen: t.ser.serialize({ scrollback: 2000 }) })) };
+  }
   function stopAll() { for (const id of [...tabs.keys()]) close(id); }
 
-  return { open, run, input, read, stop, close, list, snapshot, stopAll };
+  return { open, run, input, resize, read, stop, close, list, snapshot, stopAll };
 }

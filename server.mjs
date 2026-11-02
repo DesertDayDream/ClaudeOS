@@ -13,6 +13,7 @@ import { createChat } from './chat.mjs';
 import { runHandoff } from './handoff.mjs';
 import { createManager } from './manager.mjs';
 import { createTerminals } from './terminals.mjs';
+import { createGit } from './git.mjs';
 import { createArtifacts } from './artifacts.mjs';
 import { createPreviews } from './previews.mjs';
 import { openFile } from './openfile.mjs';
@@ -303,7 +304,8 @@ const BOOT = crypto.randomBytes(6).toString('hex');
 const LOCAL_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`]);
 // The chats' desk: shell tabs Claude and the user share, and the artifacts Claude publishes
 // (served on their own port, so a page can never reach this one's token or API).
-const terminals = createTerminals({ broadcast });
+const terminals = createTerminals({ broadcast, data: DATA });
+const gitPane = createGit();
 const ARTIFACT_PORT = Number(process.env.ARTIFACT_PORT || PORT + 10);
 const previews = createPreviews({ port: () => ARTIFACT_PORT, broadcast });
 const artifacts = createArtifacts({ dir: path.join(DATA, 'artifacts'), port: ARTIFACT_PORT, broadcast, extra: previews.handle });
@@ -586,7 +588,11 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/manager' && req.method === 'GET') return json(res, 200, active ? managerFor(active).snapshot() : { inbox: [], files: [], briefs: [], busy: false });
   if (url.pathname === '/api/update' && req.method === 'GET') return json(res, 200, updater.status());
   if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, await settingsView());
-  if (url.pathname === '/api/terminals' && req.method === 'GET') return json(res, 200, terminals.snapshot());
+  // the Git tab: the open chat's repository unless the page names another folder
+  const gitDir = d => String(d || '') || (chat ? chat.chatFolder(chat.currentId()) : HOME);
+  if (url.pathname === '/api/git' && req.method === 'GET') return json(res, 200, await gitPane.view({ dir: gitDir(url.searchParams.get('dir')), withGithub: url.searchParams.get('gh') === '1', fresh: url.searchParams.get('fresh') === '1' }));
+  if (url.pathname === '/api/git/diff' && req.method === 'GET') return json(res, 200, await gitPane.diff({ dir: gitDir(url.searchParams.get('dir')), file: url.searchParams.get('file') || '' }));
+  if (url.pathname === '/api/terminals' && req.method === 'GET') return json(res, 200, await terminals.snapshot());
   if (url.pathname === '/api/artifacts' && req.method === 'GET') return json(res, 200, { list: artifacts.list(), port: ARTIFACT_PORT });
   // an attachment's bytes, for the chat's thumbnails (only files under the brain's attachments/)
   if (url.pathname === '/api/chat/file' && req.method === 'GET') {
@@ -621,8 +627,13 @@ async function handleApi(req, res, url) {
   }
   // the Terminal and Artifacts tabs
   if (url.pathname === '/api/terminal/run') return json(res, 200, terminals.run({ command: body.command, tab: body.tab, cwd: body.cwd || (active ? chatFor(active).chatFolder(chat.currentId()) : HOME) }));
-  if (url.pathname === '/api/terminal/open') return json(res, 200, terminals.open({ cwd: body.cwd || (active ? chatFor(active).chatFolder(chat.currentId()) : HOME) }));
-  if (url.pathname === '/api/terminal/input') return json(res, 200, terminals.input({ tab: String(body.tab || ''), text: String(body.text ?? '') }));
+  if (url.pathname === '/api/terminal/open') return json(res, 200, terminals.open({ cwd: body.cwd || (active ? chatFor(active).chatFolder(chat.currentId()) : HOME), cols: body.cols, rows: body.rows }));
+  if (url.pathname === '/api/terminal/input') return json(res, 200, terminals.input({ tab: String(body.tab || ''), data: String(body.data ?? '') }));
+  if (url.pathname === '/api/terminal/resize') return json(res, 200, terminals.resize({ tab: String(body.tab || ''), cols: body.cols, rows: body.rows }));
+  if (url.pathname.startsWith('/api/git/')) {
+    const act = { 'worktree-add': gitPane.addWorktree, 'worktree-remove': gitPane.removeWorktree, 'pr-worktree': gitPane.prWorktree, fetch: gitPane.fetchAll, rerun: gitPane.rerun, 'pr-create': gitPane.createPr }[url.pathname.slice('/api/git/'.length)];
+    if (act) return json(res, 200, await act({ ...body, dir: gitDir(body.dir) }));
+  }
   if (url.pathname === '/api/terminal/stop') return json(res, 200, terminals.stop(String(body.tab || '')));
   if (url.pathname === '/api/terminal/close') return json(res, 200, terminals.close(String(body.tab || '')));
   // a file Claude linked in the chat, in the user's editor (relative paths are from the open chat's folder)
@@ -745,7 +756,7 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health'
     || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief' || url.pathname === '/api/org' || url.pathname.startsWith('/api/employee')
-    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file' || url.pathname === '/api/preview' || url.pathname === '/api/settings' || url.pathname === '/api/update') {
+    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname === '/api/git' || url.pathname.startsWith('/api/git/') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file' || url.pathname === '/api/preview' || url.pathname === '/api/settings' || url.pathname === '/api/update') {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));
   }
   if (url.pathname === '/api/state') {
