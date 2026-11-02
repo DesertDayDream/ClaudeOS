@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFile } from 'node:child_process';
 import { IS_EXE } from './runtime.mjs';
+import { IS_DESKTOP, desktopRequest } from './desktop-bridge.mjs';
 
 const DEFAULTS = { appWindow: true, notify: true, hotkey: 'Ctrl+Alt+O' };
 const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
@@ -34,6 +35,7 @@ export function createDesktop({ dataDir }) {
   }
 
   async function get() {
+    if (IS_DESKTOP) return { ...settings, ...(await desktopRequest('desktop-settings')), desktop: true, appWindow: true, isExe: IS_EXE };
     const entry = await loginEntry();
     return { ...settings, startAtLogin: !!entry, canStartAtLogin: IS_EXE && process.platform === 'win32', isExe: IS_EXE };
   }
@@ -46,14 +48,20 @@ export function createDesktop({ dataDir }) {
       settings.hotkey = h;
     }
     if (typeof patch.startAtLogin === 'boolean') {
-      if (patch.startAtLogin && !IS_EXE) return { error: 'Start at login works in ClaudeOS.exe.' };
-      if (!await setLogin(patch.startAtLogin)) return { error: 'Windows did not accept the startup entry.' };
+      if (IS_DESKTOP) {
+        const result = await desktopRequest('desktop-login', { enabled: patch.startAtLogin });
+        if (result.error) return result;
+      } else {
+        if (patch.startAtLogin && !IS_EXE) return { error: 'Start at login works in ClaudeOS.exe.' };
+        if (!await setLogin(patch.startAtLogin)) return { error: 'Windows did not accept the startup entry.' };
+      }
     }
     save();
     return get();
   }
   // a moved exe fixes its own startup entry, like the brains' hooks
   async function repairLogin() {
+    if (IS_DESKTOP) return; // Electron owns its startup entry, never point it at the backend.
     if (!IS_EXE) return;
     const entry = await loginEntry();
     if (entry && entry !== runCommand()) await setLogin(true);

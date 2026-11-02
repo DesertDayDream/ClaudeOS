@@ -33,6 +33,7 @@ import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile, load
 import { startTray } from './tray.mjs';
 import { createDesktop, openPage as openWindow, showPage as showWindow } from './desktop.mjs';
 import { createUpdater } from './update.mjs';
+import { IS_DESKTOP, desktopEvent } from './desktop-bridge.mjs';
 
 const HOME = os.homedir();
 const CLAUDE = path.resolve(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude'));
@@ -396,6 +397,7 @@ async function desk(tool, a) {
   if (tool === 'update_app') {
     const brain = [...chats.entries()].find(([, c]) => c === owner)?.[0] || '';
     const r = updater.request({ chat: a.chat, brain, kind: a.rollback ? 'rollback' : 'update' });
+    if (IS_DESKTOP && !r.error) return { text: updater.status().ready ? 'The desktop app will install the downloaded release after working chats finish their turns.' : 'Checking GitHub for a desktop release. If one is available, ClaudeOS will offer to download it.' };
     if (!r.error && a.rollback) return { text: `ClaudeOS goes back to the previous build ${r.waiting ? 'as soon as every chat (this one included) has finished its turn' : 'now'}. End your turn now; the page reloads by itself.` };
     return r.error ? r : { text: r.waiting ? 'ClaudeOS restarts into the new build as soon as every chat (this one included) has finished its turn. End your turn now; the page reloads by itself, and the user sees which build is running.' : 'ClaudeOS is restarting into the new build now.' };
   }
@@ -895,7 +897,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/chat/options') return json(res, 200, chat.setOptions(body));
   if (url.pathname === '/api/chat/wrap') return json(res, 200, chat.wrapUp());
   if (url.pathname === '/api/approval') return json(res, 200, await chat.requestApproval(body));
-  if (url.pathname === '/api/approval/answer') return json(res, 200, chat.answerApproval(body.id, body.allow));
+  if (url.pathname === '/api/approval/answer') return json(res, 200, chat.answerApproval(body.id, body.allow, body.decision));
   return json(res, 404, { error: 'not found' });
 }
 
@@ -924,8 +926,17 @@ const server = http.createServer((req, res) => {
     // hand the page its token
     const html = pageFile('/index.html');
     if (!html) { res.writeHead(500); return res.end(); }
-    res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store' });
-    return res.end(html.toString('utf8').replace('__CLAUDEOS_TOKEN__', TOKEN));
+    let content = html.toString('utf8').replace('__CLAUDEOS_TOKEN__', TOKEN);
+    const headers = { 'content-type': 'text/html', 'cache-control': 'no-store' };
+    if (IS_DESKTOP) {
+      content = content.replace('<html lang="en">', '<html lang="en" data-desktop="true">');
+      const hashes = [...content.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
+        .filter(([, attributes]) => !/\bsrc\s*=/i.test(attributes))
+        .map(([, , code]) => `'sha256-${crypto.createHash('sha256').update(code).digest('base64')}'`);
+      headers['content-security-policy'] = `default-src 'self'; script-src 'self' ${hashes.join(' ')}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https:; font-src 'self' data: https:; connect-src 'self' http: https: ws: wss:; frame-src http: https: blob: data:; worker-src 'self' blob:; media-src 'self' blob: http: https:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
+    }
+    res.writeHead(200, headers);
+    return res.end(content);
   }
   const buf = pageFile(url.pathname);
   if (!buf) { res.writeHead(404); return res.end('not found'); }
@@ -938,6 +949,7 @@ const updater = createUpdater({ dataDir: DATA, port: PORT, quit: () => quit(),
   busy: () => [...chats.values()].some(c => c.anyBusy()) || [...managers.values()].some(m => m.busy()) || handoffs.size > 0 });
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`ClaudeOS running at ${PAGE_URL}  (data: ${DATA})`);
+  if (IS_DESKTOP) desktopEvent('desktop-ready', { url: PAGE_URL, settings: desktop.settings() });
   if (process.argv.includes('--open')) openPage(PAGE_URL);
   if (process.argv.includes('--tray')) {
     trayOn = true;
@@ -945,6 +957,7 @@ server.listen(PORT, '127.0.0.1', () => {
   }
 });
 server.on('error', err => {
+  if (IS_DESKTOP) { desktopEvent('desktop-error', { message: err.code === 'EADDRINUSE' ? `Port ${PORT} is already in use. Quit the previous ClaudeOS app, then try again.` : err.message }); return quit(); }
   if (err.code === 'EADDRINUSE') {
     console.log(`ClaudeOS is already running at http://localhost:${PORT}`);
     // double-clicking ClaudeOS.exe again just brings the page back
@@ -955,11 +968,12 @@ server.on('error', err => {
   throw err;
 });
 
-function openPage(url) { openWindow(url, { appWindow: desktop.settings().appWindow }); }
+function openPage(url) { if (IS_DESKTOP) desktopEvent('desktop-show'); else openWindow(url, { appWindow: desktop.settings().appWindow }); }
 
 // ---------- tray, hotkey and notifications ----------
 let tray = null, trayOn = false, hotkeyOk = null;
 function restartTray(greet = '') {
+  if (IS_DESKTOP) { desktopEvent('desktop-configure', desktop.settings()); return; }
   if (!trayOn) return;
   tray?.stop();
   hotkeyOk = null;
@@ -971,10 +985,16 @@ function restartTray(greet = '') {
 function notify({ title, body, chat, brain }) {
   if (!desktop.settings().notify) return;
   const t = brains.list().length > 1 && brain ? `${title} · ${brain}` : title;
+  if (IS_DESKTOP) { desktopEvent('desktop-notify', { title: t, body, chat, brain }); return; }
   if (clients.size) broadcast('notify', { title: t, body, chat });
   else tray?.notify(t, body);
 }
-async function settingsView() { return { ...(await desktop.get()), tray: trayOn, hotkeyOk }; }
+async function settingsView() { return { tray: trayOn, hotkeyOk, ...(await desktop.get()) }; }
+
+if (IS_DESKTOP) {
+  process.on('message', message => { if (message?.type === 'desktop-quit') quit(); });
+  process.on('disconnect', quit);
+}
 
 // Quit from the tray: stop anything Claude is doing for us first.
 function quit() {

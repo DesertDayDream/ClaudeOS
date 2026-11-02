@@ -1,0 +1,13 @@
+{
+  "name": "claudeos-desktop",
+  "version": "0.3.1",
+  "private": true,
+  "description": "ClaudeOS desktop shell",
+  "author": "DesertDayDream",
+  "main": "main.cjs",
+  "devDependencies": {
+    "electron": "45.2.1",
+    "electron-builder": "26.17.0",
+    "electron-updater": "6.8.11"
+  }
+}

@@ -280,19 +280,22 @@ function editMessage(id) {
 }
 
 function renderApproval(card) {
+  if (document.getElementById('ap-' + card.id)) return;
   const el = document.createElement('div');
   el.className = 'approve';
   el.id = 'ap-' + card.id;
   // a chat you left can still ask; its card shows here, saying which chat it's from
   const elsewhere = card.chat && card.chat !== currentId ? `<span class="in">From the chat “${esc(chatList.find(c => c.id === card.chat)?.title || 'another chat')}”</span>` : '';
-  el.innerHTML = `${elsewhere}<b>${esc(card.who || 'Claude')} wants to: ${esc(card.summary)}</b>
+  el.innerHTML = `${elsewhere}<b>${esc(card.who || (card.engine === 'codex' ? 'Codex' : 'Claude'))} wants to: ${esc(card.summary)}</b>
     <div class="what">${esc(JSON.stringify(card.input))}</div>
-    <button class="btn primary" data-allow="1">Allow</button> <button class="btn" data-allow="0">Deny</button>`;
+    ${card.engine === 'codex' ? (card.choices || []).map(choice => `<button class="btn ${choice === 'accept' ? 'primary' : ''}" data-decision="${esc(choice)}">${esc({ accept: 'Allow once', acceptForSession: 'Allow for session', decline: 'Deny', cancel: 'Cancel turn' }[choice] || choice)}</button>`).join(' ') : '<button class="btn primary" data-allow="1">Allow</button> <button class="btn" data-allow="0">Deny</button>'}`;
   el.addEventListener('click', e => {
     const b = e.target.closest('button');
     if (!b) return;
     for (const x of el.querySelectorAll('button')) x.disabled = true;
-    api('/api/approval/answer', { id: card.id, allow: b.dataset.allow === '1' });
+    api('/api/approval/answer', { id: card.id, allow: b.dataset.allow === '1', ...(b.dataset.decision ? { decision: b.dataset.decision } : {}) })
+      .then(result => { if (result.error) { alert(result.error); for (const x of el.querySelectorAll('button')) x.disabled = false; } })
+      .catch(() => { for (const x of el.querySelectorAll('button')) x.disabled = false; });
   });
   log.appendChild(el);
   scrollDown(true);
@@ -497,7 +500,7 @@ function showOptions(o = {}) {
     if (!codex) codexInfo().then(() => { if (opts.engine === 'codex') showOptions(opts); });
   }
   modeSel.title = cx
-    ? "How far Codex may go in this chat. Codex never stops to ask: Plan only = read-only, Don't ask = full access, anything else = it may change files in the chat's folder."
+    ? "Codex permissions: Ask first reviews untrusted commands; Accept edits and Auto ask when Codex requests approval; Plan only is read-only; Don't ask requests full access. Managed policy may still restrict actions."
     : modeSel.dataset.claudeTitle || modeSel.title;
   if (typeof showLimits === 'function') try { showLimits(); } catch { /* meters not set up yet */ }
 }

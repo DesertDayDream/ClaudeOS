@@ -10,6 +10,31 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { IS_EXE, buildId } from './runtime.mjs';
+import { IS_DESKTOP, desktopEvent } from './desktop-bridge.mjs';
+
+function createDesktopUpdater(busy) {
+  let state = { desktop: true, canUpdate: true, build: buildId(), phase: 'idle', ready: null, previous: null, pending: false, last: null };
+  let timer;
+  process.on('message', message => {
+    if (message?.type === 'desktop-update-state') state = { ...state, ...message.value };
+  });
+  return {
+    status: () => state,
+    cancel() { clearTimeout(timer); state.pending = false; return { ok: true }; },
+    request({ kind } = {}) {
+      if (kind === 'rollback') return { error: 'To roll back the desktop app, run a previous installer. Your brains and chats are kept separately.' };
+      if (state.pending) return { ok: true, waiting: true };
+      if (!state.ready) { desktopEvent('desktop-update-check'); return { ok: true }; }
+      state.pending = 'update';
+      const install = () => {
+        if (busy()) { timer = setTimeout(install, 1000); return; }
+        desktopEvent('desktop-update-install');
+      };
+      timer = setTimeout(install, 300);
+      return { ok: true, waiting: busy() };
+    },
+  };
+}
 
 const SCRIPT = `
 $ErrorActionPreference = 'Stop'
@@ -58,6 +83,7 @@ try {
 `;
 
 export function createUpdater({ dataDir, port, busy, quit }) {
+  if (IS_DESKTOP) return createDesktopUpdater(busy);
   const exe = process.execPath;
   const base = exe.replace(/\.exe$/i, '');
   const next = `${base}.new.exe`, old = `${base}.old.exe`;

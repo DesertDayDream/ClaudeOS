@@ -512,14 +512,13 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     }
 
     // ---------- Codex ----------
-    // One `codex exec` run per message, resuming this chat's Codex thread after the first.
+    // One App Server connection per message, resuming the chat's existing thread.
     function sendCodex(text, attached, missed, { asked, reply, wrap, fromParent }) {
       // Codex keeps no process between messages, so Claude's warm one isn't needed meanwhile
       cool();
       const setup = servers(), opts = options();
       const mcpServers = { ...setup.mcpServers };
-      // the claudeos server is Claude's Allow/Deny prompt plus the desk tools; Codex never asks, so
-      // in Plan only it gets just the shared brain
+      // Plan mode gets only the shared brain, without desk actions outside the sandbox.
       if (state.mode === 'plan') delete mcpServers.claudeos;
       // the desk tools Claude must ask for (terminal_run runs outside any sandbox, update_app restarts
       // ClaudeOS) stay off for Codex, unless the chat is on Don't ask
@@ -546,6 +545,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         addDirs: state.folder ? [cwd] : [],
         onThread: t => { if (!state.codexThread) { state.codexThread = t; save(); } },
         onEvent: ev => { if (run === mine) handleCodex(ev); },
+        onApproval: request => run === mine ? requestCodexApproval(id, request) : Promise.resolve('decline'),
       });
       run.codex = turn;
       turn.done.then(({ error }) => { if (run === mine) finish(mine.stopped ? null : error); });
@@ -556,6 +556,13 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     // call or file change, and its plan as the checklist.
     function handleCodex(ev) {
       if (ev.type === 'turn.completed') { run.usage = ev.usage || null; try { onCodexTurn(); } catch { /* meters only */ } return; }
+      if (ev.type === 'agent.delta') {
+        const first = !run.streamed.has(ev.itemId);
+        run.streamed.add(ev.itemId);
+        const text = (first && run.reply.text ? '\n\n' : '') + (ev.text || '');
+        run.reply.text += text; send1({ kind: 'delta', id: run.reply.id, text });
+        return;
+      }
       const item = ev.item;
       if (!item || !/^item\./.test(ev.type)) return;
       const say = t => { t = String(t || '').trim(); if (!t) return; const add = (run.reply.text ? '\n\n' : '') + t; run.reply.text += add; send1({ kind: 'delta', id: run.reply.id, text: add }); };
@@ -565,8 +572,11 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         setTodos(items.slice(0, 50).map((t, n) => ({ id: String(n + 1), text: clip(t.text, 160), active: clip(t.text, 160), status: t.completed ? 'completed' : n === firstOpen && ev.type !== 'item.completed' ? 'in_progress' : 'pending' })));
         return;
       }
-      if (ev.type === 'item.completed' && item.type === 'agent_message') return say(item.text);
+      if (ev.type === 'item.completed' && item.type === 'agent_message') return run.streamed.has(item.id) ? undefined : say(item.text);
       if (ev.type === 'item.completed' && item.type === 'error') return say(`⚠ ${item.message}`);
+      if (ev.type === 'item.completed' && item.type === 'command_execution' && (item.status === 'declined' || item.status === 'failed' || item.exitCode)) {
+        say(`⚠ ${item.status === 'declined' ? 'Command denied' : 'Command failed'}${item.aggregatedOutput ? ': ' + clip(item.aggregatedOutput, 1200) : ''}`);
+      }
       // one line per item, from whichever of started/completed comes first
       if (run.items.has(item.id)) return;
       let line = null;
@@ -819,6 +829,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       run.stopped = true;
       // end Claude (or Codex) and anything it started (MCP servers, scripts); the next message starts a new one
       if (run.live) killTree(run.live.proc);
+      else if (run.codex?.stop) run.codex.stop();
       else if (run.codex?.proc) killTree(run.codex.proc);
       else finish(null);
     }
@@ -1108,9 +1119,42 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       notify({ chat: card.chat || null, title: `${card.who || 'Claude'} needs your OK`, body: card.summary || tool_name });
     });
   }
-  function answerApproval(id, allow) {
+  function requestCodexApproval(chatId, request) {
+    return new Promise(resolve => {
+      if (!convs.get(chatId)?.busy() || request.signal.aborted) return resolve('decline');
+      const id = crypto.randomUUID();
+      const choices = request.choices.filter(choice => ['accept', 'acceptForSession', 'decline', 'cancel'].includes(choice));
+      const network = request.networkApprovalContext;
+      const summary = request.method === 'item/fileChange/requestApproval' ? 'Approve file changes'
+        : request.method === 'item/permissions/requestApproval' ? 'Grant requested permissions for this turn'
+        : network ? `Access ${network.protocol || 'network'} host ${network.host}` : 'Run a command';
+      const input = { ...(request.command ? { command: request.command } : {}), ...(request.cwd ? { cwd: request.cwd } : {}),
+        ...(request.reason ? { reason: request.reason } : {}), ...(request.grantRoot ? { grantRoot: request.grantRoot } : {}),
+        ...(request.permissions ? { permissions: request.permissions } : {}), ...(network ? { network } : {}) };
+      if (request.changes) input.changes = request.changes;
+      const card = { id, chat: chatId, engine: 'codex', summary, input, choices };
+      const abort = () => {
+        if (!approvals.has(id)) return;
+        approvals.delete(id); resolve('cancel'); emit({ kind: 'approval-done', id, allowed: false });
+      };
+      approvals.set(id, { card, input, resolve: result => {
+        request.signal.removeEventListener('abort', abort);
+        resolve(typeof result === 'string' ? result : result.behavior === 'allow' ? 'accept' : 'decline');
+      } });
+      request.signal.addEventListener('abort', abort, { once: true });
+      emit({ kind: 'approval', card });
+      notify({ chat: chatId, title: 'Codex needs your OK', body: summary });
+    });
+  }
+  function answerApproval(id, allow, decision) {
     const a = approvals.get(id);
     if (!a) return { error: 'That request is no longer waiting.' };
+    if (a.card.engine === 'codex') {
+      if (!a.card.choices.includes(decision)) return { error: 'That decision is not available for this request.' };
+      approvals.delete(id); a.resolve(decision);
+      emit({ kind: 'approval-done', id, allowed: decision === 'accept' || decision === 'acceptForSession' });
+      return { ok: true };
+    }
     approvals.delete(id);
     a.resolve(allow ? { behavior: 'allow', updatedInput: a.input } : { behavior: 'deny', message: 'The user denied this in ClaudeOS.' });
     emit({ kind: 'approval-done', id, allowed: !!allow });

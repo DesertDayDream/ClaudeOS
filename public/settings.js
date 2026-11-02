@@ -17,13 +17,15 @@ async function api(path, body) {
   return res.json().catch(() => ({ error: `HTTP ${res.status}` }));
 }
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const canNotify = 'Notification' in window;
+const desktopShell = document.documentElement.dataset.desktop === 'true';
+const canNotify = !desktopShell && 'Notification' in window;
 
 function draw() {
   const s = settings;
   if (!s) return;
   const perm = canNotify ? Notification.permission : 'denied';
   const notifyNote = !s.notify ? 'Off'
+    : s.desktop ? 'Native desktop notifications while ClaudeOS is in the background'
     : perm === 'granted' ? 'When an answer lands or Claude needs your OK while you are elsewhere'
     : perm === 'default' ? '<button type="button" class="btn mini" data-act="allow">Allow in this window</button> (otherwise only the tray shows them)'
     : 'Blocked by the browser: only the tray shows them';
@@ -32,7 +34,7 @@ function draw() {
     : s.hotkeyOk === false ? `<b class="bad">Another app already uses ${esc(s.hotkey)}.</b> Pick another.`
     : s.hotkeyOk ? `Press ${esc(s.hotkey)} anywhere to bring ClaudeOS back` : 'Setting up…';
   menu.innerHTML = `
-    <label><input type="checkbox" data-set="appWindow" ${s.appWindow ? 'checked' : ''}> <b>Open in its own window</b><span>An app window (Edge or Chrome) instead of a browser tab</span></label>
+    ${s.desktop ? '<div class="row"><b>ClaudeOS Desktop</b><span>Dedicated app window · close to tray · Quit from the tray menu</span></div>' : `<label><input type="checkbox" data-set="appWindow" ${s.appWindow ? 'checked' : ''}> <b>Open in its own window</b><span>An app window (Edge or Chrome) instead of a browser tab</span></label>`}
     <label><input type="checkbox" data-set="notify" ${s.notify ? 'checked' : ''}> <b>Notifications</b><span>${notifyNote}</span></label>
     <div class="row"><b>Theme</b><select id="themePick" title="Light or dark panels (the 3D view stays dark)">${['dark', 'light', 'system'].map(t => `<option value="${t}"${theme() === t ? ' selected' : ''}>${{ dark: 'Dark', light: 'Light', system: 'Same as Windows' }[t]}</option>`).join('')}</select><span>Light or dark panels; the 3D view stays a night sky</span></div>
     <div class="row"><b>Hotkey</b><input type="text" id="hotkeyInput" value="${esc(s.hotkey)}" placeholder="Off" spellcheck="false" title="Like Ctrl+Alt+O or Ctrl+Shift+K. Empty turns it off. Click it and press the keys."><span>${hk}</span></div>
@@ -45,6 +47,18 @@ function draw() {
 function updateRow() {
   const u = update;
   if (!u) return '';
+  if (u.desktop) {
+    const note = u.pending ? 'Waiting for working chats to finish before restarting…'
+      : u.phase === 'checking' ? 'Checking for a new release…'
+      : u.phase === 'downloading' ? `Downloading… ${Number(u.percent) || 0}%`
+      : u.ready ? `Version ${esc(u.ready.build)} is ready.`
+      : u.error ? `Could not check for updates: ${esc(u.error)}`
+      : u.phase === 'development' ? 'Development build. Install a packaged release to receive updates.'
+      : u.phase === 'current' ? 'You have the latest published release.'
+      : 'Updates come from ClaudeOS releases on GitHub.';
+    const busy = ['checking', 'downloading', 'development'].includes(u.phase);
+    return `<div class="row"><b>Desktop updates</b><span>${note} <button type="button" class="btn mini" data-act="update" ${busy || u.pending ? 'disabled' : ''}>${u.ready ? 'Restart to update' : 'Check for updates'}</button>${u.pending ? ' <button type="button" class="btn mini" data-act="update-cancel">Cancel</button>' : ''}</span></div>`;
+  }
   const when = t => { const d = new Date(t); return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
   const name = f => f.build ? `build ${esc(f.build)}` : `the build from ${when(f.built)}`;
   if (!u.canUpdate) return `<div class="row"><b>Update</b><span>ClaudeOS.exe installs new builds of itself and can roll back; from the app folder, restart node server.mjs</span></div>`;
@@ -74,7 +88,7 @@ menu.addEventListener('change', e => {
   const k = e.target.dataset.set;
   if (!k) return;
   change({ [k]: e.target.checked });
-  if (k === 'notify' && e.target.checked && canNotify && Notification.permission === 'default') Notification.requestPermission().then(draw);
+  if (!settings?.desktop && k === 'notify' && e.target.checked && canNotify && Notification.permission === 'default') Notification.requestPermission().then(draw);
 });
 menu.addEventListener('click', e => {
   if (e.target.dataset.act === 'allow') Notification.requestPermission().then(draw);
@@ -102,8 +116,11 @@ events.addEventListener('settings', () => { if (!menu.hidden) load(); });
 // the browser asks once, on your first click, so they work without visiting the menu
 document.addEventListener('pointerdown', function ask() {
   document.removeEventListener('pointerdown', ask);
+  if (settings?.desktop) return;
   if (canNotify && Notification.permission === 'default') Notification.requestPermission();
 });
+// Load desktop capabilities before the first interaction, including native notification ownership.
+api('/api/settings').then(s => { settings = s; }).catch(() => {});
 events.addEventListener('notify', e => {
   const n = JSON.parse(e.data);
   if (!document.hidden && document.hasFocus()) return; // you are looking at it already

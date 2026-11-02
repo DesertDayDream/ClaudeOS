@@ -32,9 +32,9 @@ async function run() {
     const write = (...a) => log.write(a.map(x => (x instanceof Error ? x.stack : typeof x === 'string' ? x : JSON.stringify(x))).join(' ') + '\n');
     console.log = console.error = write;
     process.on('uncaughtException', err => { write('crash:', err); setTimeout(() => process.exit(1), 100); });
-    process.argv.push('--tray');
+    if (process.env.CLAUDEOS_DESKTOP !== '1') process.argv.push('--tray');
     // tests set CLAUDEOS_NO_OPEN; Windows starting us at sign-in passes --background (tray only)
-    if (!process.env.CLAUDEOS_NO_OPEN && !process.argv.includes('--background')) process.argv.push('--open');
+    if (process.env.CLAUDEOS_DESKTOP !== '1' && !process.env.CLAUDEOS_NO_OPEN && !process.argv.includes('--background')) process.argv.push('--open');
     await import('./server.mjs');
   }
 }
