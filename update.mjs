@@ -4,6 +4,8 @@
 // starts the new one in the tray, and puts the old one back if the new one doesn't come up.
 // It is started through WMI, so it belongs to no job of ours and outlives this process even where
 // child processes may not break away (sandboxes); WMI passes no environment, so the script sets its own.
+// Rolling back is the same swap the other way: the previous build (.old.exe) comes back, and the
+// running one is set aside as .new.exe, so "Restart to update" can bring it back again.
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -23,33 +25,33 @@ function Clear-Old($file) {
   if (-not (Test-Path $file)) { return }
   try { Remove-Item -LiteralPath $file -Force -ErrorAction Stop } catch { Move-Retry $file ($file -replace '\\.exe$', ('-' + (Get-Date -Format 'yyyyMMddHHmmss') + '.exe')) }
 }
-function Mark($status) { Set-Content -Path $env:U_MARK -Value (@{ status = $status; from = $env:U_FROM; chat = $env:U_CHAT; brain = $env:U_BRAIN; at = [DateTimeOffset]::Now.ToUnixTimeMilliseconds() } | ConvertTo-Json) }
+function Mark($status) { Set-Content -Path $env:U_MARK -Value (@{ status = $status; kind = $env:U_KIND; from = $env:U_FROM; chat = $env:U_CHAT; brain = $env:U_BRAIN; at = [DateTimeOffset]::Now.ToUnixTimeMilliseconds() } | ConvertTo-Json) }
 try {
   Log "waiting for ClaudeOS (pid $env:U_PID) to quit"
   try { Wait-Process -Id ([int]$env:U_PID) -Timeout 60 -ErrorAction Stop } catch { if (Get-Process -Id ([int]$env:U_PID) -ErrorAction SilentlyContinue) { Stop-Process -Id ([int]$env:U_PID) -Force } }
   Start-Sleep -Milliseconds 700
   for ($i = 0; $i -lt 20 -and (Up); $i++) { Start-Sleep -Milliseconds 300 }
-  Clear-Old $env:U_OLD
-  Move-Retry $env:U_EXE $env:U_OLD
+  Log "$env:U_KIND from build $env:U_FROM"
+  Clear-Old $env:U_KEEP
+  Move-Retry $env:U_EXE $env:U_KEEP
   Move-Retry $env:U_NEW $env:U_EXE
-  Log 'swapped; starting the new build'
+  Log 'swapped; starting the other build'
   Start-App
   # a refused connection takes ~2 s on Windows, so this waits by the clock, not by tries
   $deadline = (Get-Date).AddSeconds(30)
   while ((Get-Date) -lt $deadline -and -not (Up)) { Start-Sleep -Milliseconds 500 }
-  if (Up) { Log 'the new build is running'; exit 0 }
-  Log 'the new build did not start: putting the old one back'
+  if (Up) { Log 'the other build is running'; exit 0 }
+  Log 'the other build did not start: putting this one back'
   Get-Process | Where-Object { $_.Path -eq $env:U_EXE } | Stop-Process -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 700
-  $failed = $env:U_EXE -replace '\\.exe$', '.failed.exe'
-  Clear-Old $failed
-  Move-Retry $env:U_EXE $failed
-  Move-Retry $env:U_OLD $env:U_EXE
+  Clear-Old $env:U_FAILED
+  Move-Retry $env:U_EXE $env:U_FAILED
+  Move-Retry $env:U_KEEP $env:U_EXE
   Mark 'failed'
   Start-App
 } catch {
   Log ("update failed: " + $_)
-  if (-not (Test-Path $env:U_EXE) -and (Test-Path $env:U_OLD)) { Move-Item $env:U_OLD $env:U_EXE }
+  if (-not (Test-Path $env:U_EXE) -and (Test-Path $env:U_KEEP)) { Move-Item $env:U_KEEP $env:U_EXE }
   Mark 'failed'
   if (-not (Up)) { Start-App }
 }
@@ -60,25 +62,33 @@ export function createUpdater({ dataDir, port, busy, quit }) {
   const base = exe.replace(/\.exe$/i, '');
   const next = `${base}.new.exe`, old = `${base}.old.exe`;
   const marker = path.join(dataDir, 'update.json'), log = path.join(dataDir, 'update.log');
+  // which build each set-aside file is (a file doesn't say until it runs), by file name
+  const buildsFile = path.join(dataDir, 'builds.json');
+  const builds = () => { try { return JSON.parse(fs.readFileSync(buildsFile, 'utf8')); } catch { return {}; } };
   let pending = null, timer = 0;
 
-  // what happened at the last update (read once, at start)
+  // what happened at the last update or rollback (read once, at start)
   let last = null;
   try {
     const m = JSON.parse(fs.readFileSync(marker, 'utf8'));
     fs.rmSync(marker, { force: true });
-    if (Date.now() - m.at < 10 * 60e3) last = { ok: m.status !== 'failed', status: m.status, from: m.from, to: buildId(), chat: m.chat, brain: m.brain, at: m.at };
+    if (Date.now() - m.at < 10 * 60e3) last = { ok: m.status !== 'failed', kind: m.kind || 'update', status: m.status, from: m.from, to: buildId(), chat: m.chat, brain: m.brain, at: m.at };
   } catch { /* no update just happened */ }
 
-  function ready() {
+  const info = file => {
     if (!IS_EXE) return null;
-    try { const st = fs.statSync(next); return { file: next, size: st.size, built: st.mtimeMs }; } catch { return null; }
-  }
+    try {
+      const st = fs.statSync(file), b = builds()[path.basename(file).toLowerCase()];
+      // only while it is still the same file (a fresh build may have replaced it since)
+      return { file, size: st.size, built: st.mtimeMs, build: b?.size === st.size && b?.mtime === st.mtimeMs ? b.build : null };
+    } catch { return null; }
+  };
+  const ready = () => info(next);
+  const previous = () => info(old);
   function status() {
-    return { canUpdate: IS_EXE, build: buildId(), ready: ready(), pending: !!pending, last };
+    return { canUpdate: IS_EXE, build: buildId(), ready: ready(), previous: previous(), pending: pending ? pending.kind : false, last };
   }
 
-  // Restart into the new build as soon as nothing is working (now, if nothing is).
   // can this file be renamed right now? (renaming a running exe is allowed unless something holds it)
   function movable(file) {
     const probe = `${file}.probe`;
@@ -90,20 +100,29 @@ export function createUpdater({ dataDir, port, busy, quit }) {
     console.log(`Update: could not rename ${probe} back`);
     return false;
   }
-  function request({ chat = '', brain = '' } = {}) {
-    if (!IS_EXE) return { error: 'Only ClaudeOS.exe updates itself. Running from the app folder, just restart `node server.mjs`.' };
-    if (!ready()) return { error: `There's no new build yet. Build one beside the app first: npm run build:exe -- "${next}"` };
-    if (pending) return { ok: true, waiting: true };
-    pending = { chat, brain };
+
+  // Restart into another build as soon as nothing is working (now, if nothing is).
+  // update: .new.exe comes in, the running one becomes .old.exe (a broken new one ends up .failed.exe).
+  // rollback: .old.exe comes back, the running one becomes .new.exe (a broken old one stays .old.exe).
+  function request({ chat = '', brain = '', kind = 'update' } = {}) {
+    const back = kind === 'rollback';
+    if (!IS_EXE) return { error: back ? 'Only ClaudeOS.exe can roll back. Running from the app folder, check out an earlier commit instead.' : 'Only ClaudeOS.exe updates itself. Running from the app folder, just restart `node server.mjs`.' };
+    if (pending) return pending.kind === kind ? { ok: true, waiting: true } : { error: `Already restarting for ${pending.kind === 'rollback' ? 'a rollback' : 'an update'}. Cancel that first.` };
+    if (back && !previous()) return { error: `There's no previous build to go back to (${old} is missing).` };
+    if (back && ready()) return { error: 'A new build is waiting beside the app. Install it with Restart to update (then roll back if it misbehaves), or delete ClaudeOS.new.exe first.' };
+    if (!back && !ready()) return { error: `There's no new build yet. Build one beside the app first: npm run build:exe -- "${next}"` };
+    const incoming = back ? old : next, keepAs = back ? next : old, failedAs = back ? old : `${base}.failed.exe`;
+    pending = { chat, brain, kind };
     const go = () => {
       if (busy()) { timer = setTimeout(go, 1000); return; }
-      if (!ready()) { pending = null; return; }
+      if (!fs.existsSync(incoming)) { pending = null; return; }
       // a virus scanner holds a freshly started exe for up to a minute; stay up until both files can move
-      if (!movable(exe) || !movable(next)) { timer = setTimeout(go, 3000); return; }
-      fs.writeFileSync(marker, JSON.stringify({ status: 'started', from: buildId(), chat, brain, at: Date.now() }));
-      // the new build starts with the settings this one was started with (data folder, port)
+      if (!movable(exe) || !movable(incoming)) { timer = setTimeout(go, 3000); return; }
+      { const st = fs.statSync(exe); fs.writeFileSync(buildsFile, JSON.stringify({ ...builds(), [path.basename(keepAs).toLowerCase()]: { build: buildId(), size: st.size, mtime: st.mtimeMs } })); }
+      fs.writeFileSync(marker, JSON.stringify({ status: 'started', kind, from: buildId(), chat, brain, at: Date.now() }));
+      // the other build starts with the settings this one was started with (data folder, port)
       const keep = Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(CLAUDEOS_|CLAUDE_CONFIG_DIR$|PORT$|ARTIFACT_PORT$)/.test(k) && k !== 'CLAUDEOS_NO_OPEN'));
-      const env = { ...keep, U_PID: String(process.pid), U_EXE: exe, U_NEW: next, U_OLD: old, U_PORT: String(port), U_LOG: log, U_MARK: marker, U_FROM: buildId(), U_CHAT: chat, U_BRAIN: brain };
+      const env = { ...keep, U_PID: String(process.pid), U_KIND: kind, U_EXE: exe, U_NEW: incoming, U_KEEP: keepAs, U_FAILED: failedAs, U_PORT: String(port), U_LOG: log, U_MARK: marker, U_FROM: buildId(), U_CHAT: chat, U_BRAIN: brain };
       const q = v => `'${String(v).replace(/'/g, "''")}'`;
       const script = path.join(dataDir, 'update.ps1');
       fs.writeFileSync(script, '﻿' + Object.entries(env).map(([k, v]) => `$env:${k} = ${q(v)}`).join('\n') + '\n' + SCRIPT);
@@ -113,7 +132,7 @@ $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ 
 if ($r.ReturnValue -ne 0) { exit 1 }`;
       execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(launch, 'utf16le').toString('base64')], { windowsHide: true }, err => {
         if (err) { console.log('Update: could not start the updater:', err.message); pending = null; return; }
-        console.log('Updating: quitting so the new build can take over');
+        console.log(back ? 'Rolling back: quitting so the previous build can take over' : 'Updating: quitting so the new build can take over');
         quit();
       });
     };

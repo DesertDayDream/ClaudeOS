@@ -39,16 +39,21 @@ function draw() {
     <label class="${s.canStartAtLogin ? '' : 'off'}"><input type="checkbox" data-set="startAtLogin" ${s.startAtLogin ? 'checked' : ''} ${s.canStartAtLogin ? '' : 'disabled'}> <b>Start with Windows</b><span>${s.canStartAtLogin ? 'In the tray when you sign in, no window until you ask' : 'Works in ClaudeOS.exe'}</span></label>`;
 }
 
-// a new build beside ClaudeOS.exe (Claude makes it with npm run build:exe -- dist/ClaudeOS.new.exe)
+// a new build beside ClaudeOS.exe (Claude makes it with npm run build:exe -- dist/ClaudeOS.new.exe),
+// and the build before this one (ClaudeOS.old.exe), to go back to
 function updateRow() {
   const u = update;
   if (!u) return '';
-  const when = t => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  const note = !u.canUpdate ? 'ClaudeOS.exe installs new builds of itself; from the app folder, restart node server.mjs'
-    : u.pending ? 'Restarting as soon as every chat is done… <button type="button" class="btn mini" data-act="update-cancel">Cancel</button>'
-    : u.ready ? `A new build is ready (built ${when(u.ready.built)}). <button type="button" class="btn mini primary" data-act="update">Restart to update</button>`
-    : `Up to date (build ${esc(u.build)})`;
-  return `<div class="row"><b>Update</b><span>${note}</span></div>`;
+  const when = t => { const d = new Date(t); return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
+  const name = f => f.build ? `build ${esc(f.build)}` : `the build from ${when(f.built)}`;
+  if (!u.canUpdate) return `<div class="row"><b>Update</b><span>ClaudeOS.exe installs new builds of itself and can roll back; from the app folder, restart node server.mjs</span></div>`;
+  const now = `Running build ${esc(u.build)}.`;
+  const note = u.pending ? `${now} ${u.pending === 'rollback' ? 'Rolling back' : 'Restarting to update'} as soon as every chat is done… <button type="button" class="btn mini" data-act="update-cancel">Cancel</button>`
+    : u.ready ? `${now} A new build is ready (${name(u.ready)}). <button type="button" class="btn mini primary" data-act="update">Restart to update</button>`
+    : `${now} Up to date. <button type="button" class="btn mini" data-act="update" disabled title="No new build beside ClaudeOS.exe yet. Ask Claude to build one.">Restart to update</button>`;
+  const back = !u.previous || u.pending ? ''
+    : `<div class="row"><b>Roll back</b><span>Go back to ${name(u.previous)}. This build is kept, so Restart to update brings it back. <button type="button" class="btn mini" data-act="rollback" ${u.ready ? 'disabled title="Install or delete the waiting new build first"' : ''}>Roll back</button></span></div>`;
+  return `<div class="row"><b>Update</b><span>${note}</span></div>${back}`;
 }
 async function load() {
   [settings, update] = await Promise.all([api('/api/settings'), api('/api/update')]);
@@ -72,6 +77,7 @@ menu.addEventListener('change', e => {
 menu.addEventListener('click', e => {
   if (e.target.dataset.act === 'allow') Notification.requestPermission().then(draw);
   if (e.target.dataset.act === 'update') api('/api/update', {}).then(r => { if (r.error) alert(r.error); load(); });
+  if (e.target.dataset.act === 'rollback' && confirm(`Restart ClaudeOS into the previous build? Chats that are working finish their turn first.`)) api('/api/update', { rollback: true }).then(r => { if (r.error) alert(r.error); load(); });
   if (e.target.dataset.act === 'update-cancel') api('/api/update', { cancel: true }).then(load);
 });
 // the hotkey box records the keys you press, so you don't have to spell them
@@ -122,7 +128,9 @@ events.addEventListener('hello', e => {
   try { if (sessionStorage.getItem(key)) return; sessionStorage.setItem(key, '1'); } catch { /* show it anyway */ }
   const t = document.createElement('div');
   t.className = 'toast';
-  t.textContent = u.ok ? `ClaudeOS updated to build ${u.to}` : `The new build didn't start, so ClaudeOS went back to build ${u.to}${u.status === 'failed' ? ' (see update.log in your ClaudeOS data folder)' : ''}`;
+  const back = u.kind === 'rollback';
+  t.textContent = u.ok ? (back ? `ClaudeOS rolled back to build ${u.to} (Restart to update in ⚙ brings ${u.from} back)` : `ClaudeOS updated to build ${u.to}`)
+    : `The ${back ? 'previous' : 'new'} build didn't start, so ClaudeOS stayed on build ${u.to} (see update.log in your ClaudeOS data folder)`;
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 8000);
 });

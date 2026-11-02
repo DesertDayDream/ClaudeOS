@@ -333,7 +333,8 @@ async function desk(tool, a) {
   }
   if (tool === 'update_app') {
     const brain = [...chats.entries()].find(([, c]) => c === owner)?.[0] || '';
-    const r = updater.request({ chat: a.chat, brain });
+    const r = updater.request({ chat: a.chat, brain, kind: a.rollback ? 'rollback' : 'update' });
+    if (!r.error && a.rollback) return { text: `ClaudeOS goes back to the previous build ${r.waiting ? 'as soon as every chat (this one included) has finished its turn' : 'now'}. End your turn now; the page reloads by itself.` };
     return r.error ? r : { text: r.waiting ? 'ClaudeOS restarts into the new build as soon as every chat (this one included) has finished its turn. End your turn now; the page reloads by itself, and the user sees which build is running.' : 'ClaudeOS is restarting into the new build now.' };
   }
   if (tool === 'start_session') return owner.startSession(a);
@@ -615,8 +616,8 @@ async function handleApi(req, res, url) {
   const body = await readJson(req);
   // the desk tools a chat's Claude calls (approval-mcp.mjs), for whichever brain that chat is in
   if (url.pathname.startsWith('/api/desk/')) return json(res, 200, await desk(url.pathname.slice('/api/desk/'.length), body));
-  // install the new build beside the exe (or stop waiting to)
-  if (url.pathname === '/api/update') return json(res, 200, body.cancel ? updater.cancel() : updater.request({}));
+  // install the new build beside the exe, go back to the previous one, or stop waiting to
+  if (url.pathname === '/api/update') return json(res, 200, body.cancel ? updater.cancel() : updater.request({ kind: body.rollback ? 'rollback' : 'update' }));
   // window, hotkey, notifications, start at login
   if (url.pathname === '/api/settings') {
     const before = desktop.settings().hotkey;
