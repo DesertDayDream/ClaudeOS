@@ -1965,6 +1965,8 @@ animate();
 const conn = document.getElementById('conn');
 function connect() {
   events.addEventListener('open', () => { conn.textContent = 'live'; });
+  // the server says which version it is (with its start id); shown beside the status
+  events.addEventListener('hello', e => { const v = JSON.parse(e.data).version; conn.dataset.version = v ? `v${v}` : ''; });
   events.addEventListener('message', ev => { lastRaw = JSON.parse(ev.data); apply(lastRaw); });
   events.addEventListener('error', () => { conn.textContent = 'reconnecting…'; });
 }

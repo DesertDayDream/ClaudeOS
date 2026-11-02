@@ -83,4 +83,6 @@ export function pageFile(rel) {
   try { return fs.readFileSync(file); } catch { return null; }
 }
 
+// the app's version (package.json), for the corner of the page
+export const appVersion = () => { try { return JSON.parse(IS_EXE ? asset('manifest.json').toString('utf8') : fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version || null; } catch { return null; } };
 export const buildId = () => IS_EXE ? JSON.parse(asset('manifest.json').toString('utf8')).build : crypto.createHash('sha1').update(ROOT).digest('hex').slice(0, 8);

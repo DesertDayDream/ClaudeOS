@@ -86,7 +86,7 @@ const templates = [];
 const hash = crypto.createHash('sha1');
 for (const f of Object.values(assets).concat(path.join(WORK, 'claudeos.cjs'))) hash.update(fs.readFileSync(f));
 const build_ = hash.digest('hex').slice(0, 10);
-fs.writeFileSync(path.join(WORK, 'manifest.json'), JSON.stringify({ build: build_, templates, nodePty }));
+fs.writeFileSync(path.join(WORK, 'manifest.json'), JSON.stringify({ build: build_, version: JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version, templates, nodePty }));
 assets['manifest.json'] = path.join(WORK, 'manifest.json');
 
 // 4. the blob, injected into a copy of this Node

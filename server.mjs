@@ -29,7 +29,7 @@ import { appsInText, appForServer } from './public/apps.js';
 import { CATALOG, CONNECTORS_URL, KEY_HELP, addIntegration, removeIntegration, loginIntegration, isSigningIn, signInLink, cancelLogin, sendLoginRedirect, logoutIntegration, keysFor, saveKey, setPtyLoader } from './integrations.mjs';
 import { createAccounts } from './accounts.mjs';
 import { createRegistry, setupBrain, repairHooks, listFolder, slugFor, samePath, inside } from './brains.mjs';
-import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile, loadNodePty } from './runtime.mjs';
+import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile, loadNodePty, appVersion } from './runtime.mjs';
 import { startTray } from './tray.mjs';
 import { createDesktop, openPage as openWindow, showPage as showWindow } from './desktop.mjs';
 import { createUpdater } from './update.mjs';
@@ -916,7 +916,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/api/events') {
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
-    res.write(`event: hello\ndata: ${JSON.stringify({ boot: BOOT, updated: updater.status().last })}\n\n`);
+    res.write(`event: hello\ndata: ${JSON.stringify({ boot: BOOT, version: appVersion(), updated: updater.status().last })}\n\n`);
     res.write(`data: ${JSON.stringify(last)}\n\n`);
     clients.add(res);
     const ping = setInterval(() => res.write(': ping\n\n'), 20000);
