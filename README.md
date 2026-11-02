@@ -2,6 +2,8 @@
 
 Give Claude a brain you can see.
 
+**[Download ClaudeOS for Windows](https://github.com/DesertDayDream/ClaudeOS/releases/latest)** (installer, no admin rights needed). Windows may warn that it's from an unknown publisher because the installer isn't signed: click *More info*, then *Run anyway*.
+
 - **The cloud** is Claude's memory. A new brain starts as an empty cloud; every memory Claude saves appears as a glowing dot.
 - **The Memory tab** lists every memory and searches them; matching dots stay lit. Click a dot or a row to read the whole memory, edit it, or delete it (you can undo, and deleted memories are kept in `~/.claudeos/trash.jsonl`).
 - **The spheres** are employees: one per skill (`SKILL.md`). Each gets a name for good and sits at its own desk. Idle, it leans back and looks at you over its monitor; working, it leans in and its screen scrolls. Write a new skill and a new hire appears.
