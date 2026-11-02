@@ -3,16 +3,54 @@
 // the page shows it and opens github.com/login/device, and gh finishes by itself once you approve.
 // Nothing here sees or stores the token; gh keeps it in Windows' credential store.
 import { execFile, spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const run = (cmd, args, timeout = 20000) => new Promise(resolve =>
   execFile(cmd, args, { windowsHide: true, timeout }, (err, out, errOut) =>
     resolve({ ok: !err, missing: err?.code === 'ENOENT', text: String(out || '') + String(errOut || '') })));
 
+// Claude Code and Codex: which account each is signed in to here (shown only; signing Claude out
+// from inside ClaudeOS would stop its own chats, so that stays a terminal command).
+const plan = p => p ? ' · ' + p[0].toUpperCase() + p.slice(1) : '';
+
+async function claudeAccount() {
+  const r = await run('claude', ['auth', 'status']);
+  if (r.missing) return { state: 'missing' };
+  try {
+    const j = JSON.parse(r.text.slice(r.text.indexOf('{'), r.text.lastIndexOf('}') + 1));
+    if (!j.loggedIn) return { state: 'signed-out' };
+    const who = j.email || j.orgName || (j.authMethod === 'api-key' ? 'an API key' : 'an account');
+    return { state: 'signed-in', user: who + plan(j.subscriptionType) };
+  } catch { return { state: 'signed-out' }; }
+}
+
+function codexAccount() {
+  const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  let j;
+  try { j = JSON.parse(readFileSync(path.join(home, 'auth.json'), 'utf8')); }
+  catch (err) { return { state: err.code === 'ENOENT' ? 'signed-out' : 'signed-out' }; }
+  const idt = j.tokens?.id_token;
+  if (idt) {
+    try {
+      const c = JSON.parse(Buffer.from(idt.split('.')[1], 'base64url').toString('utf8'));
+      return { state: 'signed-in', user: (c.email || 'a ChatGPT account') + plan(c['https://api.openai.com/auth']?.chatgpt_plan_type) };
+    } catch {}
+    return { state: 'signed-in', user: 'a ChatGPT account' };
+  }
+  return j.OPENAI_API_KEY ? { state: 'signed-in', user: 'an OpenAI API key' } : { state: 'signed-out' };
+}
+
 export function createAccounts({ broadcast, open }) {
   let github = { state: 'checking' };
+  let claudeAcct = { state: 'checking' };
+  let codexAcct = { state: 'checking' };
   let flow = null; // { proc, code, url, timer }
 
   async function check() {
+    claudeAccount().then(a => { claudeAcct = a; broadcast(); });
+    codexAcct = codexAccount();
     const r = await run('gh', ['auth', 'status', '--hostname', 'github.com']);
     const user = r.text.match(/Logged in to github\.com (?:account|as) ([\w-]+)/)?.[1];
     github = r.missing ? { state: 'missing' }
@@ -28,6 +66,14 @@ export function createAccounts({ broadcast, open }) {
       flow: flow?.code ? { code: flow.code, url: flow.url } : flow ? { starting: true } : null,
       what: 'Pushing to GitHub, pull requests and CI in the Git tab',
       install: 'https://cli.github.com',
+    }, {
+      key: 'claude', title: 'Claude', ...claudeAcct, readOnly: true,
+      what: 'Claude Code, which runs your chats and employees',
+      install: 'https://claude.com/claude-code', signIn: 'claude auth login', switchHelp: 'To switch accounts: claude auth logout, then claude auth login',
+    }, {
+      key: 'codex', title: 'Codex', ...codexAcct, readOnly: true,
+      what: 'OpenAI Codex, for chats that run on Codex',
+      install: 'https://developers.openai.com/codex/cli', signIn: 'codex login', switchHelp: 'To switch accounts: codex logout, then codex login',
     }];
   }
 

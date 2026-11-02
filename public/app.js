@@ -1421,7 +1421,11 @@ function renderAppsPanel(el) {
   // accounts for tools on this PC (GitHub's gh), each with a one-click sign-in
   html += `<div class="runs-h">Accounts</div><div class="apps-l">`;
   for (const a of d.accounts || []) {
-    const st = a.state === 'signed-in' ? `<em class="connected">signed in as ${esc(a.user)}</em><button class="btn mini" data-ap="acct" data-act="logout" data-key="${esc(a.key)}" title="Sign ${esc(a.user)} out of GitHub on this PC">Sign out</button>`
+    const st = a.readOnly ? (a.state === 'signed-in' ? `<em class="connected" title="${esc(a.switchHelp)}">signed in as ${esc(a.user)}</em>`
+        : a.state === 'missing' ? `<em class="failed">not installed</em><a class="btn mini" href="${esc(a.install)}" target="_blank" rel="noopener">Get it</a>`
+        : a.state === 'checking' ? '<em>checking…</em>'
+        : `<em class="needs">not signed in</em><button class="btn mini" data-ap="copy" data-text="${esc(a.signIn)}" title="Copy the sign-in command, then run it in the Terminal tab">Copy: ${esc(a.signIn)}</button>`)
+      : a.state === 'signed-in' ? `<em class="connected">signed in as ${esc(a.user)}</em><button class="btn mini" data-ap="acct" data-act="logout" data-key="${esc(a.key)}" title="Sign ${esc(a.user)} out of GitHub on this PC">Sign out</button>`
       : a.state === 'missing' ? `<em class="failed">not installed</em><a class="btn mini" href="${esc(a.install)}" target="_blank" rel="noopener">Get it</a>`
       : a.state === 'checking' ? '<em>checking…</em>'
       : a.flow ? `<em>waiting for GitHub…</em><button class="btn mini" data-ap="acct" data-act="cancel" data-key="${esc(a.key)}">Cancel</button>`
