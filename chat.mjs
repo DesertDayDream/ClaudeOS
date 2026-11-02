@@ -87,6 +87,7 @@ export function toolSummary(name, input = {}) {
   if (name === 'mcp__claudeos__start_session') return `Started a side session: ${input.title || ''}`;
   if (name === 'mcp__claudeos__message_session') return `Messaged a side session: ${String(input.message || '').slice(0, 100)}`;
   if (name === 'mcp__claudeos__publish_artifact') return `Published an artifact: ${input.title || ''}`;
+  if (name === 'mcp__claudeos__update_app') return 'Restart ClaudeOS into the new build (dist/ClaudeOS.new.exe) once every chat is done';
   if (name === 'mcp__claudeos__terminal_run') return `Terminal: ${String(input.command || '').slice(0, 120)}`;
   if (/^mcp__claudeos__terminal_/.test(name)) return `Terminal: ${name.slice('mcp__claudeos__terminal_'.length)} ${input.tab || ''}`;
   if (name.startsWith('mcp__computer__')) return `Computer: ${name.slice('mcp__computer__'.length)}${input.text ? ` "${String(input.text).slice(0, 60)}"` : input.keys ? ` ${input.keys}` : input.coordinate ? ` at ${input.coordinate.join(', ')}` : ''}`;

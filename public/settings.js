@@ -1,4 +1,4 @@
-// The ⚙ menu (own window, hotkey, notifications, start with Windows) and the notifications
+// The ⚙ menu (own window, hotkey, notifications, start with Windows, installing a new build) and the notifications
 // themselves: the server sends 'notify' when an answer lands or Claude needs a yes, and the page
 // shows it only while you are looking elsewhere. With no page open, the tray shows it instead.
 import { events } from '/events.js';
@@ -6,7 +6,7 @@ import { events } from '/events.js';
 const TOKEN = window.CLAUDEOS_TOKEN;
 const btn = document.getElementById('settingsBtn');
 const menu = document.getElementById('settingsMenu');
-let settings = null;
+let settings = null, update = null;
 
 async function api(path, body) {
   const res = await fetch(path, {
@@ -35,10 +35,26 @@ function draw() {
     <label><input type="checkbox" data-set="appWindow" ${s.appWindow ? 'checked' : ''}> <b>Open in its own window</b><span>An app window (Edge or Chrome) instead of a browser tab</span></label>
     <label><input type="checkbox" data-set="notify" ${s.notify ? 'checked' : ''}> <b>Notifications</b><span>${notifyNote}</span></label>
     <div class="row"><b>Hotkey</b><input type="text" id="hotkeyInput" value="${esc(s.hotkey)}" placeholder="Off" spellcheck="false" title="Like Ctrl+Alt+O or Ctrl+Shift+K. Empty turns it off. Click it and press the keys."><span>${hk}</span></div>
+    ${updateRow()}
     <label class="${s.canStartAtLogin ? '' : 'off'}"><input type="checkbox" data-set="startAtLogin" ${s.startAtLogin ? 'checked' : ''} ${s.canStartAtLogin ? '' : 'disabled'}> <b>Start with Windows</b><span>${s.canStartAtLogin ? 'In the tray when you sign in, no window until you ask' : 'Works in ClaudeOS.exe'}</span></label>`;
 }
 
-async function load() { settings = await api('/api/settings'); draw(); }
+// a new build beside ClaudeOS.exe (Claude makes it with npm run build:exe -- dist/ClaudeOS.new.exe)
+function updateRow() {
+  const u = update;
+  if (!u) return '';
+  const when = t => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const note = !u.canUpdate ? 'ClaudeOS.exe installs new builds of itself; from the app folder, restart node server.mjs'
+    : u.pending ? 'Restarting as soon as every chat is done… <button type="button" class="btn mini" data-act="update-cancel">Cancel</button>'
+    : u.ready ? `A new build is ready (built ${when(u.ready.built)}). <button type="button" class="btn mini primary" data-act="update">Restart to update</button>`
+    : `Up to date (build ${esc(u.build)})`;
+  return `<div class="row"><b>Update</b><span>${note}</span></div>`;
+}
+async function load() {
+  [settings, update] = await Promise.all([api('/api/settings'), api('/api/update')]);
+  btn.classList.toggle('ping', !!update?.ready);
+  draw();
+}
 async function change(patch) {
   const r = await api('/api/settings', patch);
   if (r.error) { alert(r.error); return load(); }
@@ -55,6 +71,8 @@ menu.addEventListener('change', e => {
 });
 menu.addEventListener('click', e => {
   if (e.target.dataset.act === 'allow') Notification.requestPermission().then(draw);
+  if (e.target.dataset.act === 'update') api('/api/update', {}).then(r => { if (r.error) alert(r.error); load(); });
+  if (e.target.dataset.act === 'update-cancel') api('/api/update', { cancel: true }).then(load);
 });
 // the hotkey box records the keys you press, so you don't have to spell them
 menu.addEventListener('keydown', e => {
@@ -89,3 +107,29 @@ events.addEventListener('notify', e => {
     if (n.chat && !n.chat.startsWith('emp-')) api('/api/chats/open', { id: n.chat });
   };
 });
+
+// ---------- restarts and updates ----------
+// The server says which start it is. A page from an earlier start reloads (its token no longer
+// works), which is also how the page follows ClaudeOS into a new build.
+let boot = null;
+events.addEventListener('hello', e => {
+  const h = JSON.parse(e.data);
+  if (boot && h.boot !== boot) { location.reload(); return; }
+  boot = h.boot;
+  const u = h.updated;
+  if (!u) return;
+  const key = 'claudeos-updated-' + u.at;
+  try { if (sessionStorage.getItem(key)) return; sessionStorage.setItem(key, '1'); } catch { /* show it anyway */ }
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = u.ok ? `ClaudeOS updated to build ${u.to}` : `The new build didn't start, so ClaudeOS went back to build ${u.to}${u.status === 'failed' ? ' (see update.log in your ClaudeOS data folder)' : ''}`;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 8000);
+});
+// a build Claude just made shows as a dot on ⚙
+setInterval(async () => {
+  if (document.hidden) return;
+  const u = await api('/api/update').catch(() => null);
+  if (u && !u.error) { update = u; btn.classList.toggle('ping', !!u.ready); if (!menu.hidden) draw(); }
+}, 20000);
+api('/api/update').then(u => { if (u && !u.error) { update = u; btn.classList.toggle('ping', !!u.ready); } });

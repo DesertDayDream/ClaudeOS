@@ -26,6 +26,7 @@ import { createRegistry, setupBrain, repairHooks, listFolder, slugFor, samePath,
 import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile } from './runtime.mjs';
 import { startTray } from './tray.mjs';
 import { createDesktop, openPage as openWindow, showPage as showWindow } from './desktop.mjs';
+import { createUpdater } from './update.mjs';
 
 const HOME = os.homedir();
 const CLAUDE = path.resolve(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude'));
@@ -297,6 +298,8 @@ function broadcast(event, data) {
 // The chat can run commands on this PC, so only this page may use it: a per-start token that only
 // the served page knows, plus Host/Origin checks against other sites and DNS rebinding.
 const TOKEN = crypto.randomBytes(24).toString('hex');
+// which start of the server a page talks to: a page from an earlier one reloads (its token is stale)
+const BOOT = crypto.randomBytes(6).toString('hex');
 const LOCAL_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`]);
 // The chats' desk: shell tabs Claude and the user share, and the artifacts Claude publishes
 // (served on their own port, so a page can never reach this one's token or API).
@@ -325,6 +328,11 @@ async function desk(tool, a) {
   if (tool === 'publish_artifact') {
     const r = artifacts.publish({ file: a.file_path, title: a.title, description: a.description, id: a.id, chat: a.chat });
     return r.error ? r : { text: `${r.updated ? 'Updated' : 'Published'} “${r.artifact.title}” (id ${r.artifact.id}): ${r.artifact.url}\nIt shows in the ClaudeOS Artifacts tab. Give the user this link.` };
+  }
+  if (tool === 'update_app') {
+    const brain = [...chats.entries()].find(([, c]) => c === owner)?.[0] || '';
+    const r = updater.request({ chat: a.chat, brain });
+    return r.error ? r : { text: r.waiting ? 'ClaudeOS restarts into the new build as soon as every chat (this one included) has finished its turn. End your turn now; the page reloads by itself, and the user sees which build is running.' : 'ClaudeOS is restarting into the new build now.' };
   }
   if (tool === 'start_session') return owner.startSession(a);
   if (tool === 'message_session') return owner.messageSession(a);
@@ -576,6 +584,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/chats' && req.method === 'GET') return json(res, 200, chat ? chat.list(url.searchParams.get('q') || '') : { chats: [] });
   if (url.pathname === '/api/employee' && req.method === 'GET') return json(res, 200, active ? employeeView(active, url.searchParams.get('id') || '') : { error: 'Set up a brain first.' });
   if (url.pathname === '/api/manager' && req.method === 'GET') return json(res, 200, active ? managerFor(active).snapshot() : { inbox: [], files: [], briefs: [], busy: false });
+  if (url.pathname === '/api/update' && req.method === 'GET') return json(res, 200, updater.status());
   if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, await settingsView());
   if (url.pathname === '/api/terminals' && req.method === 'GET') return json(res, 200, terminals.snapshot());
   if (url.pathname === '/api/artifacts' && req.method === 'GET') return json(res, 200, { list: artifacts.list(), port: ARTIFACT_PORT });
@@ -600,6 +609,8 @@ async function handleApi(req, res, url) {
   const body = await readJson(req);
   // the desk tools a chat's Claude calls (approval-mcp.mjs), for whichever brain that chat is in
   if (url.pathname.startsWith('/api/desk/')) return json(res, 200, await desk(url.pathname.slice('/api/desk/'.length), body));
+  // install the new build beside the exe (or stop waiting to)
+  if (url.pathname === '/api/update') return json(res, 200, body.cancel ? updater.cancel() : updater.request({}));
   // window, hotkey, notifications, start at login
   if (url.pathname === '/api/settings') {
     const before = desktop.settings().hotkey;
@@ -734,7 +745,7 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health'
     || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief' || url.pathname === '/api/org' || url.pathname.startsWith('/api/employee')
-    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file' || url.pathname === '/api/preview' || url.pathname === '/api/settings') {
+    || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file' || url.pathname === '/api/preview' || url.pathname === '/api/settings' || url.pathname === '/api/update') {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));
   }
   if (url.pathname === '/api/state') {
@@ -743,6 +754,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/api/events') {
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+    res.write(`event: hello\ndata: ${JSON.stringify({ boot: BOOT, updated: updater.status().last })}\n\n`);
     res.write(`data: ${JSON.stringify(last)}\n\n`);
     clients.add(res);
     const ping = setInterval(() => res.write(': ping\n\n'), 20000);
@@ -763,6 +775,8 @@ const server = http.createServer((req, res) => {
 });
 
 const PAGE_URL = `http://localhost:${PORT}`;
+const updater = createUpdater({ dataDir: DATA, port: PORT, quit: () => quit(),
+  busy: () => [...chats.values()].some(c => c.anyBusy()) || [...managers.values()].some(m => m.busy()) || handoffs.size > 0 });
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`ClaudeOS running at ${PAGE_URL}  (data: ${DATA})`);
   if (process.argv.includes('--open')) openPage(PAGE_URL);

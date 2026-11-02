@@ -33,4 +33,5 @@ async function run() {
     await import('./server.mjs');
   }
 }
-run().catch(err => { console.error(err); process.exit(1); });
+// give the log a moment to reach the disk, so a crash at start is in claudeos.log
+run().catch(err => { console.error(err); setTimeout(() => process.exit(1), 200); });
