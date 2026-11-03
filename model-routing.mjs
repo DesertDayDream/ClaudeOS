@@ -63,7 +63,7 @@ export function selectModel(selection = {}, caller = {}, catalog = modelCatalog(
 }
 
 // Quota errors only. Auth, denied permissions and ordinary task errors must not trigger retries.
-export const usageLimited = error => /(?:usage[_ -]?limit(?:[_ -]?(?:reached|exceeded))?|rate[_ -]?limit(?:[_ -]?(?:reached|exceeded))?|quota[_ -]?(?:exceeded|exhausted)|out of (?:usage|credits)|you(?:'ve| have) (?:hit|reached) your limit|too many requests)/i.test(String(error || ''));
+export const usageLimited = error => /(?:usage[_ -]?limit(?:[_ -]?(?:reached|exceeded))?|rate[_ -]?limit(?:[_ -]?(?:reached|exceeded))?|quota[_ -]?(?:exceeded|exhausted)|out of (?:usage|credits)|you(?:'ve| have) (?:hit|reached) your (?:[\w-]+\s+){0,4}limit|too many requests)/i.test(String(error || ''));
 
 export function fallbackModel(pick, caller, catalog) {
   if (!pick.selection.fallback || pick.selection.requiredEngine) return null;

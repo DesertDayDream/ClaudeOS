@@ -35,7 +35,7 @@ test('invalid choices and conflicting requirements are rejected before running',
 });
 
 test('quota classification excludes auth, denied commands and task failures', () => {
-  for (const e of ["You've hit your limit · resets 4pm", 'usage_limit_reached', 'rate_limit_exceeded', 'quota exhausted']) assert.ok(usageLimited(e), e);
+  for (const e of ["You've hit your limit · resets 4pm", "You've hit your 5-hour limit · resets 9:30pm", "You've hit your weekly limit", 'usage_limit_reached', 'rate_limit_exceeded', 'quota exhausted']) assert.ok(usageLimited(e), e);
   for (const e of ['Not logged in', 'Permission denied', 'Compile error', 'context window exceeded']) assert.equal(usageLimited(e), false, e);
 });
 

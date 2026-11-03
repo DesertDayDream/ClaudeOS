@@ -33,12 +33,15 @@ export function runModelTask({ prompt, selection, caller, cwd, mcpServers, allow
 }
 
 export function runClaudeTask({ prompt, model, effort, cwd, mcpServers, allowed, scope, addDirs, onLog, mode, session }) {
-  const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--model', model,
+  // Pipe the prompt: fallback context can exceed Windows' command-line length limit.
+  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--model', model,
     ...(effort ? ['--effort', effort] : []), ...(session ? ['--session-id', session] : []), '--mcp-config', JSON.stringify({ mcpServers }),
     '--permission-prompt-tool', 'mcp__claudeos__approve', '--allowedTools', allowed.join(','),
     ...(scope.disallowed?.length ? ['--disallowedTools', scope.disallowed.join(',')] : []),
     ...(scope.settings ? ['--settings', JSON.stringify(scope.settings)] : []), ...(mode ? ['--permission-mode', mode] : []), ...addDirs.flatMap(d => ['--add-dir', d])];
   const proc = spawn('claude', args, { cwd, windowsHide: true, env: { ...process.env, MCP_TOOL_TIMEOUT: String(86400000), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } });
+  proc.stdin.on('error', () => {}); // startup/quota failures can close stdin before the prompt is consumed
+  proc.stdin.end(prompt);
   let buffer = '', stderr = '', last, stopped = false;
   const done = new Promise(resolve => {
     proc.stdout.on('data', chunk => {
