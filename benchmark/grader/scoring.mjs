@@ -51,6 +51,9 @@ export function scoreSide(side, round) {
 
 // sides: [{ id, name, metrics, score }]. Who did better, and why.
 export function verdict(sides, tieMargin = 5) {
+  if (sides.some(s => s.metrics?.status !== 'done' || !s.metrics?.logFile || s.metrics?.cwdOk !== true)) {
+    return {winner:null, why:'Comparison incomplete or working folders unverified. No winner can be determined.'};
+  }
   const ok = sides.filter(s => s.score.pass);
   if (!ok.length) return { winner: null, why: 'Both failed a must-pass check.' };
   if (ok.length === 1) return { winner: ok[0].id, why: `${ok[0].name} is the only one that passed every must-pass check.` };

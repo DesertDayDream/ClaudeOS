@@ -14,6 +14,8 @@ test('unobserved, stopped and wrong-folder runs cannot pass; ungraded prompts ca
   assert.equal(score(metrics).pass, true);
   for (const change of [{logFile:null},{status:'stopped'},{cwdOk:false},{reply:'OK. I created it'}]) assert.equal(score({...metrics,...change}).pass,false);
   assert.equal(verdict([{id:'a',metrics,score:score(metrics)},{id:'b',metrics:{...metrics,elapsedMs:10000},score:score(metrics)}]).winner,null);
+  const passing = {...score(metrics), quality:100};
+  assert.equal(verdict([{id:'a',metrics,score:passing},{id:'b',metrics:{...metrics,status:'failed'},score:{...passing,pass:false}}]).winner,null);
 });
 
 test('embedded routes enforce auth, preserve round files, export escaped evidence, and survive restart', async t => {
