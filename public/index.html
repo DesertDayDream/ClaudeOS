@@ -649,6 +649,17 @@
   /* ---------- Claude's plan ---------- */
   #todos { border: 1px solid var(--line); border-radius: 10px; background: rgba(0,0,0,0.2); font-size: 12px; }
   #todos[hidden] { display: none; }
+  #todos.finished .td-h { color: #7be0a0; }
+  #crewon { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; font-size: 11.5px; color: var(--dim); }
+  #crewon[hidden] { display: none; }
+  #crewon .who { border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; color: var(--text); background: rgba(0,0,0,0.2); }
+  #crewon .who.now { border-color: var(--accent); }
+  #crewon .who.sk { color: var(--dim); }
+  .msg .tools div.skill { color: var(--text); font-weight: 600; }
+  .msg .tools div.skill::before { content: "👤"; font-size: 10px; top: 1px; }
+  .msg .tools div.skill.plain { font-weight: normal; color: var(--dim); }
+  .msg .tools div.skill.plain::before { content: "✦"; color: var(--accent); }
+  .msg .tools div.skill span { color: var(--dim); font-weight: normal; }
   #todos .td-h { width: 100%; text-align: left; background: none; border: 0; color: var(--text); font: inherit; padding: 6px 10px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #todos .td-h span { color: var(--dim); }
   #todos ul { list-style: none; margin: 0; padding: 0 10px 8px; max-height: 160px; overflow-y: auto; display: none; }
@@ -818,6 +829,7 @@
     <form class="composer" id="composer">
       <div id="suggest" hidden></div>
       <div class="nudge" id="nudge" hidden></div>
+      <div id="crewon" hidden></div>
       <div id="todos" hidden></div>
       <div id="review" hidden></div>
       <div class="meter" id="meter" hidden></div>

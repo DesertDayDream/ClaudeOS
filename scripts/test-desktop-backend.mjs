@@ -31,9 +31,12 @@ childProcess.spawn = (command, args) => {
       if (['thread/start', 'thread/resume'].includes(data.method)) queueMicrotask(() => send({ id: data.id, result: { thread: { id: 'lab-thread' } } }));
       if (data.method === 'turn/start') queueMicrotask(() => {
         send({ id: data.id, result: { turn: { id: 'lab-turn' } } });
+        send({ method: 'turn/plan/updated', params: { threadId: 'lab-thread', plan: [{ step: 'Check the marker', status: 'pending' }] } });
+        send({ method: 'item/started', params: { threadId: 'lab-thread', item: { id: 'skill-read', type: 'commandExecution', command: 'cat .claude/skills/researcher/SKILL.md' } } });
         send({ id: 900, method: 'item/commandExecution/requestApproval', params: { threadId: 'lab-thread', turnId: 'lab-turn', itemId: 'lab-command', command: 'echo safe-lab', cwd: source, reason: 'Backend approval integration test' } });
       });
       if (data.id === 900 && data.result) queueMicrotask(() => {
+        send({ method: 'turn/plan/updated', params: { threadId: 'lab-thread', plan: [{ step: 'Check the marker', status: 'completed' }] } });
         send({ method: 'item/completed', params: { threadId: 'lab-thread', item: { id: 'reply', type: 'agentMessage', text: 'Approval result: ' + data.result.decision } } });
         send({ method: 'turn/completed', params: { threadId: 'lab-thread', turn: { id: 'lab-turn', status: 'completed' } } });
       });
@@ -115,12 +118,15 @@ try {
   assert.equal((await api('/api/chat/options', { engine: 'codex' })).value.error, undefined);
   assert.equal((await api('/api/chat', { text: 'Lab approval test' })).value.ok, true);
   const pending = await waitFor(state => state.approvals.length === 1);
+  assert.equal(pending.todos[0].status, 'pending', 'A plan with no active step stays pending');
+  assert.ok(pending.messages.some(m => m.tools?.some(t => t.skill?.name === 'researcher')));
   const card = pending.approvals[0];
   assert.equal(card.engine, 'codex'); assert.equal(card.input.command, 'echo safe-lab');
   assert.ok(card.choices.includes('acceptForSession'));
   assert.match((await api('/api/approval/answer', { id: card.id, decision: 'unknown' })).value.error, /not available/);
   assert.equal((await api('/api/approval/answer', { id: card.id, decision: 'accept' })).value.ok, true);
   const finished = await waitFor(state => !state.busy);
+  assert.equal(finished.todos[0].status, 'completed', 'Completed plan survives turn completion');
   assert.equal(finished.approvals.length, 0);
   assert.ok(finished.messages.some(message => message.text.includes('Approval result: accept')));
   assert.ok((await api('/api/approval/answer', { id: card.id, decision: 'accept' })).value.error);

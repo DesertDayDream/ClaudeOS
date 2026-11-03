@@ -28,6 +28,21 @@ function harness(overrides = {}) {
 }
 const approval = (method, id = 90, extra = {}) => ({ id, method, params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'item-1', command: 'echo safe-lab', cwd: 'C:\\lab', ...extra } });
 
+test('plan notifications preserve completed, active and pending steps', async () => {
+  const h = harness(); await tick();
+  h.notify('turn/plan/updated', { threadId: 'thread-1', plan: [
+    { step: 'Inspect', status: 'completed' },
+    { step: 'Build', status: 'in_progress' },
+    { step: 'Verify', status: 'pending' },
+  ] });
+  assert.deepEqual(h.events.at(-1).item.items, [
+    { text: 'Inspect', completed: true, active: false },
+    { text: 'Build', completed: false, active: true },
+    { text: 'Verify', completed: false, active: false },
+  ]);
+  h.stop(); await h.done;
+});
+
 test('initializes, resumes existing threads, maps modes and streams completion', async () => {
   const h = harness({ thread: 'thread-1', mode: '' }); await tick();
   assert.equal(h.sent.find(x => x.method === 'thread/resume').params.threadId, 'thread-1');

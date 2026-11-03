@@ -102,7 +102,25 @@ function render(msg) {
     for (const d of entry.el.querySelectorAll('details[data-k]')) if (openDetails.has(d.dataset.k)) d.open = true;
   }
   if (msg.todos) showTodos(msg.todos);
+  showCrew();
   scrollDown(stick);
+}
+// who has worked in this chat: each employee (and other skill) once, the latest one marked while busy
+const crewEl = document.getElementById('crewon');
+function showCrew() {
+  const seen = new Map();
+  let last = null;
+  for (const { msg } of messages.values()) for (const t of msg.tools || []) {
+    if (!t?.skill) continue;
+    const k = t.skill.who || t.skill.name;
+    seen.delete(k);
+    seen.set(k, t.skill);
+    last = k;
+  }
+  if (!seen.size) { crewEl.hidden = true; return; }
+  crewEl.hidden = false;
+  crewEl.innerHTML = `<span title="Employees and skills that worked in this chat">Working here:</span>` + [...seen].map(([k, s]) =>
+    `<span class="who${s.who ? '' : ' sk'}${busy && k === last ? ' now' : ''}" title="${s.who ? `${esc(s.who)}, the ${esc(s.role)} employee` : `The ${esc(s.name)} skill`}">${esc(s.who || s.name)}</span>`).join('');
 }
 const openDetails = new Set();
 log.addEventListener('toggle', e => {
@@ -160,6 +178,13 @@ function diffHtml(rows, lang = '') {
 const AGENT_STATE = { running: '◐', done: '✓', failed: '✕', stopped: '■' };
 function toolRow(t, key) {
   if (typeof t === 'string') return `<div title="${esc(t)}">${esc(t)}</div>`;
+  // an employee (or another skill) taking over this part of the work, in this same chat
+  if (t.skill) {
+    const s = t.skill;
+    return s.who
+      ? `<div class="skill" title="${esc(s.who)} works here, in this chat, using the ${esc(s.name)} skill">${esc(s.who)} <span>· ${esc(s.role)} is working on this</span></div>`
+      : `<div class="skill plain" title="${esc(t.text || '')}">Using the ${esc(s.name)} skill</div>`;
+  }
   // a subagent, with the steps it took folded under it
   if (t.agent) {
     const a = t.agent;
@@ -320,6 +345,7 @@ function setBusy(b) {
   wrapBtn.disabled = b; // New chat stays: the busy one keeps working in the list
   showContext();
   if (todos) showTodos(todos);
+  showCrew();
 }
 
 // the chat box shows the Manager's chat, or an employee's when their desk is open (s.employee)
@@ -353,6 +379,7 @@ async function load() {
   messages.clear();
   dismissed.clear();
   commands = s.commands || commands;
+  todos = null;
   todosEl.hidden = true;
   if (s.todos) showTodos(s.todos);
   for (const m of s.messages || []) render(m);
@@ -751,16 +778,20 @@ function showTodos(list) {
   if (!todos) { todosEl.hidden = true; return; }
   const done = todos.filter(t => t.status === 'completed').length;
   const now = todos.find(t => t.status === 'in_progress');
-  // a finished plan goes away once Claude is done
-  todosEl.hidden = done === todos.length && !busy;
-  todosEl.classList.toggle('open', todosOpen);
-  todosEl.innerHTML = `<button type="button" class="td-h" title="Claude's plan for this task">${todosOpen ? '▾' : '▸'} Plan · ${done} of ${todos.length} done${now ? ` · <span>${esc(now.active || now.text)}</span>` : ''}</button>
+  // a finished plan stays as a folded "all done" line until the next plan starts (click to unfold)
+  const finished = done === todos.length && !busy;
+  const open = finished ? todosOpen === 'all' : !!todosOpen;
+  todosEl.hidden = false;
+  todosEl.classList.toggle('open', open);
+  todosEl.classList.toggle('finished', finished);
+  todosEl.innerHTML = `<button type="button" class="td-h" title="Claude's plan for this task">${open ? '▾' : '▸'} ${finished ? `✓ Plan · all ${todos.length} done` : `Plan · ${done} of ${todos.length} done`}${now ? ` · <span>${esc(now.active || now.text)}</span>` : ''}</button>
     <ul>${todos.map(t => `<li class="${esc(t.status)}"><i>${TODO_ICON[t.status] || '○'}</i>${esc(t.status === 'in_progress' && t.active ? t.active : t.text)}</li>`).join('')}</ul>`;
 }
 todosEl.addEventListener('click', e => {
   if (!e.target.closest('.td-h')) return;
-  todosOpen = !todosOpen;
-  localStorage.setItem('claudeos.todosOpen', todosOpen ? '1' : '0');
+  // a finished plan unfolds just for now; a running one remembers the choice
+  if (todosEl.classList.contains('finished')) todosOpen = todosOpen === 'all' ? true : 'all';
+  else { todosOpen = !todosOpen; localStorage.setItem('claudeos.todosOpen', todosOpen ? '1' : '0'); }
   showTodos(todos);
 });
 

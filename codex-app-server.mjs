@@ -81,7 +81,7 @@ export function runAppServerTurn({ command, args = [], env = {}, cwd, thread, pr
     if (method === 'serverRequest/resolved') { approvals.get(p.requestId)?.abort(); approvals.delete(p.requestId); }
     else if (method === 'item/started' || method === 'item/completed') { if (p.item?.id) items.set(p.item.id, p.item); emit({ type: method.replace('/', '.'), item: normalizeCodexItem(p.item) }); }
     else if (method === 'item/agentMessage/delta') emit({ type: 'agent.delta', itemId: p.itemId, text: p.delta });
-    else if (method === 'turn/plan/updated') emit({ type: 'item.updated', item: { id: 'codex-plan', type: 'todo_list', items: (p.plan || []).map(step => ({ text: step.step, completed: step.status === 'completed' })) } });
+    else if (method === 'turn/plan/updated') emit({ type: 'item.updated', item: { id: 'codex-plan', type: 'todo_list', items: (p.plan || []).map(step => ({ text: step.step, completed: step.status === 'completed', active: /progress/i.test(step.status || '') })) } });
     else if (method === 'thread/tokenUsage/updated') {
       const last = p.tokenUsage?.last;
       if (last) usage = { input_tokens: last.inputTokens, cached_input_tokens: last.cachedInputTokens,
