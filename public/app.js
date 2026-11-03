@@ -421,9 +421,12 @@ function mindOf(s) {
   const fam = modelFamily(m.model);
   const from = (k) => m[k + 'From'] === 'skill' ? 'set in their SKILL.md' : m[k + 'From'] === 'settings' ? 'your Claude settings'
     : m.from === 'own' ? 'their own pick' : "the Manager's pick";
-  const r = rating(work.runs.get(s.id) || []);
+  const runs = work.runs.get(s.id) || [], since = state.coaching?.[s.id]?.at || 0;
+  const r = rating(runs);
   return {
     size: modelTier(m), brightness: effortLevel(m.effort), meter: s.craft ? s.craft.score : null, record: r,
+    // needs work: judged on their work since the last coaching, the same way the coach decides to step in
+    fresh: since ? rating(runs.filter(x => (x.end || x.last) > since)) : r,
     rating: r.runs ? Math.round(r.score * 100) : null, // null: no runs yet, a new hire
     modelText: `${m.engine === 'codex' ? `Codex ${m.model || 'default model'}` : fam ? MODEL_NAMES[fam] : m.model || 'Claude Code default model'} (${from('model')})`,
     effortText: `${m.effort ? m.effort[0].toUpperCase() + m.effort.slice(1) : 'Default'} effort (${from('effort')})`,
@@ -431,9 +434,9 @@ function mindOf(s) {
 }
 const ratingColor = n => n == null ? '#9aa3c7' : n >= 75 ? '#7ee0a8' : n >= 50 ? '#f2c14e' : '#f08a7e';
 const ratingText = n => n == null ? 'new' : String(n);
-const NEEDS_BADGE = '<span class="needs" title="Their graded work keeps coming back weak. Open them and press Coach for better instructions.">needs work</span>';
-// how many of their finished runs are graded weak (what the coach learns from)
-const weakCount = s => (work.runs.get(s.id) || []).filter(r => r.status === 'done' && weakRun(r.grade)).length;
+const NEEDS_BADGE = '<span class="needs" title="Their graded work keeps coming back weak. The coach rewrites their instructions automatically (within a minute, when no chat is working).">needs work</span>';
+// how many of their finished runs since the last coaching are graded weak (what the coach learns from)
+const weakCount = s => { const since = state.coaching?.[s.id]?.at || 0; return (work.runs.get(s.id) || []).filter(r => r.status === 'done' && r.end > since && weakRun(r.grade)).length; };
 function skillText(c) {
   return c ? `${c.words.toLocaleString()} words · ${c.sections} sections · ${c.examples} examples · ${c.files} files` : 'no SKILL.md on this PC';
 }
@@ -1022,7 +1025,7 @@ function renderPanel() {
       : lastRun ? `<div class="now ${lastRun.status}">${esc(lastRun.prompt || 'a task')} · ${ago(lastRun.end || lastRun.last)}</div>` : '';
     return `<div class="emp ${busy ? 'busy' : ''} ${selected === s.id ? 'sel' : ''}" data-id="${esc(s.id)}"${s.source !== 'contractor' ? ' draggable="true"' : ''}>
       <div class="dot" style="background:${hex(SOURCE_COLORS[s.source] ?? SOURCE_COLORS.plugin)}"></div>
-      <div class="who">${esc(employeeName(s))}<span class="iq" title="${esc(mindTip(s))}" style="color:${ratingColor(mindOf(s).rating)}">🧠${ratingText(mindOf(s).rating)}</span>${needsWork(mindOf(s).record) ? NEEDS_BADGE : ''}${appsOf(s).slice(0, 5).map(appBadge).join('')}</div>
+      <div class="who">${esc(employeeName(s))}<span class="iq" title="${esc(mindTip(s))}" style="color:${ratingColor(mindOf(s).rating)}">🧠${ratingText(mindOf(s).rating)}</span>${needsWork(mindOf(s).fresh) ? NEEDS_BADGE : ''}${appsOf(s).slice(0, 5).map(appBadge).join('')}</div>
       <div class="load">${busy ? 'working' : n ? `${n} job${n > 1 ? 's' : ''}` : 'idle'}</div>
       <div class="role">${esc(s.name)}</div>${now}</div>`;
   };
@@ -1144,7 +1147,7 @@ const openRuns = new Set(); // runs whose full answer is showing
 function renderBoard(el, s) {
   let html = `${s.source === 'contractor' ? office.backBar() : office.tabs('profile')}<h3>${esc(employeeName(s))} · ${esc(s.name)}</h3>
     <div class="k">${esc(SOURCE_TITLES[s.source] || s.source)}${s.owner ? ' · ' + esc(s.owner) : ''} · ${work.load.get(s.id) || 0} jobs</div>
-    <div class="desc">${esc(s.description)}</div>${mindHtml(s)}`;
+    <div class="desc">${esc(s.description)}</div>${mindHtml(s)}${coachedHtml(s)}`;
   const apps = appsOf(s);
   if (apps.length) {
     html += `<div class="runs-h">Apps</div><div class="apps-l">${apps.map(a => `<div class="row">${appBadge(a)}
@@ -1168,15 +1171,29 @@ function renderBoard(el, s) {
   el.innerHTML = html;
   el.classList.add('board');
 }
-// The coach: reads their weak runs and suggests better instructions, opened in the editor to look over
+// The coach (coaching.mjs): rewrites their SKILL.md from their weak runs and saves it; it runs by itself when
+// they need work, or now with this button. Undo puts the old instructions back.
 let coachingId = null;
 function coachButton(s) {
   const n = weakCount(s);
-  if (coachingId === s.id) return '<button class="btn" disabled>Coaching… (up to a few minutes)</button>';
+  if (coachingId === s.id) return '<button class="btn" disabled>Coaching…</button>';
   return `<button class="btn" data-skill="coach" ${n ? '' : 'disabled'} title="${n
-    ? `Claude Sonnet reads their ${n} weak run${n > 1 ? 's' : ''} (and their best ones) and suggests better SKILL.md instructions. You look them over before anything is saved.`
-    : 'Nothing to learn from yet: the coach needs a run graded 3/5 or lower, or one you gave 👎.'}">Coach</button>`;
+    ? `Claude Sonnet reads their ${n} weak run${n > 1 ? 's' : ''} since the last coaching (and their best ones) and rewrites their SKILL.md instructions. Saved right away; Undo puts the old ones back.`
+    : 'Nothing new to learn from: the coach needs a run graded 3/5 or lower, or one you gave 👎, since the last coaching.'}">Coach now</button>`;
 }
+function coachedHtml(s) {
+  const c = state.coaching?.[s.id];
+  if (!c) return '';
+  return `<div class="coached ${c.undone ? 'undone' : ''}"><b>${c.undone ? 'Coaching undone' : 'Coached'}</b> ${ago(c.at)}${c.why === 'auto' ? ' (automatically)' : ''}${c.weak ? ` from ${c.weak} weak run${c.weak > 1 ? 's' : ''}` : ''}: ${esc(c.summary)}${c.undone ? '' : ' <button class="btn mini" data-skill="uncoach">Undo</button>'}</div>`;
+}
+async function uncoach(id) {
+  const r = await api('/api/skills/uncoach', { id });
+  toast(r.error || 'Their old instructions are back.');
+}
+events.addEventListener('coached', e => {
+  const c = JSON.parse(e.data);
+  toast(`Coached ${c.employee}: ${c.summary}`, 'Undo', () => uncoach(c.id));
+});
 // Their brain explained: what each part of it shows, and what would raise it
 function mindHtml(s) {
   const i = mindOf(s), r = i.record;
@@ -1187,7 +1204,7 @@ function mindHtml(s) {
     ${bar('SKILL.md', i.meter, `${skillText(s.craft)} · how full it is`, 'Clear instructions, a description that says when to use it, sections, steps, examples and bundled scripts fill the brain.')}
     ${bar('Finishing', r.runs ? r.finish : null, r.runs ? `${r.done} of ${r.runs} runs done${r.failed ? `, ${r.failed} failed` : ''}` : 'no runs yet', 'How often their runs finish. 40% of the rating once their work is graded.')}
     ${bar('Quality', r.quality, r.graded ? `${r.graded} run${r.graded > 1 ? 's' : ''} graded (Haiku's 1–5, or your 👍/👎)` : 'not graded yet: Haiku grades each finished run', "How good the finished work was. 60% of the rating. Your 👍/👎 on a run replaces Haiku's grade.")}
-    ${needsWork(r) ? `<div class="needs-note">${NEEDS_BADGE}Quality ${Math.round(r.quality * 100)}/100 over ${r.graded} graded runs. Press <b>Coach</b> below: it reads their weak runs and suggests better instructions.</div>` : ''}
+    ${needsWork(i.fresh) ? `<div class="needs-note">${NEEDS_BADGE}Quality ${Math.round(i.fresh.quality * 100)}/100 over ${i.fresh.graded} graded runs${state.coaching?.[s.id] ? ' since the last coaching' : ''}. The coach rewrites their instructions automatically within a minute, once no chat is working.</div>` : ''}
     ${bar('Rating', r.runs ? r.score : null, r.runs ? 'finishing and quality, counting more the more runs there are · the number' : 'no runs yet: shows "new" until they finish work', 'Good, finished work raises their rating; it counts more the more runs there are.')}
   </div>`;
 }
@@ -1442,8 +1459,7 @@ function renderSkillForm(el, s) {
     ? `<span class="ask">Fire ${esc(employeeName(s))}? Claude stops using this skill. You can undo right after.</span><button class="btn" data-skill="board">Cancel</button><button class="btn danger primary" data-skill="fire">Fire</button>`
     : mode === 'view' ? `${err}<button class="btn" data-skill="board">Back</button>`
     : `${err}<button class="btn" data-skill="board">Cancel</button><button class="btn primary" data-skill="save">${s ? 'Save' : 'Hire'}</button>`;
-  const coachNote = s && mode === 'edit' && skillForm.coach ? `<div class="coach"><b>Coach's suggestion</b> from ${skillForm.coach.weak} weak run${skillForm.coach.weak > 1 ? 's' : ''}: ${esc(skillForm.coach.summary)}<div>The new instructions are below. Save to keep them, or <button class="btn mini" data-skill="uncoach">Use the current ones</button></div></div>` : '';
-  el.innerHTML = `${head}${coachNote}
+  el.innerHTML = `${head}
     <label for="skName">Skill name <small>lowercase-with-dashes</small></label>
     <input class="f" id="skName" spellcheck="false" placeholder="proof-reader" ${ro}>
     <label for="skDesc">Description <small>what it does, and when Claude should use it</small></label>
@@ -1456,7 +1472,6 @@ function renderSkillForm(el, s) {
   el.querySelector('#skDesc').value = d.description;
   el.querySelector('#skBody').value = d.body;
   if (!ro) el.querySelector(s ? '#skBody' : '#skName').focus();
-  if (skillForm.coach && s) { const b = el.querySelector('#skBody'); b.setSelectionRange(0, 0); b.scrollTop = 0; } // read the coach's version from the top
 }
 
 document.getElementById('detail').addEventListener('click', async e => {
@@ -1468,19 +1483,11 @@ document.getElementById('detail').addEventListener('click', async e => {
   if (act === 'coach') {
     coachingId = id; renderDetail();
     const r = await api('/api/skills/coach', { id });
-    coachingId = null;
-    if (r.error) { renderDetail(); return toast(r.error); }
-    if (selected !== id) return toast(`The coach is done with ${r.name}. Open them and press Coach again to see the suggestion.`);
-    skillForm = { id, mode: 'edit', err: '', coach: { summary: r.summary, weak: r.weak, oldBody: r.oldBody },
-      data: { name: r.name, description: r.description, body: r.body, file: r.file, editable: true } };
-    return renderDetail();
-  }
-  if (act === 'uncoach') { // back to the instructions as they are
-    const b = document.getElementById('skBody');
-    if (b && skillForm.coach) { b.value = skillForm.coach.oldBody; skillForm.coach = null; btn.closest('.coach')?.remove(); }
+    coachingId = null; renderDetail();
+    if (r.error) toast(r.error); // done: the 'coached' event shows it, with Undo
     return;
   }
-  if (act === 'ask') return openSkill(id, 'confirm');
+  if (act === 'uncoach') return uncoach(id);
   if (act === 'board') {
     skillForm = { id: null, mode: 'board', data: null, err: '' };
     if (selected === HIRE) selected = null;

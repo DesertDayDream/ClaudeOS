@@ -95,9 +95,10 @@ const clip = (s, n) => { s = String(s || ''); return s.length > n ? s.slice(0, n
 // Does this run's skill (as Claude called it, maybe "plugin:name") belong to the employee named `name`?
 export const ranAs = (run, name) => (run.skillNames || []).some(n => n === name || n.split(':').pop() === name);
 
-// The employee's graded runs to learn from: the weak ones (newest 8) and the best ones (newest 3) as what to keep
-export function lessonsFor(runs, grades, name) {
-  const mine = runs.filter(r => r.outcome === 'done' && ranAs(r, name)).reverse()
+// The employee's graded runs to learn from: the weak ones (newest 8) and the best ones (newest 3) as what to keep.
+// since: only runs that ended after it (the last coaching already learned from the ones before).
+export function lessonsFor(runs, grades, name, since = 0) {
+  const mine = runs.filter(r => r.outcome === 'done' && r.end > since && ranAs(r, name)).reverse()
     .map(r => ({ ...r, grade: grades[r.key] })).filter(r => runQuality(r.grade) != null);
   return { weak: mine.filter(r => weakRun(r.grade)).slice(0, 8), strong: mine.filter(r => strongRun(r.grade)).slice(0, 3) };
 }
@@ -141,8 +142,8 @@ export function parseCoach(text) {
 }
 
 // skill: { name, description, body }; runs: finishedRuns(activity); grades: the stored grades
-export async function coach(skill, runs, grades, ask = askClaude) {
-  const lessons = lessonsFor(runs, grades, skill.name);
+export async function coach(skill, runs, grades, ask = askClaude, since = 0) {
+  const lessons = lessonsFor(runs, grades, skill.name, since);
   if (!lessons.weak.length) return { error: 'No weak runs to learn from yet. The coach needs at least one run graded 3/5 or lower, or one you gave 👎.' };
   const r = parseCoach(await ask(coachPrompt(skill, lessons), { model: 'sonnet', timeout: COACH_TIMEOUT_MS }));
   if (!r) return { error: "The coach couldn't come up with new instructions this time. Try again." };

@@ -25,7 +25,8 @@ import { openFile } from './openfile.mjs';
 import { createMemoryEditor, observationId } from './memory-edit.mjs';
 import { createSkillEditor } from './skill-edit.mjs';
 import { createOrg } from './org.mjs';
-import { createGrades, finishedRuns, coach } from './grades.mjs';
+import { createGrades, finishedRuns } from './grades.mjs';
+import { createCoaching } from './coaching.mjs';
 import { ensureCabinet, findCabinet, cabinetTree } from './cabinets.mjs';
 import { appsInText, appForServer } from './public/apps.js';
 import { CATALOG, CONNECTORS_URL, KEY_HELP, addIntegration, removeIntegration, loginIntegration, isSigningIn, signInLink, cancelLogin, sendLoginRedirect, logoutIntegration, keysFor, saveKey, setPtyLoader } from './integrations.mjs';
@@ -325,6 +326,7 @@ try { ensureHome(); } catch (e) { console.error('Could not set up the Home brain
 
 // The quality of each finished run: Haiku's grade and the user's thumbs (grades.mjs)
 const grades = createGrades({ file: path.join(DATA, 'grades.json'), onChange: () => refresh() });
+const coaching = createCoaching({ file: path.join(DATA, 'coaching.json'), backupDir: path.join(DATA, 'coaching'), onChange: () => refresh() });
 function withGrades(activity) { return { activity, grades: grades.for(finishedRuns(activity).map(r => r.key)) }; }
 setInterval(() => { const b = brains.active(); if (b) grades.tick(collectActivity(b)).catch(() => {}); }, 15000);
 
@@ -343,7 +345,7 @@ function snapshot() {
       memories: collectBrain(b), skills: teamSkills(b) })),
     // a clean brain hires from Home: the user's personal skills, copied into this brain's team
     home: brain.home || !brains.home() ? null : { id: brains.home().id, name: brains.home().name, skills: teamSkills(brains.home()) },
-    ...withGrades(collectActivity(brain)), at: Date.now(), org: org.snapshot(brain.id),
+    ...withGrades(collectActivity(brain)), coaching: coaching.view(skills.map(s => s.id)), at: Date.now(), org: org.snapshot(brain.id),
     integrations: integrations.brainId === brain.id ? integrations.list : [],
   };
 }
@@ -399,7 +401,7 @@ let last = snapshot();
 let lastKey = keyOf(last);
 const clients = new Set();
 function keyOf(s) {
-  return JSON.stringify([s.brain?.id, s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id + s.craft?.score), s.minds, s.activity.length && s.activity[s.activity.length - 1], s.grades, s.org]);
+  return JSON.stringify([s.brain?.id, s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id + s.craft?.score), s.minds, s.activity.length && s.activity[s.activity.length - 1], s.grades, s.coaching, s.org]);
 }
 function refresh() {
   checkIntegrations(brains.active());
@@ -703,20 +705,29 @@ function skillApi(active, route, body) {
   return { error: 'not found' };
 }
 
-// The coach: reads one of this brain's employees' graded runs and suggests better SKILL.md instructions.
-// Nothing is saved here; the page opens the suggestion in the editor for the user to look over and save.
-const coaching = new Set();
+// The coach (coaching.mjs): an employee whose graded work keeps coming back weak gets better SKILL.md
+// instructions, saved right away; Undo puts the old ones back. Checked once a minute, one employee at a time,
+// never while a chat or the Manager is working. The Coach button does the same on demand.
+function coachable(brain) {
+  const team = teamDir(brain);
+  return skillsIn(team, 'project', path.basename(brain.path)).map(s => ({ id: s.id, name: s.name, file: path.join(team, s.folder, 'SKILL.md'),
+    read: () => skillEditor.read(team, s.folder), write: fields => skillEditor.save(team, s.folder, fields) }));
+}
+function announceCoached(e, r) {
+  if (r.ok) broadcast('coached', { id: e.id, name: e.name, employee: names[e.id] || e.name, summary: r.summary });
+}
+setInterval(() => {
+  const b = brains.active();
+  if (!b || anyBusy()) return;
+  coaching.tick(coachable(b), finishedRuns(collectActivity(b)), grades.all())
+    .then(t => { if (t) announceCoached(t.employee, t.result); }).catch(() => {});
+}, 60000);
 async function coachSkill(active, body) {
-  const s = body.id ? teamSkill(active, String(body.id)) : null;
-  if (!s) return { error: 'Only this brain’s own employees can be coached.' };
-  if (coaching.has(s.id)) return { error: 'The coach is already working on this employee.' };
-  coaching.add(s.id);
-  try {
-    const cur = skillEditor.read(teamDir(active), s.folder);
-    const r = await coach({ name: s.name, description: cur.description, body: cur.body }, finishedRuns(collectActivity(active)), grades.all());
-    return r.error ? r : { ...r, name: cur.name, description: cur.description, file: cur.file, oldBody: cur.body };
-  } catch (err) { return { error: err.message }; }
-  finally { coaching.delete(s.id); }
+  const e = coachable(active).find(x => x.id === String(body.id || ''));
+  if (!e) return { error: 'Only this brain’s own employees can be coached.' };
+  const r = await coaching.run(e, finishedRuns(collectActivity(active)), grades.all(), 'manual');
+  announceCoached(e, r);
+  return r;
 }
 
 // Is Claude Code installed? The setup screen warns new users if it isn't.
@@ -921,6 +932,7 @@ async function handleApi(req, res, url) {
   if (url.pathname.startsWith('/api/employee/')) return json(res, 200, await employeeApi(active, url.pathname.split('/').pop(), body));
   if (url.pathname === '/api/skills/copy') return json(res, 200, copySkill(active, body));
   if (url.pathname === '/api/skills/coach') return json(res, 200, await coachSkill(active, body));
+  if (url.pathname === '/api/skills/uncoach') { const r = coaching.undo(String(body.id || '')); refresh(); return json(res, 200, r); }
   if (/^\/api\/skills\/(save|fire|restore)$/.test(url.pathname)) {
     try { const r = skillApi(active, url.pathname.split('/').pop(), body); refresh(); return json(res, 200, r); }
     catch (err) { return json(res, 200, { error: err.message }); }
