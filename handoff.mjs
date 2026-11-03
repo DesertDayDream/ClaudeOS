@@ -2,6 +2,6 @@
 // Keep the target brain's context and permissions; never inject it into the caller.
 export function runHandoff({ task, runner, onExit = () => {} }) {
   if (!runner) return { done: Promise.resolve({ error: 'The warm chat runner is unavailable.' }).finally(onExit), stop() {} };
-  const run = runner({ prompt: `${task}\n\nThis is a linked-brain handoff. Do not call ask_brain recursively. End with a short report.` });
+  const run = runner({ prompt: `${task}\n\nThis is a linked-brain handoff. Before using any employee skill, read its current SKILL.md from disk, including Performance Review Corrections, even if loaded earlier in this conversation. Do not call ask_brain recursively. End with a short report.` });
   return { done: run.done.finally(onExit), stop: () => run.stop() };
 }

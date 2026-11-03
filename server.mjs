@@ -330,7 +330,7 @@ try { ensureHome(); } catch (e) { console.error('Could not set up the Home brain
 const grades = createGrades({ file: path.join(DATA, 'grades.json'), onChange: () => refresh() });
 const coaching = createCoaching({ file: path.join(DATA, 'coaching.json'), backupDir: path.join(DATA, 'coaching'), onChange: () => refresh() });
 function withGrades(activity) { return { activity, grades: grades.for(finishedRuns(activity).map(r => r.key)) }; }
-setInterval(() => { const b = brains.active(); if (b) grades.tick(collectActivity(b)).catch(() => {}); }, 15000);
+setInterval(() => { const b = brains.active(); if (b) grades.tick(collectActivity(b), coachable(b)).catch(() => {}); }, 15000);
 
 function snapshot() {
   const brain = brains.active();

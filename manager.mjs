@@ -246,7 +246,7 @@ Files in inbox/ with no typed request are work too when an employee's skill says
     const prompt = `${t.task}${earlier}${projText}
 
 ---
-You are ${me.name}, the ${me.skill} employee on this brain's team, working on the Manager's brief "${brief.title}".${deptText} If your engine exposes the Skill tool, invoke ${me.skill}; otherwise read and follow ${skillFile}, including its referenced role playbooks, then do only this task. Do not call post_brief, run_model_task, or start_session from this Skill Sphere turn; load colleague skills inline if needed. Follow this folder's AGENTS.md and CLAUDE.md. Employees execute sequentially in this same conversation. Retain the preceding work and only touch the files your task names or creates.${cabText} End with a short report: what you did and where the output is.
+You are ${me.name}, the ${me.skill} employee on this brain's team, working on the Manager's brief "${brief.title}".${deptText} Read the current ${skillFile} from disk, including Performance Review Corrections, even if this skill was already loaded in this warm conversation. If your engine exposes the Skill tool, invoke ${me.skill}; otherwise read and follow ${skillFile}, including its referenced role playbooks, then do only this task. Do not call post_brief, run_model_task, or start_session from this Skill Sphere turn; load colleague skills inline if needed. Follow this folder's AGENTS.md and CLAUDE.md. Employees execute sequentially in this same conversation. Retain the preceding work and only touch the files your task names or creates.${cabText} End with a short report: what you did and where the output is.
 ${MODEL_GUIDANCE}`;
     t.status = 'working';
     t.start = Date.now();
@@ -261,6 +261,9 @@ ${MODEL_GUIDANCE}`;
     };
     if (t.logFile) try { fs.writeFileSync(t.logFile, `# ${title}\n\n${me.name} (${me.skill}) · brief "${brief.title}"${proj ? ` · project ${proj.p.name}` : ''} · ${new Date().toLocaleString()}\nFolder: ${t.folder}\n\n## Task\n\n${t.task}\n\n## Log\n\n`); } catch { /* fine */ }
     const session = brief.chat;
+    const reviewSession = `brief-${brief.id}-${t.id}`;
+    activity({ session: reviewSession, type: 'task', prompt: t.task });
+    activity({ session: reviewSession, type: 'skill', skill: t.employee });
     const caller = optionsFor(brief.chat);
     const run = inlineRunner
       ? inlineRunner({ chat: brief.chat, prompt, onLog: note })
@@ -276,7 +279,7 @@ ${MODEL_GUIDANCE}`;
       if (r.stopped) { t.status = 'stopped'; t.result = 'Stopped.'; }
       else if (r.error) { t.status = 'error'; t.result = clip(r.error, 2000); }
       else { t.status = 'done'; t.result = clip(r.result, 4000); }
-      activity({ session, type: 'stop', outcome: t.status, result: t.result });
+      activity({ session: reviewSession, type: 'stop', outcome: t.status, result: r.result || t.result });
       note({ ts: Date.now(), kind: t.status === 'done' ? 'done' : 'error', text: t.status === 'done' ? 'Finished.' : t.result });
       if (t.logFile) try { fs.appendFileSync(t.logFile, `\n## Report (${t.status})\n\n${r.result || t.result}\n`); } catch { /* fine */ }
       if (proj && !r.stopped) logWork(proj.p.id, { employee: t.employee, name: t.name, task: t.task.split('\n')[0], status: t.status, result: t.result });
