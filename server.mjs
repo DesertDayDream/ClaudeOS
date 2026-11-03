@@ -25,6 +25,7 @@ import { openFile } from './openfile.mjs';
 import { createMemoryEditor, observationId } from './memory-edit.mjs';
 import { createSkillEditor } from './skill-edit.mjs';
 import { createOrg } from './org.mjs';
+import { createGrades, finishedRuns } from './grades.mjs';
 import { ensureCabinet, findCabinet, cabinetTree } from './cabinets.mjs';
 import { appsInText, appForServer } from './public/apps.js';
 import { CATALOG, CONNECTORS_URL, KEY_HELP, addIntegration, removeIntegration, loginIntegration, isSigningIn, signInLink, cancelLogin, sendLoginRedirect, logoutIntegration, keysFor, saveKey, setPtyLoader } from './integrations.mjs';
@@ -322,6 +323,11 @@ function ensureHome() {
 }
 try { ensureHome(); } catch (e) { console.error('Could not set up the Home brain:', e.message); }
 
+// The quality of each finished run: Haiku's grade and the user's thumbs (grades.mjs)
+const grades = createGrades({ file: path.join(DATA, 'grades.json'), onChange: () => refresh() });
+function withGrades(activity) { return { activity, grades: grades.for(finishedRuns(activity).map(r => r.key)) }; }
+setInterval(() => { const b = brains.active(); if (b) grades.tick(collectActivity(b)).catch(() => {}); }, 15000);
+
 function snapshot() {
   const brain = brains.active();
   const list = brains.list().map(b => ({ id: b.id, name: b.name, path: b.path, links: b.links || [], home: !!b.home }));
@@ -337,7 +343,7 @@ function snapshot() {
       memories: collectBrain(b), skills: teamSkills(b) })),
     // a clean brain hires from Home: the user's personal skills, copied into this brain's team
     home: brain.home || !brains.home() ? null : { id: brains.home().id, name: brains.home().name, skills: teamSkills(brains.home()) },
-    activity: collectActivity(brain), at: Date.now(), org: org.snapshot(brain.id),
+    ...withGrades(collectActivity(brain)), at: Date.now(), org: org.snapshot(brain.id),
     integrations: integrations.brainId === brain.id ? integrations.list : [],
   };
 }
@@ -393,7 +399,7 @@ let last = snapshot();
 let lastKey = keyOf(last);
 const clients = new Set();
 function keyOf(s) {
-  return JSON.stringify([s.brain?.id, s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id + s.craft?.score), s.minds, s.activity.length && s.activity[s.activity.length - 1], s.org]);
+  return JSON.stringify([s.brain?.id, s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id + s.craft?.score), s.minds, s.activity.length && s.activity[s.activity.length - 1], s.grades, s.org]);
 }
 function refresh() {
   checkIntegrations(brains.active());
@@ -884,6 +890,7 @@ async function handleApi(req, res, url) {
   }
   if (!chat && (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/brief' || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/handoff') || url.pathname.startsWith('/api/skills') || url.pathname === '/api/org' || url.pathname.startsWith('/api/employee'))) return json(res, 200, { error: 'Set up a brain first.' });
   if (url.pathname === '/api/chat') return json(res, 200, chat.send(body.text, { files: body.files }));
+  if (url.pathname === '/api/grade') return json(res, 200, grades.vote(body.key, String(body.vote ?? '')));
   if (url.pathname === '/api/schedules/save') return json(res, 200, schedules.save(active.id, body));
   if (url.pathname === '/api/schedules/delete') return json(res, 200, schedules.remove(active.id, String(body.id || '')));
   if (url.pathname === '/api/schedules/run') return json(res, 200, await schedules.run(active.id, String(body.id || '')));
@@ -967,7 +974,7 @@ const server = http.createServer((req, res) => {
   if (!LOCAL_HOSTS.has(req.headers.host)) { res.writeHead(421); return res.end('wrong host'); }
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health' || url.pathname === '/api/accounts'
-    || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief' || url.pathname === '/api/org' || url.pathname.startsWith('/api/employee')
+    || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief' || url.pathname === '/api/org' || url.pathname === '/api/grade' || url.pathname.startsWith('/api/employee')
     || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname === '/api/git' || url.pathname.startsWith('/api/git/') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file' || url.pathname === '/api/preview' || url.pathname === '/api/settings' || url.pathname === '/api/update' || url.pathname === '/api/limits' || url.pathname.startsWith('/api/codex') || url.pathname.startsWith('/api/schedules') || url.pathname.startsWith('/api/plugins')) {
     return handleApi(req, res, url).catch(err => json(res, 500, { error: err.message }));
   }

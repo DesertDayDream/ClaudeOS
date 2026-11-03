@@ -8,7 +8,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { events } from '/events.js';
 import { APPS, appForServer, normServer } from './apps.js';
 import * as office from './office.js';
-import { modelTier, effortLevel, rating, modelFamily } from './minds.js';
+import { modelTier, effortLevel, rating, modelFamily, runQuality } from './minds.js';
 
 const TOKEN = window.CLAUDEOS_TOKEN;
 async function api(path, body) {
@@ -436,7 +436,7 @@ function skillText(c) {
 }
 function mindTip(s) {
   const i = mindOf(s);
-  return `Rating: ${i.rating == null ? 'new, no runs yet' : `${i.rating}/100 (${i.record.done} of ${i.record.runs} runs done)`}`
+  return `Rating: ${i.rating == null ? 'new, no runs yet' : `${i.rating}/100 (${i.record.done} of ${i.record.runs} runs done${i.record.quality == null ? '' : `, work quality ${Math.round(i.record.quality * 100)}/100 over ${i.record.graded} graded`})`}`
     + `\n• Size, model: ${i.modelText}\n• Brightness, effort: ${i.effortText}\n• Filled, SKILL.md: ${i.meter == null ? '–' : Math.round(i.meter * 100) + '/100'}, ${skillText(s.craft)}`;
 }
 function brainSprite() {
@@ -880,7 +880,7 @@ function matchSkill(name, skills) {
 
 // Turn the hook log into tasks (one per prompt), each employee's runs, and who is busy right now.
 // A task runs from its prompt to its stop; every skill handed work in between ran in it.
-function deriveWork(activity, skills) {
+function deriveWork(activity, skills, grades = {}) {
   const open = new Map();   // session -> its task still running
   const latest = new Map(); // session -> its newest task
   const tasks = [];
@@ -924,6 +924,7 @@ function deriveWork(activity, skills) {
   const runs = new Map(); // skill id -> its tasks, newest first
   for (const t of tasks.reverse()) {
     t.status = t.end ? t.outcome : now - t.last > BUSY_WINDOW_MS ? 'unfinished' : 'working';
+    t.grade = grades[t.key] || null; // how good the work was (grades.mjs)
     for (const id of t.skills) {
       if (t.status === 'working' && !busy.has(id)) busy.set(id, t);
       if (!runs.has(id)) runs.set(id, []);
@@ -974,7 +975,7 @@ function apply(next) {
   for (const id of prevMemIds) removeMemory(id);
 
   syncSatellites(next.linked || []);
-  hookWork = deriveWork(next.activity, next.skills);
+  hookWork = deriveWork(next.activity, next.skills, next.grades);
   work = withBriefWork(hookWork);
   const allSkills = [...next.skills, ...work.contractors];
   for (const [id, n] of Object.entries(next.names || {})) names.set(id, n);
@@ -1172,8 +1173,19 @@ function mindHtml(s) {
     ${bar('Model', i.size, `${i.modelText} · the brain's size`, "A stronger model makes a bigger brain. Pick it in their own chat box (their desk).")}
     ${bar('Effort', i.brightness, `${i.effortText} · how bright it is`, 'More effort makes a brighter brain; high and up glow. Pick it in their own chat box.')}
     ${bar('SKILL.md', i.meter, `${skillText(s.craft)} · how full it is`, 'Clear instructions, a description that says when to use it, sections, steps, examples and bundled scripts fill the brain.')}
-    ${bar('Rating', r.runs ? r.score : null, r.runs ? `${r.done} of ${r.runs} runs done${r.failed ? `, ${r.failed} failed` : ''} · the number` : 'no runs yet: shows "new" until they finish work', 'Runs that finish well raise their rating; it counts more the more runs there are.')}
+    ${bar('Finishing', r.runs ? r.finish : null, r.runs ? `${r.done} of ${r.runs} runs done${r.failed ? `, ${r.failed} failed` : ''}` : 'no runs yet', 'How often their runs finish. 40% of the rating once their work is graded.')}
+    ${bar('Quality', r.quality, r.graded ? `${r.graded} run${r.graded > 1 ? 's' : ''} graded (Haiku's 1–5, or your 👍/👎)` : 'not graded yet: Haiku grades each finished run', "How good the finished work was. 60% of the rating. Your 👍/👎 on a run replaces Haiku's grade.")}
+    ${bar('Rating', r.runs ? r.score : null, r.runs ? 'finishing and quality, counting more the more runs there are · the number' : 'no runs yet: shows "new" until they finish work', 'Good, finished work raises their rating; it counts more the more runs there are.')}
   </div>`;
+}
+// How good a finished run's work was: Haiku's grade and why, and the user's thumbs that override it
+function gradeHtml(r) {
+  const g = r.grade || {}, q = runQuality(g);
+  const label = g.user ? `You rated it ${g.user === 'up' ? 'good' : 'poor'}${g.ai ? ` · Haiku gave ${g.ai}/5` : ''}`
+    : g.ai ? `Haiku: ${g.ai}/5${g.why ? ` · ${g.why}` : ''}` : 'Waiting for a grade…';
+  const color = q == null ? '#9aa3c7' : q >= 0.75 ? '#7ee0a8' : q >= 0.5 ? '#f2c14e' : '#f08a7e';
+  return `<div class="grade"><span style="color:${color}" title="${esc(g.why || '')}">${esc(label)}</span>
+    <button class="vote ${g.user === 'up' ? 'on' : ''}" data-vote="up" title="Good work">👍</button><button class="vote ${g.user === 'down' ? 'on' : ''}" data-vote="down" title="Poor work">👎</button></div>`;
 }
 // What the employee is on now, then the runs Claude handed them (from the activity hook)
 function runsHtml(s) {
@@ -1193,6 +1205,7 @@ function runsHtml(s) {
       ${r.result ? `<div class="res">${esc(r.result)}</div>` : ''}
       ${mine.files?.length ? `<div class="files">${mine.files.slice(0, 8).map(f => `<code title="${esc(f)}">${esc(f.split(/[\\/]/).pop())}</code>`).join('')}${mine.files.length > 8 ? `<span>+${mine.files.length - 8} more</span>` : ''}</div>` : ''}
       ${others.length ? `<div class="with">with ${esc(others.join(', '))}</div>` : ''}
+      ${r.status === 'done' ? gradeHtml(r) : ''}
     </div>`;
   }
   return html;
@@ -1701,8 +1714,15 @@ function showWhenHired(id) {
   if (employees.has(id)) { selected = id; selectWhenHired = null; } else { selected = null; selectWhenHired = id; }
   renderPanel();
 }
-document.getElementById('detail').addEventListener('click', e => {
+document.getElementById('detail').addEventListener('click', async e => {
   const run = e.target.closest('.run');
+  const vote = e.target.closest('[data-vote]');
+  if (run && vote) {
+    // a second click on the same thumb takes the vote back
+    const r = await api('/api/grade', { key: run.dataset.run, vote: vote.classList.contains('on') ? '' : vote.dataset.vote });
+    if (r.error) toast(r.error);
+    return;
+  }
   if (!run || !run.querySelector('.res')) return;
   openRuns.has(run.dataset.run) ? openRuns.delete(run.dataset.run) : openRuns.add(run.dataset.run);
   run.classList.toggle('open');

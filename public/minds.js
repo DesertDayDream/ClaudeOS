@@ -2,7 +2,7 @@
 //   size       - the model they think with (their own pick, the skill's, or the Manager's)
 //   brightness - the effort they think with
 //   meter      - how much their SKILL.md gives them to work with (instructions, structure, examples, files)
-//   number     - their rating: how their runs went (finished well, how many)
+//   number     - their rating: how their runs went (finished, how good the work was, how many)
 // Shared by the server (craft, from the SKILL.md) and the page (rating, from the activity log).
 
 const MODEL_TIER = { fable: 1, opus: 0.9, sonnet: 0.7, haiku: 0.45 };
@@ -24,15 +24,29 @@ export function effortLevel(effort) {
   return EFFORT_LEVEL[String(effort || '').toLowerCase()] ?? 0.6; // unknown: Claude Code's default
 }
 
-// runs: [{ status: done | error | stopped | unfinished | working }] -> their rating, 0..1
-// A good rate counts more the more runs it is over: a new hire starts low and earns it.
+// How good one run's work was, 0..1, or null if nobody has graded it: the user's thumbs win over Haiku's 1-5.
+export function runQuality(grade) {
+  if (!grade) return null;
+  if (grade.user === 'up') return 1;
+  if (grade.user === 'down') return 0;
+  return grade.ai >= 1 && grade.ai <= 5 ? (grade.ai - 1) / 4 : null;
+}
+
+// runs: [{ status: done | error | stopped | unfinished | working, grade?: { ai: 1-5, user: up | down } }] -> their rating, 0..1
+// Two halves: how often they finish (40%) and how good the finished work is (60%, once any run is graded).
+// Either counts more the more runs it is over: a new hire starts low and earns it.
+export const QUALITY_WEIGHT = 0.6;
 export function rating(runs = []) {
   const ended = runs.filter(r => r.status !== 'working');
   const done = ended.filter(r => r.status === 'done').length;
   const stopped = ended.filter(r => r.status === 'stopped').length;
-  const rate = (done + 0.5 * stopped + 1) / (ended.length + 2);
+  const finish = (done + 0.5 * stopped + 1) / (ended.length + 2);
+  const qs = ended.map(r => runQuality(r.grade)).filter(q => q != null);
+  const quality = qs.length ? (qs.reduce((a, b) => a + b, 0) + 0.5) / (qs.length + 1) : null;
+  const rate = quality == null ? finish : (1 - QUALITY_WEIGHT) * finish + QUALITY_WEIGHT * quality;
   const experience = 1 - Math.exp(-ended.length / 6);
-  return { score: rate * (0.4 + 0.6 * experience), runs: ended.length, done, failed: ended.length - done - stopped };
+  return { score: rate * (0.4 + 0.6 * experience), runs: ended.length, done, failed: ended.length - done - stopped,
+    finish, quality, graded: qs.length };
 }
 
 // What a SKILL.md gives its employee. text: the whole file; files: other files in the skill's folder.
