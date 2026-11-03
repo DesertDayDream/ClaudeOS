@@ -15,7 +15,7 @@ import path from 'node:path';
 import { runCodexTurn, codexModels, shortCommand, CODEX_EFFORTS } from './codex.mjs';
 import { defaultEngine } from './agents.mjs';
 import { MODEL_GUIDANCE } from './model-routing.mjs';
-const MODEL_GUIDANCE_VERSION = 1;
+const MODEL_GUIDANCE_VERSION = 2;
 
 const MAX_MESSAGES = 300;
 // what a chat answers with: Claude Code (the default) or Codex. Switching mid-chat hands the other
@@ -53,7 +53,7 @@ function orgText(crew, projects) {
 const managerPrompt = (crew, projects = []) => `You are the Manager of this brain's team, and this chat is how the user talks to you.
 ${orgText(crew, projects)}
 The employees are specialized versions of you, and they all work here, in this one session. When a task or project is theirs (or the user names them), load their skill with the Skill tool and do the work in this chat as them, following their skill. When a job needs several of them, load each one's skill in turn as the work reaches their part. The user watches the chat to see which employee is working, so say who is taking each part. One session means you read each file once and nothing restarts cold. When a skill says to hand something to a colleague, load that colleague's skill here too. Don't add review, test-plan, spec or sign-off steps the user didn't ask for: check your own work (build, run, test) instead. A change to something an employee or you just made is yours to do here.
-Parallel work is the user's call. Never split work into separate runs on your own. Use mcp__claudeos__post_brief only when the user asks for work to run separately, in parallel or in the background (for example "have them work on it at the same time" or "brief the team"). Then each employee works in their own run at their desk and can't see this chat, so each task must stand on its own: the goal, the exact input files, and what you already found (key facts, decisions, file paths and the lines that matter), so they don't re-read or re-research it. Include anything from memory they need (search it first when the work depends on the user's preferences or past decisions). Put a task id in "after" only when that task needs the other's output; never chain tasks that don't depend on each other. Fewer, bigger tasks beat many tiny ones. Parts nobody on the team can do, or too unclear to act on, go in "skipped" with the reason. After the brief is accepted, tell the user in a few lines who does what and stop: the team's reports come back in this chat by themselves.
+Skill Sphere brief tasks always run sequentially in this chat. Separate side sessions require the user to request them. Use mcp__claudeos__post_brief only when the user asks for work to run separately, in parallel or in the background (for example "have them work on it at the same time" or "brief the team"). Brief tasks execute sequentially in this chat and retain its history. Give each task: the goal, the exact input files, and what you already found (key facts, decisions, file paths and the lines that matter), so they don't re-read or re-research it. Include anything from memory they need (search it first when the work depends on the user's preferences or past decisions). Put a task id in "after" only when that task needs the other's output; never chain tasks that don't depend on each other. Fewer, bigger tasks beat many tiny ones. Parts nobody on the team can do, or too unclear to act on, go in "skipped" with the reason. After the brief is accepted, tell the user in a few lines who does what and stop: the team's reports come back in this chat by themselves.
 Each employee has a file cabinet (a folder of their own in the brain's Office folder) and saves what they make there, in a new folder per task, filed under the project; their report says where. Don't choose output paths for them: name a path only when the user asked for the result in a specific place, or when a task must change existing files.`;
 // Talking to one employee at their desk: they work in their own role and keep their files in their cabinet.
 const employeePrompt = e => `You are ${e.name}, the ${e.skill} employee on this brain's team${e.dept ? `, in the ${e.dept} department` : ''}. The user is talking to you directly at your desk, not through the Manager. Use the ${e.invokeAs || e.skill} skill for work in its area and stay in that role; for work far outside it, say which colleague or the Manager should take it.
@@ -178,7 +178,7 @@ export function mentionedFiles(text, folder) {
   return out;
 }
 
-export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, helper, memoryServer, browserServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], projects = () => [], onIdle = () => {}, notify = () => {}, onLimits = () => {}, onCodexTurn = () => {}, scope = () => ({ disallowed: [], settings: null }) }) {
+export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, helper, memoryServer, browserServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], projects = () => [], onIdle = () => {}, notify = () => {}, onLimits = () => {}, onCodexTurn = () => {}, spawnProcess = spawn, scope = () => ({ disallowed: [], settings: null }) }) {
   // the brain's chats: which one the page shows, the model/effort picked, and a row per saved chat
   const indexFile = path.join(dir, 'index.json');
   let index = { current: null, options: {}, chats: {} };
@@ -239,12 +239,15 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     if (!index.current) { index.current = newId(); saveIndex(); }
     return conv(index.current);
   }
+  const employeeViews = new Map();
+  let employeeFocus = null;
   let viewing = null; // an employee's chat shown in the chat box for now (not saved: a restart shows the Manager's)
   function current() { return viewing && convs.has(viewing) ? convs.get(viewing) : managerChat(); }
   // show an employee's chat in the chat box (their desk), or null for the Manager's again
   function view(id) {
-    viewing = id && convs.get(id)?.employee() ? id : null;
-    emit({ kind: 'open', id: current().id });
+    employeeFocus = employeeViews.get(id) || null;
+    viewing = null;
+    emit({ kind: 'open', id: managerChat().id });
     return { ok: true };
   }
 
@@ -304,6 +307,9 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     let state = { sessionId: null, messages: [], context: null, carryOver: null, folder: null, tools: {}, parent: null, mode: index.options?.mode || '', employee: null };
     try { state = { ...state, ...JSON.parse(fs.readFileSync(file, 'utf8')) }; } catch { /* new chat */ }
     let run = null;      // the message being answered right now
+    let stableSystemPrompt = null;
+    const inlineQueue = [];
+    let inlineActive = null;
     let live = null;     // the Claude process kept running for this chat: { proc, key, idle, since, stderr }
     const reports = [];  // finished briefs waiting for this chat to be free
     const send1 = ev => emit({ ...ev, chat: id });
@@ -390,7 +396,10 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       // and Claude Code memory), with the brain added beside it for its skills and instructions
       if (state.folder) args.push('--add-dir', cwd);
       if (tools.chrome) args.push('--chrome');
-      args.push('--append-system-prompt', instructions(setup).join('\n\n'));
+      stableSystemPrompt ??= [...instructions(setup), ...['CLAUDE.md', 'AGENTS.md'].flatMap(name => {
+        try { return [`Studio foundations (${name}):\n${fs.readFileSync(path.join(cwd, name), 'utf8')}`]; } catch { return []; }
+      })].join('\n\n');
+      args.push('--append-system-prompt', stableSystemPrompt);
       const opts = options();
       if (opts.model) args.push('--model', opts.model);
       if (opts.effort) args.push('--effort', opts.effort);
@@ -434,9 +443,9 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     // Start (or keep) this chat's Claude process, so the next message only has to be written to it.
     function ensureLive() {
       const { args, key } = launch();
-      if (live && live.key !== key && !run) { const old = live; live = null; killTree(old.proc); }
+      if (live && live.key !== key && !run) { const old = live; live = null; clearTimeout(old.idle); killTree(old.proc); }
       if (live) { idleTimer(); return live; }
-      const proc = spawn('claude', [...args, ...resumeArgs()], {
+      const proc = spawnProcess('claude', [...args, ...resumeArgs()], {
         cwd: state.folder || cwd,
         env: { ...process.env, ...CHECKPOINTS, ...TODO_ENV, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000),
           // in the brain, memories go to the brain, never Claude Code's own auto-memory (also off in each
@@ -504,7 +513,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     // label: what the chat shows instead of the full text (the Inbox's hand-over); from: 'inbox' | 'team'
     // files: attachments uploaded with uploadFile, as { path, name } (path relative to the brain)
     // fromParent: the chat that started this side session sent it, so the answer goes back there
-    function send(text, { wrap = false, label = '', from = '', files = [], fromParent = false } = {}) {
+    function send(text, { wrap = false, label = '', from = '', files = [], fromParent = false, onComplete = null } = {}) {
       if (run) return { error: 'Claude is still answering. Wait for it, or press Stop.' };
       text = String(text || '').trim();
       const attached = [];
@@ -522,13 +531,13 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
 
       const reply = push({ role: 'assistant', text: '', tools: [], streaming: true, ...(eng === 'codex' ? { engine: 'codex' } : {}) });
       const missed = catchUp(eng, asked.id);
-      if (eng === 'codex') return sendCodex(text, attached, missed, { asked, reply, wrap, fromParent });
+      if (eng === 'codex') return sendCodex(text, attached, missed, { asked, reply, wrap, fromParent, onComplete });
       if (missed) text = missed + text;
       let me;
       try { me = ensureLive(); } catch (err) { me = null; }
       // asked: the message, which gets Claude Code's id for it (rewinding to it); agents: subagents by tool id;
       // pending: tool ids waiting for their result (a new task's number)
-      run = { live: me, reply, asked, agents: new Map(), pending: new Map(), streamed: new Set(), current: null, stopped: false, wrap, fromParent, first: null, last: null, result: null };
+      run = { live: me, reply, asked, agents: new Map(), pending: new Map(), streamed: new Set(), current: null, stopped: false, wrap, fromParent, onComplete, first: null, last: null, result: null };
       clearTimeout(me?.idle);
       send1({ kind: 'busy', busy: true, any: true });
       save();
@@ -542,7 +551,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
 
     // ---------- Codex ----------
     // One App Server connection per message, resuming the chat's existing thread.
-    function sendCodex(text, attached, missed, { asked, reply, wrap, fromParent }) {
+    function sendCodex(text, attached, missed, { asked, reply, wrap, fromParent, onComplete }) {
       // Codex keeps no process between messages, so Claude's warm one isn't needed meanwhile
       cool();
       const setup = servers(), opts = options();
@@ -564,7 +573,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       if (mentioned.length) prompt += `\n\n(Files the user mentioned with @: ${mentioned.join(', ')})`;
       if (attached.length) prompt += `\n\nAttached (saved in the brain folder; images are already included, read the other files with your tools):\n${attached.map(f => `- ${path.join(cwd, f.path)}`).join('\n')}`;
       const images = attached.filter(f => IMAGES[path.extname(f.path).toLowerCase()]).map(f => path.join(cwd, f.path));
-      run = { live: null, codex: null, reply, asked, agents: new Map(), pending: new Map(), streamed: new Set(), items: new Set(), current: null, stopped: false, wrap, fromParent, first: null, last: null, result: null, usage: null, engine: 'codex' };
+      run = { live: null, codex: null, reply, asked, agents: new Map(), pending: new Map(), streamed: new Set(), items: new Set(), current: null, stopped: false, wrap, fromParent, onComplete, first: null, last: null, result: null, usage: null, engine: 'codex' };
       send1({ kind: 'busy', busy: true, any: true });
       save();
       listChanged();
@@ -795,6 +804,8 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         notify({ chat: id, title: run.reply.error ? `${who} hit an error` : `${who} answered`,
           body: (run.reply.error || run.reply.text).replace(/[#*_`>|]/g, '').replace(/s+/g, ' ').trim().slice(0, 200) || index.chats[id]?.title || '' });
       }
+      const completed = run.onComplete;
+      const outcome = { result: run.reply.text.trim(), error: run.reply.error, stopped: run.stopped, usage, session: state.sessionId, model: options() };
       run = null;
       // a wrapped-up chat is finished with; any other keeps its process warm for the next message
       if (handover) cool(); else idleTimer();
@@ -807,6 +818,8 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         if (index.current === id) open(next.id);
       }
       listChanged();
+      completed?.(outcome);
+      queueMicrotask(drainInline);
       onIdle(id);
       if (back && (index.chats[state.parent] || convs.has(state.parent))) {
         conv(state.parent).report(index.chats[id]?.title || 'Side session', `Side session “${index.chats[id]?.title}” (id ${id}) reports:\n\n${back}`, 'session');
@@ -949,6 +962,34 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       if (send(r.text, { label, from: r.from }).error) reports.unshift(r);
     }
 
+    // Brief turns share this conversation's stdin and native session history.
+    // post_brief returns immediately; its queued work starts after the calling turn ends.
+    function enqueueInline({ prompt, onLog = () => {} }) {
+      let resolve;
+      const job = { prompt, onLog, resolve: null };
+      const done = new Promise(r => { resolve = r; });
+      job.resolve = resolve;
+      inlineQueue.push(job);
+      queueMicrotask(drainInline);
+      return { done, stop() {
+        if (inlineActive === job) stop();
+        else { const at = inlineQueue.indexOf(job); if (at >= 0) { inlineQueue.splice(at, 1); resolve({ stopped: true }); } }
+      } };
+    }
+    function drainInline() {
+      if (run || inlineActive || !inlineQueue.length) return;
+      const job = inlineQueue.shift();
+      inlineActive = job;
+      const complete = result => {
+        inlineActive = null;
+        try { job.onLog({ ts: Date.now(), kind: result.error ? 'error' : 'text', text: result.result || result.error || '' }); } catch { /* logging must not stall the queue */ }
+        job.resolve(result);
+        queueMicrotask(drainInline);
+      };
+      const result = send(job.prompt, { from: 'sphere', onComplete: complete });
+      if (result.error) complete(result);
+    }
+
     function snapshot() {
       return { id, title: index.chats[id]?.title || 'New chat', messages: state.messages, busy: !!run, context: state.context, folder: state.folder,
         tools: state.tools || {}, parent: state.parent || null, mode: state.mode || '', options: state.options || {}, todos: state.todos || null };
@@ -1020,7 +1061,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     }
     // the text a search looks through
     const text = () => state.messages.map(m => m.text).join('\n');
-    return { id, send, stop, wrapUp, rewind, report, startWith, snapshot, text, setFolder, setTools, setMode, setupSession, setEmployee, setOwnOptions, parentOf, warm, cool, file,
+    return { id, send, enqueueInline, stop, wrapUp, rewind, report, startWith, snapshot, text, setFolder, setTools, setMode, setupSession, setEmployee, setOwnOptions, parentOf, warm, cool, file,
       folder: () => state.folder || cwd, tools: () => state.tools || {}, options,
       busy: () => !!run, empty: () => !state.messages.length, employee: () => state.employee,
       idleSince: () => (live && !run ? live.since : null) };
@@ -1030,6 +1071,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
   function open(id) {
     if (!index.chats[id] && !convs.has(id)) return { error: 'That chat is gone.' };
     viewing = null;
+    employeeFocus = null;
     index.current = id;
     saveIndex();
     emit({ kind: 'open', id });
@@ -1143,12 +1185,29 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     return r.error ? r : { ok: true, text: 'Sent. Its answer will come back here.' };
   }
   // ---------- an employee's own chat box ----------
-  // One chat per employee, kept out of the Chats list. emp: { id, skill, name, invokeAs, dept, cabinet }
+  // Employee desks are role views on the active shared chat. emp: { id, skill, name, invokeAs, dept, cabinet }
   const empChatId = employeeChatId;
   function employeeChat(emp) {
-    const c = conv(empChatId(emp.id));
-    c.setEmployee(emp);
-    return c;
+    employeeViews.set(empChatId(emp.id), emp);
+    const c = managerChat();
+    // Desk views are roles on the shared conversation; old employee transcripts remain on disk.
+    return { ...c, id: empChatId(emp.id), snapshot: () => c.snapshot() };
+  }
+  function sendFocused(text, opts = {}) {
+    const emp = employeeFocus;
+    if (!emp) return current().send(text, opts);
+    const onComplete = result => {
+      if (emp.cabinet) {
+        const folder = path.join(emp.cabinet, 'Chats');
+        try {
+          fs.mkdirSync(folder, { recursive: true });
+          fs.appendFileSync(path.join(folder, new Date().toISOString().slice(0, 10) + '.md'),
+            `\n## ${new Date().toISOString()}\n\n${text}\n\n${result.result || result.error || 'Stopped.'}\n`);
+        } catch (error) { emit({ kind: 'error', chat: managerChat().id, error: `Could not save cabinet report: ${error.message}` }); }
+      }
+      opts.onComplete?.(result);
+    };
+    return current().send(`${employeePrompt(emp)}\n\n${text}`, { ...opts, onComplete });
   }
   const chatFolder = chatId => convs.get(chatId)?.folder() || cwd;
 
@@ -1239,18 +1298,19 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
 
   // the open chat, with every approval waiting anywhere (the page marks the other chats' ones)
   function snapshot() {
-    const c = current(), own = c.employee();
+    const c = current(), own = employeeFocus || c.employee();
     return { ...c.snapshot(), approvals: [...approvals.values()].map(a => a.card), options: c.options(), any: anyBusy(),
       employee: own ? { name: own.name, skill: own.skill, dept: own.dept } : null, commands: index.commands || [] };
   }
 
   return {
     // the open chat
-    send: (text, opts) => current().send(text, opts), stop: () => current().stop(), wrapUp: () => current().wrapUp(),
+    send: sendFocused, stop: () => current().stop(), wrapUp: () => current().wrapUp(),
     rewind: (msgId, opts) => current().rewind(msgId, opts),
     busy: () => current().busy(), currentId: () => current().id,
     // all of them
     setFolder: f => current().setFolder(f), setTools: t => current().setTools(t), setMode: m => current().setMode(m), warm: () => current().warm(), upload, attachmentFile,
+    runInline: ({ chat, ...task }) => (chat ? conv(chat) : managerChat()).enqueueInline(task),
     startSession, startScheduled, startBenchmark, stopBenchmark, messageSession, chatFolder, employeeChat, empChatId, view, owns: chatId => convs.has(chatId),
     open, newChat, rename, remove, list, report, anyBusy, stopAll: () => { for (const c of convs.values()) { c.stop(); c.cool(); } },
     // idle chats start a fresh Claude at their next message (new plugins, skills or settings load then)

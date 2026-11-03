@@ -2,9 +2,8 @@
 // chat: talking in the Chat tab is talking to the Manager. Requests you Queue in the chat (with their
 // attachments), and files dropped into the brain's inbox/ folder, wait until "Send to team" hands them to the chat; the
 // Manager (or any chat message that is work for the team) splits the work into tasks through the
-// post_brief tool. Each task runs on its selected provider in the brain folder, so employees work at the
-// same time (MAX_PARALLEL at most, across all briefs), a task that needs another's output waits for it
-// and gets its report, and the finished brief reports back to the Manager in the chat.
+// post_brief tool. Tasks run sequentially through the originating warm chat.
+// Each completed turn is persisted before the next employee starts.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -12,12 +11,12 @@ import { workFolder, logFile } from './cabinets.mjs';
 import { MODEL_GUIDANCE, cleanSelection } from './model-routing.mjs';
 import { runModelTask } from './model-runner.mjs';
 
-const MAX_PARALLEL = 3;
+const MAX_PARALLEL = 1;
 const MAX_TASKS = 12;
 const MAX_BRIEFS = 30;
 const clip = (s, n) => (s = String(s || '').trim()).length > n ? s.slice(0, n - 1) + '…' : s;
 
-export function createManager({ cwd, dataFile, activityFile, memoryFile, helper, memoryServer, port, token, broadcast, team, project = () => null, logWork = () => {}, cabinet = () => null, chatBusy = () => false, onBriefDone = () => {}, scope = () => ({ disallowed: [], settings: null }), optionsFor = () => ({}), onApproval, taskRunner = runModelTask, taskCatalog }) {
+export function createManager({ cwd, dataFile, activityFile, memoryFile, helper, memoryServer, port, token, broadcast, team, project = () => null, logWork = () => {}, cabinet = () => null, chatBusy = () => false, onBriefDone = () => {}, scope = () => ({ disallowed: [], settings: null }), optionsFor = () => ({}), onApproval, taskRunner = runModelTask, inlineRunner, taskCatalog }) {
   let state = { inbox: [], briefs: [] };
   try { state = { ...state, ...JSON.parse(fs.readFileSync(dataFile, 'utf8')) }; } catch { /* first run */ }
   // runs from before a restart are gone
@@ -159,6 +158,14 @@ Files in inbox/ with no typed request are work too when an employee's skill says
       if (!String(t.task || '').trim()) problems.push(`Task ${id} says nothing to do.`);
       const chosen = cleanSelection(t.selection);
       if (chosen.error) problems.push(`Task ${id}: ${chosen.error}`);
+      const caller = optionsFor(String(args.chat || ''));
+      const engine = caller.engine || 'claude';
+      const pick = chosen.selection;
+      if (pick && ((pick.requiredEngine && pick.requiredEngine !== engine) ||
+          (pick.engine !== 'auto' && pick.engine !== engine) ||
+          (pick.model && pick.model !== (engine === 'codex' ? caller.codexModel : caller.model)))) {
+        problems.push(`Task ${id}: briefs inherit the warm chat model. Use an explicitly authorized specialist task for a different model.`);
+      }
       const proj = t.project ? project(String(t.project)) : null;
       if (t.project && (!proj || proj.p.status !== 'active')) problems.push(`Task ${id}: "${t.project}" isn't an active project id. Leave "project" out, or use one from the project list.`);
       return { id, employee: String(t.employee), name: crew.find(c => c.skill === t.employee)?.name || String(t.employee), task: clip(t.task, 6000), after, request: (Array.isArray(t.request) ? t.request : []).map(String),
@@ -176,7 +183,7 @@ Files in inbox/ with no typed request are work too when an employee's skill says
     // a request the Manager only set aside goes back to waiting
     for (const x of items) x.status = clean.some(t => t.request.includes(x.id)) ? 'briefed' : 'new';
     tickAll();
-    return { ok: true, text: `Brief accepted: ${clean.length} task${clean.length === 1 ? '' : 's'}. ClaudeOS starts them now and reports back in this chat when the team is done; don't wait or check on it.` };
+    return { ok: true, text: `Brief accepted: ${clean.length} task${clean.length === 1 ? '' : 's'}. ClaudeOS queues them sequentially in this chat and reports back in this chat when the team is done; don't wait or check on it.` };
   }
 
   // ---------- the employees work it ----------
@@ -239,7 +246,7 @@ Files in inbox/ with no typed request are work too when an employee's skill says
     const prompt = `${t.task}${earlier}${projText}
 
 ---
-You are ${me.name}, the ${me.skill} employee on this brain's team, working on the Manager's brief "${brief.title}".${deptText} If your engine exposes the Skill tool, invoke ${me.skill}; otherwise read and follow ${skillFile}, including its referenced role playbooks, then do only this task. Follow this folder's AGENTS.md and CLAUDE.md. Other employees may be working in this folder at the same time, so only touch the files your task names or creates.${cabText} End with a short report: what you did and where the output is.
+You are ${me.name}, the ${me.skill} employee on this brain's team, working on the Manager's brief "${brief.title}".${deptText} If your engine exposes the Skill tool, invoke ${me.skill}; otherwise read and follow ${skillFile}, including its referenced role playbooks, then do only this task. Do not call post_brief, run_model_task, or start_session from this Skill Sphere turn; load colleague skills inline if needed. Follow this folder's AGENTS.md and CLAUDE.md. Employees execute sequentially in this same conversation. Retain the preceding work and only touch the files your task names or creates.${cabText} End with a short report: what you did and where the output is.
 ${MODEL_GUIDANCE}`;
     t.status = 'working';
     t.start = Date.now();
@@ -253,34 +260,25 @@ ${MODEL_GUIDANCE}`;
       if (t.logFile) try { fs.appendFileSync(t.logFile, `- ${new Date(entry.ts).toLocaleTimeString()} ${entry.kind === 'tool' ? '**' + entry.text + '**' : entry.kind === 'error' ? '! ' + entry.text : entry.text.replace(/\n/g, ' ')}\n`); } catch { /* the page still has it */ }
     };
     if (t.logFile) try { fs.writeFileSync(t.logFile, `# ${title}\n\n${me.name} (${me.skill}) · brief "${brief.title}"${proj ? ` · project ${proj.p.name}` : ''} · ${new Date().toLocaleString()}\nFolder: ${t.folder}\n\n## Task\n\n${t.task}\n\n## Log\n\n`); } catch { /* fine */ }
-    const session = crypto.randomUUID();
-    const who = `${me.name} (${me.skill})`;
-    const caller = optionsFor(brief.chat, me.skill);
-    const run = launchTask({ prompt, selection: t.selection, caller, cwd, scope: scope(), session,
-      onModel: (pick, attempt) => {
-        t.model = { engine: pick.engine, model: pick.model, effort: pick.effort, reason: pick.reason };
-        if (pick.engine === 'codex' && attempt === 0) {
-          activity({ session, type: 'task', prompt: t.task, engine: pick.engine });
-          activity({ session, type: 'skill', skill: me.skill });
-        }
-      },
-      ...(taskCatalog ? { catalog: taskCatalog } : {}),
-      addDirs: proj?.p.folder ? [proj.p.folder] : [],
-      allowed: ['mcp__memory', 'mcp__claudeos__model_catalog', 'mcp__claudeos__run_model_task'],
-      onApproval: request => onApproval?.(brief.chat, request, who) || Promise.resolve('decline'), onLog: note }, { who, chat: brief.chat, nested: true, caller, selection: t.selection });
+    const session = brief.chat;
+    const caller = optionsFor(brief.chat);
+    const run = inlineRunner
+      ? inlineRunner({ chat: brief.chat, prompt, onLog: note })
+      : { done: Promise.resolve({ error: 'The warm chat runner is unavailable.' }), stop() {} };
     procs.set(key, run);
     t.session = session;
     run.done.then(r => {
       procs.delete(key);
       t.end = Date.now();
       t.usage = r.usage || null;
-      t.model = r.model || null;
+      t.model = r.model || caller;
+      t.session = r.session || session;
       if (r.stopped) { t.status = 'stopped'; t.result = 'Stopped.'; }
       else if (r.error) { t.status = 'error'; t.result = clip(r.error, 2000); }
       else { t.status = 'done'; t.result = clip(r.result, 4000); }
       activity({ session, type: 'stop', outcome: t.status, result: t.result });
       note({ ts: Date.now(), kind: t.status === 'done' ? 'done' : 'error', text: t.status === 'done' ? 'Finished.' : t.result });
-      if (t.logFile) try { fs.appendFileSync(t.logFile, `\n## Report (${t.status})\n\n${t.result}\n`); } catch { /* fine */ }
+      if (t.logFile) try { fs.appendFileSync(t.logFile, `\n## Report (${t.status})\n\n${r.result || t.result}\n`); } catch { /* fine */ }
       if (proj && !r.stopped) logWork(proj.p.id, { employee: t.employee, name: t.name, task: t.task.split('\n')[0], status: t.status, result: t.result });
       tickAll();
     });

@@ -605,6 +605,7 @@ function managerFor(brain) {
         const idx = readJsonCached(path.join(DATA, 'chats', brain.id, 'index.json')) || {};
         return { ...base, ...(s ? idx.empOptions?.[s.id] || {} : {}) };
       },
+      inlineRunner: task => chatFor(brain).runInline(task),
       onApproval: (chat, request, who) => chatFor(brain).requestCodexApproval(chat, request, who),
       project: id => org.findProject(brain.id, id),
       cabinet: skill => { const s = skillsIn(teamDir(brain), 'project', path.basename(brain.path)).find(x => x.name === skill); return s ? cabinetFor(brain, s.id) : null; }, logWork: (id, entry) => { org.logWork(brain.id, id, entry); refresh(); },
@@ -665,17 +666,14 @@ function addBrain({ folder }) {
 
 // Called (long-poll) by approval-mcp.mjs when the active brain's Claude uses ask_brain.
 async function handoff(active, { brain: target, task }, req) {
+  if (handoffs.has(active.id)) return { error: 'A linked-brain handoff cannot hand off recursively.' };
   task = String(task || '').trim();
   const want = String(target || '').trim().toLowerCase();
   const b = brains.linksOf(active).find(x => x.name.toLowerCase() === want || x.id === target);
   if (!b) return { error: `"${target}" isn't linked to ${active.name}. Linked brains: ${brains.linksOf(active).map(x => x.name).join(', ') || 'none'}.` };
   if (!task) return { error: 'Say what the linked brain should do.' };
   if (handoffs.has(b.id)) return { error: `${b.name} is already working on a hand-off. Wait for it to finish.` };
-  const mcpServers = {
-    memory: memoryServer(memoryFileOf(b)),
-    claudeos: { ...helper('approval-mcp'), env: { CLAUDEOS_PORT: String(PORT), CLAUDEOS_TOKEN: TOKEN } },
-  };
-  const run = runHandoff({ brain: b, task, mcpServers, scope: scopeFor(b), onExit: () => { handoffs.delete(b.id); refresh(); } });
+  const run = runHandoff({ task, runner: task => chatFor(b).runInline(task), onExit: () => { handoffs.delete(b.id); refresh(); } });
   handoffs.set(b.id, run);
   refresh();
   // if the asking Claude goes away (Stop, crash), stop the linked brain too

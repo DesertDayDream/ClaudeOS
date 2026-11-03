@@ -1,0 +1,89 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { PassThrough, Writable } from 'node:stream';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createChat } from '../chat.mjs';
+
+const turn = () => new Promise(r => setImmediate(r));
+test('brief queue retains one process, session, stable prompt and persisted history', async () => {
+  const lab = fs.mkdtempSync(path.join(os.tmpdir(), 'warm-queue-'));
+  const processes = [], writes = [], launches = [];
+  fs.writeFileSync(path.join(lab, 'CLAUDE.md'), 'Company foundations: master Medieval FPS rules.');
+  let crew = [{ name: 'First', skill: 'first' }];
+  const chat = createChat({ cwd: lab, dir: path.join(lab, 'chats'), memoryFile: path.join(lab, 'memory.jsonl'),
+    activityFile: path.join(lab, 'activity.jsonl'), helper: () => ({ command: 'test' }), memoryServer: () => ({ command: 'test' }),
+    broadcast() {}, team: () => crew, spawnProcess: (command, args) => {
+      launches.push(args); const proc = new EventEmitter();
+      proc.stdout = new PassThrough(); proc.stderr = new PassThrough();
+      proc.stdin = new Writable({ write(chunk, enc, cb) { writes.push(JSON.parse(String(chunk))); cb(); } });
+      processes.push(proc); return proc;
+    } });
+  chat.setOptions({ engine: 'claude' });
+  const id = chat.currentId();
+  const emit = result => processes.at(-1).stdout.write(JSON.stringify({ type: 'result', session_id: 'same-session', result }) + '\n');
+  try {
+    chat.send('Manager turn');
+    const first = chat.runInline({ chat: id, prompt: 'Sphere one' });
+    const cancelled = chat.runInline({ chat: id, prompt: 'Never send' });
+    const second = chat.runInline({ chat: id, prompt: 'Sphere two' });
+    cancelled.stop(); assert.equal((await cancelled.done).stopped, true);
+    await turn(); assert.equal(writes.length, 1);
+    emit('Manager ready'); await turn(); assert.equal(writes.length, 2);
+    emit('First report'); assert.equal((await first.done).result, 'First report');
+    await turn(); assert.equal(writes.length, 3);
+    const disk = JSON.parse(fs.readFileSync(path.join(lab, 'chats', id + '.json')));
+    assert.ok(disk.messages.some(m => m.text === 'First report'));
+    assert.equal(disk.sessionId, 'same-session');
+    emit('Second report'); assert.equal((await second.done).result, 'Second report');
+    assert.equal(processes.length, 1);
+    assert.deepEqual(writes.map(w => w.message.content), ['Manager turn', 'Sphere one', 'Sphere two']);
+    const prompt = launches[0][launches[0].indexOf('--append-system-prompt') + 1];
+    assert.match(prompt, /master Medieval FPS rules/);
+    // A team/project refresh must not replace the process or mutate the stable prefix.
+    crew = [{ name: 'Changed', skill: 'changed' }];
+    const third = chat.runInline({ chat: id, prompt: 'Sphere three' }); await turn();
+    assert.equal(processes.length, 2); // MCP tool inventory changes legitimately restart the runtime.
+    assert.equal(launches[1][launches[1].indexOf('--append-system-prompt') + 1], prompt);
+    assert.ok(launches[1].includes('--resume'));
+    emit('Third report'); await third.done;
+    const desk = chat.employeeChat({ id: 'first', name: 'First', skill: 'first', cabinet: path.join(lab, 'Office', 'First') });
+    chat.view(desk.id); chat.send('Desk question');
+    assert.equal(processes.length, 2);
+    emit('Desk report'); await turn();
+    assert.equal(chat.currentId(), id);
+    assert.ok(fs.readFileSync(path.join(lab, 'Office', 'First', 'Chats', new Date().toISOString().slice(0, 10) + '.md'), 'utf8').includes('Desk report'));
+    chat.view(null);
+  } finally { chat.stopAll(); fs.rmSync(lab, { recursive: true, force: true }); }
+});
+
+import { createManager } from '../manager.mjs';
+import { runHandoff } from '../handoff.mjs';
+test('all briefs serialize and save full cabinet reports before advancing', async () => {
+  const lab = fs.mkdtempSync(path.join(os.tmpdir(), 'warm-manager-'));
+  const calls = [], reports = [];
+  const m = createManager({ cwd: lab, dataFile: path.join(lab, 'manager.json'), activityFile: path.join(lab, 'activity.jsonl'),
+    broadcast() {}, team: () => [{ name: 'One', skill: 'one' }], cabinet: () => path.join(lab, 'Office'),
+    onBriefDone: b => reports.push(b), inlineRunner: args => {
+      let resolve; const done = new Promise(r => { resolve = r; });
+      calls.push({ args, resolve }); return { done, stop() { resolve({ stopped: true }); } };
+    } });
+  try {
+    assert.ok(m.postBrief({ chat: 'shared', tasks: [{ id: 'a', employee: 'one', task: 'First' }, { id: 'b', employee: 'one', task: 'Second' }] }).ok);
+    assert.ok(m.postBrief({ chat: 'shared', tasks: [{ employee: 'one', task: 'Third' }] }).ok);
+    assert.equal(calls.length, 1);
+    const full = 'Full report '.repeat(600);
+    calls[0].resolve({ result: full, session: 'warm-session' }); await turn();
+    assert.equal(calls.length, 2);
+    const logs = fs.readdirSync(path.join(lab, 'Office'), { recursive: true }).filter(x => String(x).endsWith('.md'));
+    assert.ok(logs.some(x => fs.readFileSync(path.join(lab, 'Office', x), 'utf8').includes(full)));
+    calls[1].resolve({ result: 'Second done' }); await turn(); assert.equal(calls.length, 3);
+    calls[2].resolve({ result: 'Third done' }); await turn(); assert.equal(reports.length, 2);
+    assert.ok(calls.every(c => c.args.chat === 'shared'));
+    let delegated = false;
+    const handoff = runHandoff({ task: 'Linked work', runner: args => { delegated = true; assert.match(args.prompt, /Linked work/); return { done: Promise.resolve({ result: 'Linked done' }), stop() {} }; } });
+    assert.equal((await handoff.done).result, 'Linked done'); assert.ok(delegated);
+  } finally { m.stop(); fs.rmSync(lab, { recursive: true, force: true }); }
+});

@@ -102,18 +102,18 @@ rl.on('line', async line => {
       inputSchema: { type: 'object', properties: { brain: { type: 'string', enum: LINKS }, task: { type: 'string', description: 'What to do, with all the context it needs: it can\'t see this conversation.' } }, required: ['brain', 'task'] },
     }] : []), ...(TEAM.length ? [{
       name: 'post_brief',
-      description: 'Hand work to your team. ClaudeOS starts every task whose "after" tasks are done, up to 3 at a time, each as its own run of that employee at their desk, and reports back in this chat when the whole brief is done.',
+      description: 'Hand work to your team. ClaudeOS queues tasks one at a time in this warm chat, retaining the same model and conversation history, and reports back in this chat when the whole brief is done.',
       inputSchema: { type: 'object', required: ['title', 'summary', 'tasks'], properties: {
         title: { type: 'string', description: 'A few words naming the job.' },
         summary: { type: 'string', description: 'The brief: what the user wants and how the work is split, in 2 to 5 sentences.' },
         tasks: { type: 'array', items: { type: 'object', required: ['id', 'employee', 'task'], properties: {
           id: { type: 'string', description: 'Short id, like t1.' },
           employee: { type: 'string', enum: TEAM, description: 'The skill name of the employee who does it.' },
-          task: { type: 'string', description: 'Everything the employee needs: goal, input files, where to save output, relevant facts from memory. They can\'t see this chat or the inbox.' },
-          after: { type: 'array', items: { type: 'string' }, description: 'Ids of earlier tasks whose output this one needs. Leave empty to run at once.' },
+          task: { type: 'string', description: 'Everything the employee needs: goal, input files, where to save output, relevant facts from memory. They retain this chat history.' },
+          after: { type: 'array', items: { type: 'string' }, description: 'Ids of earlier tasks whose output this one needs. Leave empty when there is no dependency; execution is still sequential.' },
           request: { type: 'array', items: { type: 'string' }, description: 'Ids of the inbox requests this task works on.' },
           project: { type: 'string', description: 'Id of the active project this task is work on, if any.' },
-          selection: MODEL_SELECTION_SCHEMA,
+          selection: { ...MODEL_SELECTION_SCHEMA, description: 'Complexity and reason annotate this task. Briefs inherit the warm chat model; changing providers or models requires a separately authorized specialist task.' },
         } } },
         skipped: { type: 'array', items: { type: 'object', properties: { request: { type: 'string' }, reason: { type: 'string' } } }, description: 'Requests nobody on the team can do, or too unclear to act on.' },
         notes: { type: 'string', description: 'Anything the user should know.' },
