@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { modelTier, effortLevel, rating, craftOf, modelFamily, runQuality } from '../public/minds.js';
-import { finishedRuns, parseGrade } from '../grades.mjs';
+import { modelTier, effortLevel, rating, craftOf, modelFamily, runQuality, needsWork, weakRun } from '../public/minds.js';
+import { finishedRuns, parseGrade, lessonsFor, parseCoach, coach, coachPrompt } from '../grades.mjs';
 
 test('model families from aliases and ids', () => {
   assert.equal(modelFamily('claude-opus-5-5'), 'opus');
@@ -63,4 +63,41 @@ test('grades parse from Haiku and runs come from the activity log', () => {
   ];
   const runs = finishedRuns(act);
   assert.deepEqual(runs.map(r => [r.key, r.outcome]), [['a:1', 'done'], ['a:6', 'error']]); // the chat's error note wins
+});
+
+test('an employee whose graded work keeps coming back weak needs work', () => {
+  const runs = (n, grade) => Array.from({ length: n }, () => ({ status: 'done', grade }));
+  assert.equal(needsWork(rating(runs(5, { ai: 2 }))), true);
+  assert.equal(needsWork(rating(runs(2, { ai: 1 }))), false); // too few graded to tell
+  assert.equal(needsWork(rating(runs(5, { ai: 4 }))), false);
+  assert.equal(needsWork(rating(runs(5))), false); // nothing graded
+  assert.equal(weakRun({ ai: 3 }), true);
+  assert.equal(weakRun({ ai: 4 }), false);
+  assert.equal(weakRun({ ai: 5, user: 'down' }), true);
+});
+
+test("the coach learns from this employee's weak runs and returns new instructions", async () => {
+  const act = [
+    { ts: 1, session: 'a', type: 'task', prompt: 'bad one' }, { ts: 2, session: 'a', type: 'skill', skill: 'plug:writer' }, { ts: 3, session: 'a', type: 'stop', outcome: 'done', result: 'meh' },
+    { ts: 4, session: 'a', type: 'task', prompt: 'great one' }, { ts: 5, session: 'a', type: 'skill', skill: 'writer' }, { ts: 6, session: 'a', type: 'stop', outcome: 'done', result: 'wow' },
+    { ts: 7, session: 'a', type: 'task', prompt: 'someone else' }, { ts: 8, session: 'a', type: 'skill', skill: 'other' }, { ts: 9, session: 'a', type: 'stop', outcome: 'done' },
+  ];
+  const runs = finishedRuns(act);
+  assert.deepEqual(runs[0].skillNames, ['plug:writer']);
+  const grades = { 'a:1': { ai: 2, why: 'Vague.' }, 'a:4': { ai: 3, user: 'up' }, 'a:7': { ai: 1 } };
+  const l = lessonsFor(runs, grades, 'writer');
+  assert.deepEqual(l.weak.map(r => r.key), ['a:1']);
+  assert.deepEqual(l.strong.map(r => r.key), ['a:4']);
+  const prompt = coachPrompt({ name: 'writer', description: 'd', body: 'Old steps.' }, l);
+  assert.ok(prompt.includes('bad one') && prompt.includes('Vague.') && prompt.includes('Old steps.') && !prompt.includes('someone else'));
+
+  assert.deepEqual(parseCoach('SUMMARY: Added a check.\n<<<SKILL\n# Steps\n1. Check.\nSKILL>>>'), { summary: 'Added a check.', body: '# Steps\n1. Check.' });
+  assert.equal(parseCoach('no block'), null);
+
+  let asked;
+  const r = await coach({ name: 'writer', description: 'd', body: 'Old.' }, runs, grades, async (p, o) => { asked = o; return 'SUMMARY: s\n<<<SKILL\nNew.\nSKILL>>>'; });
+  assert.equal(r.body, 'New.');
+  assert.equal(r.weak, 1);
+  assert.equal(asked.model, 'sonnet');
+  assert.ok((await coach({ name: 'nobody', description: '', body: 'x' }, runs, grades, async () => '')).error);
 });

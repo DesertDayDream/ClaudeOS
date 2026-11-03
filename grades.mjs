@@ -5,13 +5,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { runQuality, weakRun, strongRun } from './public/minds.js';
 
 const SETTLE_MS = 60 * 1000;            // the chat's own error/stop note can follow the hook's stop by up to a minute
 const MAX_AGE_MS = 14 * 24 * 3600 * 1000; // never grade old history in bulk
 const KEEP = 2000;                      // grades kept on disk
 const TIMEOUT_MS = 90 * 1000;
 
-// Finished runs in the activity log that an employee (skill) worked on: [{ key, prompt, result, files, tools, outcome, end }]
+// Finished runs in the activity log that an employee (skill) worked on: [{ key, prompt, result, files, tools, outcome, end, skillNames }]
 export function finishedRuns(activity) {
   const open = new Map(), latest = new Map(), runs = [];
   for (const ev of activity) {
@@ -22,10 +23,10 @@ export function finishedRuns(activity) {
       continue;
     }
     if (ev.type === 'task' || !t) {
-      t = { key: `${ev.session}:${ev.ts}`, prompt: ev.type === 'task' ? ev.prompt || '' : '', skills: 0, end: 0, outcome: '' };
+      t = { key: `${ev.session}:${ev.ts}`, prompt: ev.type === 'task' ? ev.prompt || '' : '', skills: 0, skillNames: [], end: 0, outcome: '' };
       open.set(ev.session, t); latest.set(ev.session, t); runs.push(t);
     }
-    if (ev.type === 'skill') t.skills++;
+    if (ev.type === 'skill') { t.skills++; if (ev.skill && !t.skillNames.includes(ev.skill)) t.skillNames.push(ev.skill); }
     if (ev.type === 'stop') {
       Object.assign(t, { end: ev.ts, outcome: ev.outcome || 'done', result: ev.result || '', files: ev.files || [], tools: ev.tools || 0 });
       open.delete(ev.session);
@@ -60,18 +61,18 @@ export function parseGrade(text) {
   } catch { return null; }
 }
 
-// Ask Claude Haiku for a grade: no tools, no MCP servers, no hooks, run outside any brain so it never
-// shows up as activity itself.
-function askHaiku(prompt) {
+// Ask Claude a one-off question: no tools, no MCP servers, no hooks, run outside any brain so it never
+// shows up as activity itself. Haiku grades; the coach uses a stronger model. Resolves the reply text, or null.
+export function askClaude(prompt, { model = 'haiku', timeout = TIMEOUT_MS } = {}) {
   return new Promise(resolve => {
-    const args = ['-p', '--model', 'haiku', '--output-format', 'json', '--tools', '', '--strict-mcp-config',
+    const args = ['-p', '--model', model, '--output-format', 'json', '--tools', '', '--strict-mcp-config',
       '--setting-sources', '', '--no-session-persistence'];
     let proc;
     try {
       proc = spawn('claude', args, { cwd: os.tmpdir(), windowsHide: true, env: { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } });
     } catch { return resolve(null); }
     let out = '';
-    const timer = setTimeout(() => { try { proc.kill(); } catch { /* gone */ } }, TIMEOUT_MS);
+    const timer = setTimeout(() => { try { proc.kill(); } catch { /* gone */ } }, timeout);
     proc.stdout.on('data', d => { out += d; });
     proc.stderr.on('data', () => {});
     proc.on('error', () => { clearTimeout(timer); resolve(null); });
@@ -79,11 +80,73 @@ function askHaiku(prompt) {
       clearTimeout(timer);
       try {
         const r = JSON.parse(out.trim().split('\n').pop());
-        resolve(r.is_error ? null : parseGrade(r.result));
+        resolve(r.is_error ? null : String(r.result || ''));
       } catch { resolve(null); }
     });
     proc.stdin.end(prompt);
   });
+}
+const askHaiku = async prompt => parseGrade(await askClaude(prompt));
+
+// ---------- the coach: better instructions from the employee's graded runs ----------
+const COACH_TIMEOUT_MS = 5 * 60 * 1000;
+const clip = (s, n) => { s = String(s || ''); return s.length > n ? s.slice(0, n) + '…' : s; };
+
+// Does this run's skill (as Claude called it, maybe "plugin:name") belong to the employee named `name`?
+export const ranAs = (run, name) => (run.skillNames || []).some(n => n === name || n.split(':').pop() === name);
+
+// The employee's graded runs to learn from: the weak ones (newest 8) and the best ones (newest 3) as what to keep
+export function lessonsFor(runs, grades, name) {
+  const mine = runs.filter(r => r.outcome === 'done' && ranAs(r, name)).reverse()
+    .map(r => ({ ...r, grade: grades[r.key] })).filter(r => runQuality(r.grade) != null);
+  return { weak: mine.filter(r => weakRun(r.grade)).slice(0, 8), strong: mine.filter(r => strongRun(r.grade)).slice(0, 3) };
+}
+
+export function coachPrompt({ name, description, body }, { weak, strong }) {
+  const show = r => [
+    `- REQUEST: ${clip(r.prompt, 600) || '(not recorded)'}`,
+    `  FINAL REPLY: ${clip(r.result, 1200) || '(empty)'}`,
+    `  GRADE: ${r.grade.user ? `the user gave it a thumbs ${r.grade.user}` : `${r.grade.ai}/5`}${r.grade.why ? ` (reviewer: ${r.grade.why})` : ''}`,
+  ].join('\n');
+  return [
+    `You coach an AI employee. It is a Claude Code skill named "${name}": Claude follows its SKILL.md instructions when it hands the skill work.`,
+    'Below are its current instructions and runs the user or a reviewer graded. Rewrite the instructions so the weak runs would have gone well,',
+    'while keeping whatever made the good runs good. Fix root causes (missing steps, vague goals, no check before handing back, wrong defaults);',
+    "don't add rules for one-off tasks, and don't pad: keep it about as long unless something is really missing. Keep the Markdown style.",
+    '',
+    `DESCRIPTION (when Claude uses it, not yours to change): ${description || '(none)'}`,
+    'CURRENT INSTRUCTIONS:',
+    '<<<CURRENT',
+    body,
+    'CURRENT>>>',
+    '',
+    'WEAK RUNS (learn from these):',
+    ...weak.map(show),
+    ...(strong.length ? ['', 'GOOD RUNS (keep what worked):', ...strong.map(show)] : []),
+    '',
+    'Answer in exactly this format and nothing else:',
+    'SUMMARY: <what you changed and why, 1-3 short sentences addressed to the user>',
+    '<<<SKILL',
+    '<the full new instructions, Markdown, without frontmatter>',
+    'SKILL>>>',
+  ].join('\n');
+}
+
+export function parseCoach(text) {
+  const t = String(text || '');
+  const body = t.match(/<<<SKILL\r?\n([\s\S]*?)\r?\n?SKILL>>>/)?.[1]?.trim();
+  if (!body) return null;
+  const summary = t.match(/SUMMARY:\s*([\s\S]*?)(?:\r?\n<<<SKILL|$)/)?.[1]?.trim() || 'Suggested changes from their graded runs.';
+  return { summary: summary.slice(0, 600), body: body.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim() };
+}
+
+// skill: { name, description, body }; runs: finishedRuns(activity); grades: the stored grades
+export async function coach(skill, runs, grades, ask = askClaude) {
+  const lessons = lessonsFor(runs, grades, skill.name);
+  if (!lessons.weak.length) return { error: 'No weak runs to learn from yet. The coach needs at least one run graded 3/5 or lower, or one you gave 👎.' };
+  const r = parseCoach(await ask(coachPrompt(skill, lessons), { model: 'sonnet', timeout: COACH_TIMEOUT_MS }));
+  if (!r) return { error: "The coach couldn't come up with new instructions this time. Try again." };
+  return { ...r, weak: lessons.weak.length, strong: lessons.strong.length };
 }
 
 export function createGrades({ file, ask = askHaiku, onChange = () => {} }) {
@@ -99,6 +162,7 @@ export function createGrades({ file, ask = askHaiku, onChange = () => {} }) {
   }
   return {
     // grades for these task keys only (what the page shows)
+    all() { return grades; },
     for(keys) { const out = {}; for (const k of keys) if (grades[k]) out[k] = grades[k]; return out; },
     // the user's own verdict: 'up', 'down', or '' to clear it
     vote(key, vote) {

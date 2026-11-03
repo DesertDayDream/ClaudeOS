@@ -8,7 +8,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { events } from '/events.js';
 import { APPS, appForServer, normServer } from './apps.js';
 import * as office from './office.js';
-import { modelTier, effortLevel, rating, modelFamily, runQuality } from './minds.js';
+import { modelTier, effortLevel, rating, modelFamily, runQuality, needsWork, weakRun } from './minds.js';
 
 const TOKEN = window.CLAUDEOS_TOKEN;
 async function api(path, body) {
@@ -431,6 +431,9 @@ function mindOf(s) {
 }
 const ratingColor = n => n == null ? '#9aa3c7' : n >= 75 ? '#7ee0a8' : n >= 50 ? '#f2c14e' : '#f08a7e';
 const ratingText = n => n == null ? 'new' : String(n);
+const NEEDS_BADGE = '<span class="needs" title="Their graded work keeps coming back weak. Open them and press Coach for better instructions.">needs work</span>';
+// how many of their finished runs are graded weak (what the coach learns from)
+const weakCount = s => (work.runs.get(s.id) || []).filter(r => r.status === 'done' && weakRun(r.grade)).length;
 function skillText(c) {
   return c ? `${c.words.toLocaleString()} words · ${c.sections} sections · ${c.examples} examples · ${c.files} files` : 'no SKILL.md on this PC';
 }
@@ -1019,7 +1022,7 @@ function renderPanel() {
       : lastRun ? `<div class="now ${lastRun.status}">${esc(lastRun.prompt || 'a task')} · ${ago(lastRun.end || lastRun.last)}</div>` : '';
     return `<div class="emp ${busy ? 'busy' : ''} ${selected === s.id ? 'sel' : ''}" data-id="${esc(s.id)}"${s.source !== 'contractor' ? ' draggable="true"' : ''}>
       <div class="dot" style="background:${hex(SOURCE_COLORS[s.source] ?? SOURCE_COLORS.plugin)}"></div>
-      <div class="who">${esc(employeeName(s))}<span class="iq" title="${esc(mindTip(s))}" style="color:${ratingColor(mindOf(s).rating)}">🧠${ratingText(mindOf(s).rating)}</span>${appsOf(s).slice(0, 5).map(appBadge).join('')}</div>
+      <div class="who">${esc(employeeName(s))}<span class="iq" title="${esc(mindTip(s))}" style="color:${ratingColor(mindOf(s).rating)}">🧠${ratingText(mindOf(s).rating)}</span>${needsWork(mindOf(s).record) ? NEEDS_BADGE : ''}${appsOf(s).slice(0, 5).map(appBadge).join('')}</div>
       <div class="load">${busy ? 'working' : n ? `${n} job${n > 1 ? 's' : ''}` : 'idle'}</div>
       <div class="role">${esc(s.name)}</div>${now}</div>`;
   };
@@ -1159,11 +1162,20 @@ function renderBoard(el, s) {
   if (s.source !== 'contractor') {
     const editable = s.source === 'project' && s.owner === brainFolder();
     html += `<div class="bar"><span class="msg-err"></span>${editable
-      ? `<button class="btn danger" data-skill="ask">Fire</button><button class="btn" data-skill="edit">Edit SKILL.md</button>`
+      ? `<button class="btn danger" data-skill="ask">Fire</button>${coachButton(s)}<button class="btn" data-skill="edit">Edit SKILL.md</button>`
       : `<button class="btn" data-skill="view">View SKILL.md</button>`}</div>`;
   }
   el.innerHTML = html;
   el.classList.add('board');
+}
+// The coach: reads their weak runs and suggests better instructions, opened in the editor to look over
+let coachingId = null;
+function coachButton(s) {
+  const n = weakCount(s);
+  if (coachingId === s.id) return '<button class="btn" disabled>Coaching… (up to a few minutes)</button>';
+  return `<button class="btn" data-skill="coach" ${n ? '' : 'disabled'} title="${n
+    ? `Claude Sonnet reads their ${n} weak run${n > 1 ? 's' : ''} (and their best ones) and suggests better SKILL.md instructions. You look them over before anything is saved.`
+    : 'Nothing to learn from yet: the coach needs a run graded 3/5 or lower, or one you gave 👎.'}">Coach</button>`;
 }
 // Their brain explained: what each part of it shows, and what would raise it
 function mindHtml(s) {
@@ -1175,6 +1187,7 @@ function mindHtml(s) {
     ${bar('SKILL.md', i.meter, `${skillText(s.craft)} · how full it is`, 'Clear instructions, a description that says when to use it, sections, steps, examples and bundled scripts fill the brain.')}
     ${bar('Finishing', r.runs ? r.finish : null, r.runs ? `${r.done} of ${r.runs} runs done${r.failed ? `, ${r.failed} failed` : ''}` : 'no runs yet', 'How often their runs finish. 40% of the rating once their work is graded.')}
     ${bar('Quality', r.quality, r.graded ? `${r.graded} run${r.graded > 1 ? 's' : ''} graded (Haiku's 1–5, or your 👍/👎)` : 'not graded yet: Haiku grades each finished run', "How good the finished work was. 60% of the rating. Your 👍/👎 on a run replaces Haiku's grade.")}
+    ${needsWork(r) ? `<div class="needs-note">${NEEDS_BADGE}Quality ${Math.round(r.quality * 100)}/100 over ${r.graded} graded runs. Press <b>Coach</b> below: it reads their weak runs and suggests better instructions.</div>` : ''}
     ${bar('Rating', r.runs ? r.score : null, r.runs ? 'finishing and quality, counting more the more runs there are · the number' : 'no runs yet: shows "new" until they finish work', 'Good, finished work raises their rating; it counts more the more runs there are.')}
   </div>`;
 }
@@ -1429,7 +1442,8 @@ function renderSkillForm(el, s) {
     ? `<span class="ask">Fire ${esc(employeeName(s))}? Claude stops using this skill. You can undo right after.</span><button class="btn" data-skill="board">Cancel</button><button class="btn danger primary" data-skill="fire">Fire</button>`
     : mode === 'view' ? `${err}<button class="btn" data-skill="board">Back</button>`
     : `${err}<button class="btn" data-skill="board">Cancel</button><button class="btn primary" data-skill="save">${s ? 'Save' : 'Hire'}</button>`;
-  el.innerHTML = `${head}
+  const coachNote = s && mode === 'edit' && skillForm.coach ? `<div class="coach"><b>Coach's suggestion</b> from ${skillForm.coach.weak} weak run${skillForm.coach.weak > 1 ? 's' : ''}: ${esc(skillForm.coach.summary)}<div>The new instructions are below. Save to keep them, or <button class="btn mini" data-skill="uncoach">Use the current ones</button></div></div>` : '';
+  el.innerHTML = `${head}${coachNote}
     <label for="skName">Skill name <small>lowercase-with-dashes</small></label>
     <input class="f" id="skName" spellcheck="false" placeholder="proof-reader" ${ro}>
     <label for="skDesc">Description <small>what it does, and when Claude should use it</small></label>
@@ -1442,6 +1456,7 @@ function renderSkillForm(el, s) {
   el.querySelector('#skDesc').value = d.description;
   el.querySelector('#skBody').value = d.body;
   if (!ro) el.querySelector(s ? '#skBody' : '#skName').focus();
+  if (skillForm.coach && s) { const b = el.querySelector('#skBody'); b.setSelectionRange(0, 0); b.scrollTop = 0; } // read the coach's version from the top
 }
 
 document.getElementById('detail').addEventListener('click', async e => {
@@ -1450,6 +1465,21 @@ document.getElementById('detail').addEventListener('click', async e => {
   const act = btn.dataset.skill;
   const id = selected === HIRE ? null : selected;
   if (act === 'edit' || act === 'view') return openSkill(id, act);
+  if (act === 'coach') {
+    coachingId = id; renderDetail();
+    const r = await api('/api/skills/coach', { id });
+    coachingId = null;
+    if (r.error) { renderDetail(); return toast(r.error); }
+    if (selected !== id) return toast(`The coach is done with ${r.name}. Open them and press Coach again to see the suggestion.`);
+    skillForm = { id, mode: 'edit', err: '', coach: { summary: r.summary, weak: r.weak, oldBody: r.oldBody },
+      data: { name: r.name, description: r.description, body: r.body, file: r.file, editable: true } };
+    return renderDetail();
+  }
+  if (act === 'uncoach') { // back to the instructions as they are
+    const b = document.getElementById('skBody');
+    if (b && skillForm.coach) { b.value = skillForm.coach.oldBody; skillForm.coach = null; btn.closest('.coach')?.remove(); }
+    return;
+  }
   if (act === 'ask') return openSkill(id, 'confirm');
   if (act === 'board') {
     skillForm = { id: null, mode: 'board', data: null, err: '' };

@@ -25,7 +25,7 @@ import { openFile } from './openfile.mjs';
 import { createMemoryEditor, observationId } from './memory-edit.mjs';
 import { createSkillEditor } from './skill-edit.mjs';
 import { createOrg } from './org.mjs';
-import { createGrades, finishedRuns } from './grades.mjs';
+import { createGrades, finishedRuns, coach } from './grades.mjs';
 import { ensureCabinet, findCabinet, cabinetTree } from './cabinets.mjs';
 import { appsInText, appForServer } from './public/apps.js';
 import { CATALOG, CONNECTORS_URL, KEY_HELP, addIntegration, removeIntegration, loginIntegration, isSigningIn, signInLink, cancelLogin, sendLoginRedirect, logoutIntegration, keysFor, saveKey, setPtyLoader } from './integrations.mjs';
@@ -703,6 +703,22 @@ function skillApi(active, route, body) {
   return { error: 'not found' };
 }
 
+// The coach: reads one of this brain's employees' graded runs and suggests better SKILL.md instructions.
+// Nothing is saved here; the page opens the suggestion in the editor for the user to look over and save.
+const coaching = new Set();
+async function coachSkill(active, body) {
+  const s = body.id ? teamSkill(active, String(body.id)) : null;
+  if (!s) return { error: 'Only this brain’s own employees can be coached.' };
+  if (coaching.has(s.id)) return { error: 'The coach is already working on this employee.' };
+  coaching.add(s.id);
+  try {
+    const cur = skillEditor.read(teamDir(active), s.folder);
+    const r = await coach({ name: s.name, description: cur.description, body: cur.body }, finishedRuns(collectActivity(active)), grades.all());
+    return r.error ? r : { ...r, name: cur.name, description: cur.description, file: cur.file, oldBody: cur.body };
+  } catch (err) { return { error: err.message }; }
+  finally { coaching.delete(s.id); }
+}
+
 // Is Claude Code installed? The setup screen warns new users if it isn't.
 let healthCache = null;
 function health() {
@@ -904,6 +920,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/org') { const r = org.apply(active.id, body); if (r.ok && /^(assign|editDept|removeDept)$/.test(body.op)) organizeCabinets(active); refresh(); return json(res, 200, r); }
   if (url.pathname.startsWith('/api/employee/')) return json(res, 200, await employeeApi(active, url.pathname.split('/').pop(), body));
   if (url.pathname === '/api/skills/copy') return json(res, 200, copySkill(active, body));
+  if (url.pathname === '/api/skills/coach') return json(res, 200, await coachSkill(active, body));
   if (/^\/api\/skills\/(save|fire|restore)$/.test(url.pathname)) {
     try { const r = skillApi(active, url.pathname.split('/').pop(), body); refresh(); return json(res, 200, r); }
     catch (err) { return json(res, 200, { error: err.message }); }
