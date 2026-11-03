@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 
-export const REVIEW_HEADING = '## Performance Review Corrections';
+export const REVIEW_HEADING = '## Dynamic Performance Review Corrections & Constraints';
+export const LEGACY_REVIEW_HEADING = '## Performance Review Corrections';
 
 // Only structured, attributable technical findings become instructions. Scores and praise do not.
 export function concreteCorrections(value) {
@@ -17,6 +18,7 @@ export function concreteCorrections(value) {
 export function reviewBody(body, task, corrections) {
   const lines = concreteCorrections(corrections).map(c => `- From Task ${String(task).replace(/[\r\n]/g, ' ')}: ${c.mistake} NEW RULE: ${c.rule}`);
   if (!lines.length) return body;
+  body = body.replace(LEGACY_REVIEW_HEADING, REVIEW_HEADING);
   const fresh = [...new Set(lines)].filter(line => !body.includes(line));
   if (!fresh.length) return body;
   const at = body.indexOf(REVIEW_HEADING);

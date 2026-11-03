@@ -265,9 +265,23 @@ ${MODEL_GUIDANCE}`;
     activity({ session: reviewSession, type: 'task', prompt: t.task });
     activity({ session: reviewSession, type: 'skill', skill: t.employee });
     const caller = optionsFor(brief.chat);
-    const run = inlineRunner
-      ? inlineRunner({ chat: brief.chat, prompt, onLog: note })
-      : { done: Promise.resolve({ error: 'The warm chat runner is unavailable.' }), stop() {} };
+    const activeFile = path.join(cwd, '.claude', 'active_brief.json');
+    const payload = { version: 1, chatId: brief.chat, brief: { id: brief.id, title: brief.title, summary: brief.summary, notes: brief.notes },
+      task: { ...t }, dependencies: deps.map(d => ({ ...d })),
+      skill: { id: me.skill, name: me.name, file: skillFile, department: me.dept || null }, instructions: prompt };
+    let dispatchError;
+    try {
+      fs.mkdirSync(path.dirname(activeFile), { recursive: true });
+      const pending = activeFile + '.tmp';
+      fs.writeFileSync(pending, JSON.stringify(payload, null, 2));
+      fs.renameSync(pending, activeFile);
+    } catch (err) { dispatchError = `Could not write active brief: ${err.message}`; }
+    const directive = `Read ${activeFile} and execute the designated skill sphere matrix. Follow its instructions for the designated task only; re-read its SKILL.md from disk.`;
+    let run;
+    try { run = !dispatchError && inlineRunner
+      ? inlineRunner({ chat: brief.chat, prompt: directive, onLog: note })
+      : { done: Promise.resolve({ error: dispatchError || 'The warm chat runner is unavailable.' }), stop() {} };
+    } catch (err) { run = { done: Promise.resolve({ error: err.message }), stop() {} }; }
     procs.set(key, run);
     t.session = session;
     run.done.then(r => {

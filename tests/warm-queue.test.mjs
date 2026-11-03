@@ -39,14 +39,17 @@ test('brief queue retains one process, session, stable prompt and persisted hist
     assert.equal(disk.sessionId, 'same-session');
     emit('Second report'); assert.equal((await second.done).result, 'Second report');
     assert.equal(processes.length, 1);
-    assert.deepEqual(writes.map(w => w.message.content), ['Manager turn', 'Sphere one', 'Sphere two']);
-    const prompt = launches[0][launches[0].indexOf('--append-system-prompt') + 1];
-    assert.match(prompt, /master Medieval FPS rules/);
+    assert.match(writes[0].message.content, /Manager turn$/);
+    assert.deepEqual(writes.slice(1).map(w => w.message.content), ['Sphere one', 'Sphere two']);
+    assert.ok(!launches[0].includes('--append-system-prompt'));
+    const foundations = fs.readFileSync(path.join(lab, 'CLAUDE.md'), 'utf8');
+    assert.match(foundations, /master Medieval FPS rules/);
     // A team/project refresh must not replace the process or mutate the stable prefix.
     crew = [{ name: 'Changed', skill: 'changed' }];
     const third = chat.runInline({ chat: id, prompt: 'Sphere three' }); await turn();
     assert.equal(processes.length, 2); // MCP tool inventory changes legitimately restart the runtime.
-    assert.equal(launches[1][launches[1].indexOf('--append-system-prompt') + 1], prompt);
+    assert.ok(!launches[1].includes('--append-system-prompt'));
+    assert.equal(fs.readFileSync(path.join(lab, 'CLAUDE.md'), 'utf8'), foundations);
     assert.ok(launches[1].includes('--resume'));
     emit('Third report'); await third.done;
     const desk = chat.employeeChat({ id: 'first', name: 'First', skill: 'first', cabinet: path.join(lab, 'Office', 'First') });
@@ -74,6 +77,11 @@ test('all briefs serialize and save full cabinet reports before advancing', asyn
     assert.ok(m.postBrief({ chat: 'shared', tasks: [{ id: 'a', employee: 'one', task: 'First' }, { id: 'b', employee: 'one', task: 'Second' }] }).ok);
     assert.ok(m.postBrief({ chat: 'shared', tasks: [{ employee: 'one', task: 'Third' }] }).ok);
     assert.equal(calls.length, 1);
+    const payload = JSON.parse(fs.readFileSync(path.join(lab, '.claude', 'active_brief.json')));
+    assert.equal(payload.chatId, 'shared');
+    assert.equal(payload.task.task, 'First');
+    assert.equal(payload.skill.id, 'one');
+    assert.match(calls[0].args.prompt, /active_brief.json/);
     const full = 'Full report '.repeat(600);
     calls[0].resolve({ result: full, session: 'warm-session' }); await turn();
     assert.equal(calls.length, 2);

@@ -4,7 +4,7 @@
 // so the coach never rewrites twice from the same runs.
 import fs from 'node:fs';
 import path from 'node:path';
-import { reviewBody, REVIEW_HEADING } from './performance-reviews.mjs';
+import { reviewBody, REVIEW_HEADING, LEGACY_REVIEW_HEADING } from './performance-reviews.mjs';
 import crypto from 'node:crypto';
 import { coach as coachRun, ranAs } from './grades.mjs';
 import { rating, needsWork } from './public/minds.js';
@@ -44,12 +44,12 @@ export function createCoaching({ file, backupDir, coach = coachRun, onChange = (
       const backup = path.join(backupDir, `${crypto.createHash('sha1').update(id).digest('hex').slice(0, 12)}-${at}.md`);
       fs.writeFileSync(backup, fs.readFileSync(employee.file, 'utf8'));
       // Re-read after the model call: grading may have added corrections while it ran.
-      const current = employee.read().body;
+      const current = employee.read().body.replace(LEGACY_REVIEW_HEADING, REVIEW_HEADING);
       const prior = current.indexOf(REVIEW_HEADING);
       let body = r.body;
       if (prior >= 0) {
         const section = current.slice(prior).split(/\r?\n(?=## )/)[0];
-        body = body.replace(/## Performance Review Corrections[\s\S]*?(?=\r?\n## |$)/, '').trimEnd() + '\n\n' + section;
+        body = body.replace(/## (?:Dynamic Performance Review Corrections & Constraints|Performance Review Corrections)[\s\S]*?(?=\r?\n## |$)/, '').trimEnd() + '\n\n' + section;
       }
       for (const c of r.corrections || []) {
         if (c.employee !== employee.name || !runs.some(run => run.key === c.task && ranAs(run, employee.name))) continue;

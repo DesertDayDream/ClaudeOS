@@ -138,7 +138,7 @@ export function coachPrompt({ name, description, body }, { weak, strong }) {
     '<<<SKILL',
     '<the full new instructions, Markdown, without frontmatter>',
     'SKILL>>>',
-    'Then output <<<CORRECTIONS on its own line, a JSON array of {employee, task, mistake, rule}, then CORRECTIONS>>> on its own line. Only concrete evidenced technical mistakes from weak runs; task must be the exact TASK ID below, rule must say must not/never/do not plus the required alternative. No generic criticism or invented mistakes. Preserve existing Performance Review Corrections verbatim in the rewritten skill.',
+    'Then output <<<CORRECTIONS on its own line, a JSON array of {employee, task, mistake, rule}, then CORRECTIONS>>> on its own line. Only concrete evidenced technical mistakes from weak runs; task must be the exact TASK ID below, rule must say must not/never/do not plus the required alternative. No generic criticism or invented mistakes. Preserve existing Dynamic Performance Review Corrections & Constraints verbatim in the rewritten skill.',
   ].join('\n');
 }
 

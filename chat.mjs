@@ -307,7 +307,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     let state = { sessionId: null, messages: [], context: null, carryOver: null, folder: null, tools: {}, parent: null, mode: index.options?.mode || '', employee: null };
     try { state = { ...state, ...JSON.parse(fs.readFileSync(file, 'utf8')) }; } catch { /* new chat */ }
     let run = null;      // the message being answered right now
-    let stableSystemPrompt = null;
+
     const inlineQueue = [];
     let inlineActive = null;
     let live = null;     // the Claude process kept running for this chat: { proc, key, idle, since, stderr }
@@ -383,6 +383,18 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       if (state.carryOver) extra.push(`Handover from the previous chat in this brain (its details are in the brain's memory; search it if you need more):\n${state.carryOver}`);
       return extra;
     }
+    function writeFoundations(folder) {
+      const file = path.join(folder, 'CLAUDE.md');
+      const begin = '<!-- ClaudeOS foundations: begin -->', end = '<!-- ClaudeOS foundations: end -->';
+      let before = '';
+      try { before = fs.readFileSync(file, 'utf8'); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+      const block = `${begin}\n${[DESK_PROMPT, planPrompt('claude'), MODEL_GUIDANCE].join('\n\n')}\n${end}`;
+      const start = before.indexOf(begin), stop = before.indexOf(end, start);
+      if (start >= 0 && stop < 0) throw new Error('Incomplete ClaudeOS foundations block');
+      const after = start >= 0 ? before.slice(0, start) + block + before.slice(stop + end.length)
+        : before.trimEnd() + (before.trim() ? '\n\n' : '') + block + '\n';
+      if (after !== before) fs.writeFileSync(file, after);
+    }
     function launch() {
       const setup = servers(), { mcpServers, allowed, tools, emp } = setup;
       // a brain other than Home starts clean: no personal skills, and only the plugins it turned on
@@ -396,10 +408,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       // and Claude Code memory), with the brain added beside it for its skills and instructions
       if (state.folder) args.push('--add-dir', cwd);
       if (tools.chrome) args.push('--chrome');
-      stableSystemPrompt ??= [...instructions(setup), ...['CLAUDE.md', 'AGENTS.md'].flatMap(name => {
-        try { return [`Studio foundations (${name}):\n${fs.readFileSync(path.join(cwd, name), 'utf8')}`]; } catch { return []; }
-      })].join('\n\n');
-      args.push('--append-system-prompt', stableSystemPrompt);
+      writeFoundations(state.folder || cwd);
       const opts = options();
       if (opts.model) args.push('--model', opts.model);
       if (opts.effort) args.push('--effort', opts.effort);
@@ -453,7 +462,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
           ...(state.folder ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1' } : { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' }) },
         windowsHide: true,
       });
-      const me = { proc, key, idle: null, since: Date.now(), stderr: '' };
+      const me = { proc, key, idle: null, since: Date.now(), stderr: '', needsContext: true };
       live = me;
       let buf = '';
       proc.stdout.setEncoding('utf8'); // a chunk can end in the middle of a character
@@ -544,6 +553,14 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       listChanged();
       if (!me) { finish("Could not start Claude Code. If it isn't installed yet, install it from Apps → Accounts (Install)."); return { ok: true }; }
       try {
+        if (me.needsContext) {
+          const contextDir = path.join(cwd, '.claude', 'runtime');
+          fs.mkdirSync(contextDir, { recursive: true });
+          const contextFile = path.join(contextDir, `${id}.md`);
+          fs.writeFileSync(contextFile, instructions(servers()).slice(3).join('\n\n'));
+          text = `Read ${contextFile} for this chat's runtime context before proceeding.\n\n${text}`;
+          me.needsContext = false;
+        }
         me.proc.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: content(text, attached) } }) + '\n');
       } catch (err) { finish(`Could not reach Claude: ${err.message}`); }
       return { ok: true };

@@ -97,7 +97,7 @@ test('manager dispatch and nested specialist selections use the shared runner in
     assert.ok(m.postBrief({ tasks: [{ id: 'bad', employee: 'engineer', task: 'x', selection: { complexity: 'unknown' } }] }).error);
     assert.ok(m.postBrief({ chat: 'manager', tasks: [{ id: 't1', employee: 'engineer', task: 'Review code', selection: { complexity: 'complex', reason: 'Concurrency review' } }] }).ok);
     await finished;
-    assert.equal(calls[0].chat, 'manager'); assert.match(calls[0].prompt, /SKILL.md/); assert.match(calls[0].prompt, /Model selection applies/);
+    assert.equal(calls[0].chat, 'manager'); assert.match(calls[0].prompt, /SKILL.md/); assert.match(JSON.parse(fs.readFileSync(path.join(lab, '.claude', 'active_brief.json'), 'utf8')).instructions, /Model selection applies/);
     assert.equal(reports[0].b.tasks[0].model.engine, 'codex'); assert.equal(m.workOf('engineer')[0].model.effort, 'high');
     const r = await m.specialist({ task: 'Check reasoning', chat: 'manager', selection: { engine: 'claude', complexity: 'complex' } });
     assert.match(r.text, /claude \/ opus/);
