@@ -55,7 +55,7 @@ const lab = fs.mkdtempSync(path.join(os.tmpdir(), 'claudeos-desktop-lab-'));
 const source = path.join(lab, 'source');
 fs.mkdirSync(source);
 for (const name of fs.readdirSync(root)) if (name.endsWith('.mjs') || name === 'package.json') fs.copyFileSync(path.join(root, name), path.join(source, name));
-for (const name of ['public', 'hooks', 'templates']) fs.cpSync(path.join(root, name), path.join(source, name), { recursive: true });
+for (const name of ['public', 'hooks', 'templates', 'benchmark']) fs.cpSync(path.join(root, name), path.join(source, name), { recursive: true });
 fs.symlinkSync(path.join(root, 'node_modules'), path.join(source, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
 Object.assign(process.env, { PORT: '4800', ARTIFACT_PORT: '4810', CLAUDEOS_DESKTOP: '1', CLAUDEOS_NO_OPEN: '1',
   CLAUDEOS_HOME: path.join(lab, 'data'), CLAUDE_CONFIG_DIR: path.join(lab, 'claude'), CODEX_HOME: path.join(lab, 'codex') });
@@ -149,6 +149,20 @@ try {
   assert.match(specialistResult.text, /Model: codex/);
   assert.match(specialistResult.text, /Approval result: accept/);
   console.log('PASS: model catalog, invalid selection, specialist dispatch, approval and returned model/result through authenticated HTTP in the lab copy.');
+  const beforeBench = (await api('/api/chat')).value;
+  await api('/benchmark/api/prepare', {pair:'codex'});
+  const benchmarkRun = (await api('/benchmark/api/run', {prompt:'Fixture benchmark. Reply OK.', autoSend:false})).value;
+  assert.equal(benchmarkRun.results[0].start, 'started');
+  const benchPending = await waitFor(state => state.approvals.length === 1);
+  assert.equal(benchPending.id, beforeBench.id, 'Benchmark keeps the open chat');
+  assert.deepEqual(benchPending.options, beforeBench.options, 'Benchmark keeps user model options');
+  const benchState = (await api('/benchmark/api/state')).value;
+  assert.notEqual(benchState.round.sides[0].chatId, beforeBench.id);
+  assert.equal(benchState.round.sides[1].start, 'waiting for you to send the tagged prompt');
+  await api('/benchmark/api/stop', {});
+  await waitFor(state => !state.any && !state.approvals.length);
+  assert.equal((await api('/benchmark/api/history')).value.length, 1);
+  console.log('PASS: benchmark starts a dedicated chat, preserves user settings, supports manual pairing and stops only its own run.');
   console.log(`PASS: lab backend startup, CSP, API authentication, native settings IPC, hotkey setting, update routing, rollback guidance. Lab: ${lab}`);
 } catch (error) { exitCode = 1; console.error(error.stack); }
 finally {

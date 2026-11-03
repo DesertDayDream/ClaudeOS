@@ -1,0 +1,9 @@
+{
+  "tasks": ["cart", "sales"],
+  "contestants": [
+    { "id": "claudeos-claude", "name": "ClaudeOS (Claude engine)", "provider": "claude", "setup": "New chat → 📁 folder = run folder → engine Claude, same model + effort as Claude Desktop, permissions: bypass/auto" },
+    { "id": "claude-desktop",  "name": "Claude Desktop (Code tab)", "provider": "claude", "setup": "Code tab → Local → choose the run folder, same model + effort, auto-accept / bypass permissions" },
+    { "id": "claudeos-codex",  "name": "ClaudeOS (Codex engine)",  "provider": "codex",  "setup": "New chat → 📁 folder = run folder → engine Codex, same model + effort as ChatGPT, permissions: full auto" },
+    { "id": "chatgpt",         "name": "ChatGPT (Codex)",          "provider": "codex",  "setup": "Codex → Local → open the run folder, same model + effort, full access / auto approvals" }
+  ]
+}

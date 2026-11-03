@@ -1,0 +1,52 @@
+// Isolated, headless UI check; never submits a prompt to either model provider.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const {chromium}=createRequire(path.join(root,'benchmark/package.json'))('playwright-core');
+const lab=fs.mkdtempSync(path.join(os.tmpdir(),'claudeos-benchmark-ui-'));
+const source=path.join(lab,'source');fs.mkdirSync(source);
+for(const name of fs.readdirSync(root)) if(name.endsWith('.mjs')||name==='package.json')fs.copyFileSync(path.join(root,name),path.join(source,name));
+for(const name of ['public','hooks','templates','benchmark'])fs.cpSync(path.join(root,name),path.join(source,name),{recursive:true,filter:p=>path.basename(p)!=='node_modules'});
+for(const dir of ['node_modules','benchmark/node_modules'])fs.symlinkSync(path.join(root,dir),path.join(source,dir),'junction');
+const child=spawn(process.execPath,[path.join(source,'server.mjs')],{cwd:source,windowsHide:true,env:{...process.env,PORT:'4800',ARTIFACT_PORT:'4810',CLAUDEOS_HOME:path.join(lab,'data'),CLAUDE_CONFIG_DIR:path.join(lab,'claude'),CODEX_HOME:path.join(lab,'codex'),BENCH_DRY:'1',BENCH_NO_JUDGE:'1'}});
+let log='';child.stdout.on('data',d=>log+=d);child.stderr.on('data',d=>log+=d);
+let browser;
+try {
+ for(let i=0;i<100;i++){if(log.includes('running at'))break;if(child.exitCode!=null)throw new Error(log);await new Promise(r=>setTimeout(r,100));}
+ const html=await (await fetch('http://127.0.0.1:4800/')).text();
+ const token=/CLAUDEOS_TOKEN = "([^"]+)"/.exec(html)[1];
+ await fetch('http://127.0.0.1:4800/api/brains/add',{method:'POST',headers:{'content-type':'application/json','x-claudeos-token':token},body:JSON.stringify({folder:source})});
+ browser=await chromium.launch({channel:'msedge',headless:true});
+ const page=await browser.newPage({viewport:{width:1440,height:1000}});
+ page.setDefaultTimeout(12000);
+ await page.addInitScript(()=>sessionStorage.setItem('claudeos.signinSkipped','1'));
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto('http://127.0.0.1:4800/');
+ await page.locator('[data-tab="benchmark"]').click();
+ const frame=page.frameLocator('#benchFrame');
+ await frame.getByRole('heading',{name:'Benchmark',exact:true}).waitFor();
+ assert.equal(await frame.locator('#prompt').inputValue(),'');
+ await frame.getByRole('button',{name:'Claude pair',exact:true}).click();
+ await frame.getByText('Ready. Open a new chat',{exact:false}).waitFor();
+ await frame.locator('#prompt').fill('Create hello.txt. Reply OK.');
+ await frame.getByRole('button',{name:'Run comparison',exact:true}).click();
+ await frame.getByRole('button',{name:/Copy tagged prompt/}).waitFor();
+ await frame.getByRole('button',{name:'Stop',exact:true}).click();
+ await frame.getByRole('link',{name:'Export report'}).waitFor();
+ const out=path.join(root,'.devdata');fs.mkdirSync(out,{recursive:true});
+ await page.screenshot({path:path.join(out,'benchmark-app.png')});
+ await frame.getByRole('link',{name:'History',exact:true}).click();
+ await frame.getByRole('heading',{name:'History',exact:true}).waitFor();
+ assert.equal(await frame.locator('.run').count(),1);
+ const downloadEvent=page.waitForEvent('download');
+ await frame.getByRole('link',{name:'Export report'}).click();
+ const download=await downloadEvent;assert.match(download.suggestedFilename(),/^benchmark-.*\.html$/);
+ await download.saveAs(path.join(out,'benchmark-report.html'));
+ assert.deepEqual(errors,[]);
+ console.log('PASS: Benchmark tab, blank custom prompt, prepare/run/stop, history and HTML download in an isolated lab. '+lab);
+} finally {await browser?.close();child.kill();}

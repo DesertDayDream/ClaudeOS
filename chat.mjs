@@ -400,7 +400,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       return { args, key: JSON.stringify(args) };
     }
     // an employee runs on their own engine, model and effort; the Manager's chats on the brain's
-    function options() { return withEngine({ ...(index.options || {}), ...(state.employee ? state.options || {} : {}) }); }
+    function options() { return state.benchmark ? {...state.options} : withEngine({ ...(index.options || {}), ...(state.employee ? state.options || {} : {}) }); }
     const engine = () => options().engine === 'codex' ? 'codex' : 'claude';
 
     // What an engine missed in this chat while the other one answered (or everything, the first time
@@ -993,7 +993,8 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       return { ok: true, tools: state.tools };
     }
     // a side session: set up before its first message (the brief from the chat that starts it)
-    function setupSession({ parent, folder, tools }) {
+    function setupSession({ parent, folder, tools, benchmark, options: picked, mode }) {
+      if (benchmark) { state.benchmark = true; state.options = picked; state.mode = mode; }
       state.parent = parent;
       state.folder = folder || null;
       state.tools = tools || {};
@@ -1116,6 +1117,24 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     listChanged();
     return { ok: true, chat: c.id };
   }
+  // A benchmark has its own immutable model/folder settings and never changes the user's open chat.
+  function startBenchmark({ title, prompt, folder, options: picked, mode }) {
+    if (anyBusy()) return {error: 'Finish or stop the current work before starting a benchmark.'};
+    const checked = cleanOptions(picked);
+    if (checked.error) return checked;
+    const c = conv(newId());
+    c.setupSession({parent: null, folder, tools: {}, benchmark: true, options: checked.options, mode});
+    index.chats[c.id] = {title: clip(title, 70), renamed: true, created: Date.now(), updated: Date.now(), count: 0, benchmark: true};
+    const r = c.send(prompt);
+    if (r.error) { delete index.chats[c.id]; convs.delete(c.id); return r; }
+    listChanged();
+    return {ok: true, chat: c.id};
+  }
+  function stopBenchmark(id) {
+    if (!index.chats[id]?.benchmark) return {error: 'No benchmark chat.'};
+    conv(id).stop();
+    return {ok: true};
+  }
   function messageSession({ chat: parentId, session, message }) {
     const c = convs.get(String(session || ''));
     if (!c || c.parentOf() !== parentId) return { error: `No side session ${session} started from this chat.` };
@@ -1232,7 +1251,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     busy: () => current().busy(), currentId: () => current().id,
     // all of them
     setFolder: f => current().setFolder(f), setTools: t => current().setTools(t), setMode: m => current().setMode(m), warm: () => current().warm(), upload, attachmentFile,
-    startSession, startScheduled, messageSession, chatFolder, employeeChat, empChatId, view, owns: chatId => convs.has(chatId),
+    startSession, startScheduled, startBenchmark, stopBenchmark, messageSession, chatFolder, employeeChat, empChatId, view, owns: chatId => convs.has(chatId),
     open, newChat, rename, remove, list, report, anyBusy, stopAll: () => { for (const c of convs.values()) { c.stop(); c.cool(); } },
     // idle chats start a fresh Claude at their next message (new plugins, skills or settings load then)
     coolAll: () => { for (const c of convs.values()) c.cool(); },

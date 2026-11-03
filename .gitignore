@@ -3,3 +3,5 @@ desktop/node_modules/
 __pycache__/
 .devdata/
 dist/
+
+benchmark/**/*.cjs

@@ -9,6 +9,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { exec, spawn } from 'node:child_process';
+import { createBenchmark } from './benchmark/panel/server.mjs';
 import { createChat, employeeChatId, withEngine } from './chat.mjs';
 import { craftOf } from './public/minds.js';
 import { codexModels, codexStatus, codexCommand, codexLimits } from './codex.mjs';
@@ -34,7 +35,7 @@ import { CATALOG, CONNECTORS_URL, KEY_HELP, addIntegration, removeIntegration, l
 import { createAccounts } from './accounts.mjs';
 import { refreshPath } from './agents.mjs';
 import { createRegistry, setupBrain, repairHooks, listFolder, slugFor, samePath, inside } from './brains.mjs';
-import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile, loadNodePty, appVersion } from './runtime.mjs';
+import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile, loadNodePty, appVersion, benchmarkDir } from './runtime.mjs';
 import { startTray } from './tray.mjs';
 import { createDesktop, openPage as openWindow, showPage as showWindow } from './desktop.mjs';
 import { createUpdater } from './update.mjs';
@@ -1024,9 +1025,24 @@ async function handleApi(req, res, url) {
   return json(res, 404, { error: 'not found' });
 }
 
+const benchmark = createBenchmark({ kit: benchmarkDir(DATA), dataDir: DATA, port: PORT, token: TOKEN,
+  context: () => { const b = brains.active(); const c = b && chatFor(b); return b ? {brainId:b.id, brainName:b.name, version:appVersion(), options:c.optionsFor(c.currentId()), mode:c.snapshot().mode || ''} : null; },
+  start: async (side, text, ctx) => {
+    const b = brains.find(ctx?.brainId);
+    if (!b || anyBusy()) throw new Error('Finish or stop current work before running a benchmark.');
+    const c = chatFor(b);
+    const options = {...ctx.options, engine:side.engine === 'codex' ? 'codex' : ''};
+    const r = c.startBenchmark({title:'Benchmark - ' + side.tag, prompt:text, folder:side.dir, options, mode:ctx.mode});
+    if (r.error) throw new Error(r.error);
+    side.brainId = b.id; side.chatId = r.chat;
+    return 'started';
+  },
+  stop: async side => { const b = brains.find(side.brainId); if (b && side.chatId) { managerFor(b).stopChatSpecialists(side.chatId); chatFor(b).stopBenchmark(side.chatId); } }
+});
 const server = http.createServer((req, res) => {
   if (!LOCAL_HOSTS.has(req.headers.host)) { res.writeHead(421); return res.end('wrong host'); }
   const url = new URL(req.url, 'http://localhost');
+  if (url.pathname === '/benchmark' || url.pathname.startsWith('/benchmark/')) return benchmark.handle(req, res, url);
   if (url.pathname.startsWith('/api/chat') || url.pathname.startsWith('/api/approval') || url.pathname.startsWith('/api/brains') || url.pathname.startsWith('/api/memory') || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/skill') || url.pathname.startsWith('/api/integrations') || url.pathname === '/api/fs' || url.pathname === '/api/health' || url.pathname === '/api/accounts'
     || url.pathname.startsWith('/api/inbox') || url.pathname === '/api/manager' || url.pathname === '/api/brief' || url.pathname === '/api/org' || url.pathname === '/api/grade' || url.pathname.startsWith('/api/employee')
     || url.pathname.startsWith('/api/desk/') || url.pathname.startsWith('/api/terminal') || url.pathname === '/api/git' || url.pathname.startsWith('/api/git/') || url.pathname.startsWith('/api/artifacts') || url.pathname === '/api/open-file' || url.pathname === '/api/preview' || url.pathname === '/api/settings' || url.pathname === '/api/update' || url.pathname === '/api/limits' || url.pathname.startsWith('/api/codex') || url.pathname.startsWith('/api/schedules') || url.pathname.startsWith('/api/plugins')) {
@@ -1069,7 +1085,7 @@ const server = http.createServer((req, res) => {
 
 const PAGE_URL = `http://localhost:${PORT}`;
 const updater = createUpdater({ dataDir: DATA, port: PORT, quit: () => quit(),
-  busy: () => [...chats.values()].some(c => c.anyBusy()) || [...managers.values()].some(m => m.busy()) || handoffs.size > 0 });
+  busy: () => [...chats.values()].some(c => c.anyBusy()) || [...managers.values()].some(m => m.busy()) || handoffs.size > 0 || benchmark.busy() });
 // Back from an install a chat asked for (update_app): open on that chat, and tell Claude how it went
 // so it can finish the job (check, clean up, save what shipped) right where the user is looking.
 function resumeAfterUpdate() {

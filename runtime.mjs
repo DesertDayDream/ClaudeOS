@@ -54,6 +54,22 @@ export function templatesDir(dataDir) {
   return dir;
 }
 
+// Benchmark tasks and browser libraries need real paths (Playwright launches the installed Edge).
+export function benchmarkDir(dataDir) {
+  if (!IS_EXE) return path.join(ROOT, 'benchmark');
+  const manifest = JSON.parse(asset('manifest.json').toString('utf8'));
+  const dir = path.join(dataDir, 'app', `benchmark-${manifest.build}`);
+  if (!fs.existsSync(path.join(dir, '.complete'))) {
+    for (const rel of manifest.benchmark || []) {
+      const to = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(to), {recursive:true});
+      fs.writeFileSync(to, asset(`benchmark/${rel}`));
+    }
+    fs.writeFileSync(path.join(dir, '.complete'), '');
+  }
+  return dir;
+}
+
 // node-pty, the real console behind the Terminal tab. It has native parts (ConPTY), so the exe
 // carries its files and unpacks them into the data folder once per build; the app folder loads it
 // from node_modules. Loaded through createRequire so the exe's bundler leaves it alone.

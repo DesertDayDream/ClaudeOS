@@ -1,0 +1,10 @@
+{
+  "id": "bill-splitter-v1",
+  "entry": "index.html",
+  "reply": { "kind": "exact", "value": "DONE" },
+  "requiredTestids": ["title","bill","tip","people","tip-10","tip-15","tip-20","tip-amount","total","per-person","how","faq","faq-q-1","faq-q-2","faq-q-3","faq-a-1","faq-a-2","faq-a-3"],
+  "behaviour": { "file": "hidden/behaviour.mjs", "weight": 65 },
+  "robust": { "file": "hidden/robust.mjs", "weight": 10 },
+  "judge": { "weight": 25, "rubric": "rubric.md", "calls": 4, "agree": 3 },
+  "tieMargin": 5
+}

@@ -1918,11 +1918,13 @@ document.querySelector('aside header').addEventListener('click', e => {
   const b = e.target.closest('button');
   if (!b) return;
   // Apps is its own tab: the Apps panel fills the side panel (renderDetail sets that up)
-  if (b.dataset.tab === 'apps') return openApps();
+  if (b.dataset.tab === 'apps') { document.querySelector('aside').classList.remove('bench-wide'); return openApps(); }
   showTab(b.dataset.tab);
   if (selected === APPS_PANEL) { selected = null; renderPanel(); }
 });
 function showTab(name) {
+  document.querySelector('aside').classList.toggle('bench-wide', name === 'benchmark');
+  if (name === 'benchmark') { const frame = document.getElementById('benchFrame'); if (!frame.getAttribute('src')) frame.src = '/benchmark/'; }
   for (const x of document.querySelectorAll('aside header button')) x.setAttribute('aria-selected', String(x.dataset.tab === name));
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.id === name);
 }

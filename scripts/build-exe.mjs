@@ -14,6 +14,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = path.join(ROOT, 'dist');
 const WORK = path.join(DIST, 'build');
 const EXE = process.argv[2] ? path.resolve(process.argv[2]) : path.join(DIST, 'ClaudeOS.exe');
+await import('./build-benchmark.mjs');
 fs.rmSync(WORK, { recursive: true, force: true });
 fs.mkdirSync(path.join(WORK, 'www'), { recursive: true });
 
@@ -83,10 +84,20 @@ const templates = [];
     else { templates.push(r); assets[`templates/${r}`] = path.join(dir, e.name); }
   }
 })(path.join(ROOT, 'templates'), '');
+// Include the benchmark in standalone and desktop backends alike, without requiring Node/npm on the recipient's PC.
+const benchmark = [];
+(function walk(dir, rel) {
+  for (const e of fs.readdirSync(dir, {withFileTypes:true})) {
+    if (e.name === 'reference' || e.name === '.bin' || /\.map$|\.test\.mjs$/.test(e.name)) continue;
+    const r = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) walk(path.join(dir,e.name),r);
+    else { benchmark.push(r); assets[`benchmark/${r}`] = path.join(dir,e.name); }
+  }
+})(path.join(ROOT,'benchmark'),'');
 const hash = crypto.createHash('sha1');
 for (const f of Object.values(assets).concat(path.join(WORK, 'claudeos.cjs'))) hash.update(fs.readFileSync(f));
 const build_ = hash.digest('hex').slice(0, 10);
-fs.writeFileSync(path.join(WORK, 'manifest.json'), JSON.stringify({ build: build_, version: JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version, templates, nodePty }));
+fs.writeFileSync(path.join(WORK, 'manifest.json'), JSON.stringify({ build: build_, version: JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version, templates, nodePty, benchmark }));
 assets['manifest.json'] = path.join(WORK, 'manifest.json');
 
 // 4. the blob, injected into a copy of this Node

@@ -252,6 +252,9 @@ async function runSmoke() {
   const result = await win.webContents.executeJavaScript(`(async () => {
     const token = window.CLAUDEOS_TOKEN;
     const api = async (url, body) => (await fetch(url, { method: body === undefined ? 'GET' : 'POST', headers: { 'content-type': 'application/json', 'x-claudeos-token': token }, body: body === undefined ? undefined : JSON.stringify(body) })).json();
+    const benchState = await api('/benchmark/api/state');
+    const benchHtml = await (await fetch('/benchmark/')).text();
+    const benchmarkVerified = Array.isArray(benchState.tasks) && benchState.tasks.includes('bill-splitter') && benchHtml.includes('Compare ClaudeOS');
     const settings = await api('/api/settings');
     const update = await api('/api/update');
     const terminal = await api('/api/terminal/run', { command: 'echo CLAUDEOS_DESKTOP_SMOKE_OK' });
@@ -262,9 +265,9 @@ async function runSmoke() {
       const tab = output.tabs?.find(tab => tab.id === terminal.tab.id);
       if (tab && !tab.running && tab.code === 0 && tab.screen.includes('CLAUDEOS_DESKTOP_SMOKE_OK')) { consoleVerified = true; break; }
     }
-    return { tokenPresent: !!token, nodeUnavailable: typeof require === 'undefined' && typeof process === 'undefined', settings, update, terminal, consoleVerified };
+    return { benchmarkVerified, tokenPresent: !!token, nodeUnavailable: typeof require === 'undefined' && typeof process === 'undefined', settings, update, terminal, consoleVerified };
   })()`);
-  if (!result.tokenPresent || !result.nodeUnavailable || !result.settings.desktop || result.terminal.error || !result.consoleVerified) throw new Error(JSON.stringify(result));
+  if (!result.benchmarkVerified || !result.tokenPresent || !result.nodeUnavailable || !result.settings.desktop || result.terminal.error || !result.consoleVerified) throw new Error(JSON.stringify(result));
   win.close();
   const closeToTray = !win.isDestroyed() && !win.isVisible();
   showWindow();

@@ -35,8 +35,9 @@
     display: flex; flex-direction: column; overflow: hidden; }
   #asideGrip { position: absolute; left: 0; top: 0; bottom: 0; width: 6px; cursor: ew-resize; z-index: 5; }
   #asideGrip:hover, #asideGrip.drag { background: linear-gradient(90deg, rgba(217,119,87,0.5), transparent); }
-  aside header { display: flex; border-bottom: 1px solid var(--line); }
-  aside header button { flex: 1; background: none; border: 0; color: var(--dim); padding: 12px 0; font: inherit; cursor: pointer; }
+  aside.bench-wide { width: max(var(--aside-w, 380px), 760px); }
+  aside header { overflow-x: auto; flex-shrink: 0; display: flex; border-bottom: 1px solid var(--line); }
+  aside header button { flex: 1; min-width: max-content; padding-left: 8px !important; padding-right: 8px !important; background: none; border: 0; color: var(--dim); padding: 12px 0; font: inherit; cursor: pointer; }
   aside header button[aria-selected="true"] { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
   .tab { flex: 1; overflow-y: auto; padding: 8px 10px 14px; display: none; }
   .tab.on { display: block; }
@@ -804,6 +805,7 @@
     <button data-tab="term" aria-selected="false" title="Terminals you and Claude share">Terminal</button>
     <button data-tab="git" aria-selected="false" title="Branch, changes, worktrees, pull requests and CI of the chat's repository">Git</button>
     <button data-tab="arts" aria-selected="false" title="Pages Claude published">Artifacts</button>
+    <button data-tab="benchmark" aria-selected="false" title="Compare quality, time and token usage against Claude Desktop or Codex">Benchmark</button>
     <button data-tab="apps" aria-selected="false" title="Connect Claude to Gmail, Notion, Blender and more">Apps</button>
   </header>
   <div class="tab on" id="chat">
@@ -866,6 +868,7 @@
   </div>
   <div class="tab" id="git"></div>
   <div class="tab" id="arts"></div>
+  <div class="tab" id="benchmark" style="padding:0;overflow:hidden"><iframe id="benchFrame" title="ClaudeOS Benchmark" style="width:100%;height:100%;border:0" sandbox="allow-scripts allow-same-origin allow-downloads"></iframe></div>
   <div id="detail"></div>
 </aside>
 <section id="preview" hidden>

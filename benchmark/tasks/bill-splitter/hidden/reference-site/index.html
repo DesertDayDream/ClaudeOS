@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Split the Bill</title>
+<style>
+  body { margin: 0; font: 16px/1.5 system-ui, sans-serif; color: #1d1d1f; background: #f5f5f7; }
+  header, main, footer { max-width: 640px; margin: 0 auto; padding: 16px; }
+  .card { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; margin: 8px 0 4px; }
+  input { width: 100%; box-sizing: border-box; font: inherit; padding: 8px; }
+  .presets button, .faq button { font: inherit; min-height: 40px; padding: 6px 12px; margin: 6px 6px 0 0; }
+  .faq button { display: block; width: 100%; text-align: left; }
+  .error { color: #a00; }
+  output { font-weight: 700; }
+</style>
+</head>
+<body>
+<header><h1 data-testid="title">Split the Bill</h1></header>
+<main>
+  <form class="card" onsubmit="return false">
+    <label for="bill">Bill amount ($)</label>
+    <input id="bill" data-testid="bill" type="number" min="0" step="0.01">
+    <label for="tip">Tip (%)</label>
+    <input id="tip" data-testid="tip" type="number" min="0" value="15">
+    <div class="presets">
+      <button type="button" data-testid="tip-10" data-tip="10">10%</button>
+      <button type="button" data-testid="tip-15" data-tip="15">15%</button>
+      <button type="button" data-testid="tip-20" data-tip="20">20%</button>
+    </div>
+    <label for="people">People</label>
+    <input id="people" data-testid="people" type="number" min="1" step="1" value="1">
+  </form>
+  <section class="card" aria-live="polite">
+    <p class="error" data-testid="error" hidden>Enter a bill of $0 or more and at least 1 whole person.</p>
+    <p>Tip: <output data-testid="tip-amount">$0.00</output></p>
+    <p>Total: <output data-testid="total">$0.00</output></p>
+    <p>Per person: <output data-testid="per-person">$0.00</output></p>
+  </section>
+  <section class="card" data-testid="how">
+    <h2>How it works</h2>
+    <ol><li>Enter the bill.</li><li>Pick a tip.</li><li>Say how many people share.</li></ol>
+  </section>
+  <section class="card faq" data-testid="faq">
+    <h2>FAQ</h2>
+    <button type="button" data-testid="faq-q-1" aria-expanded="false">Is the tip on the pre-tax amount?</button>
+    <p data-testid="faq-a-1" hidden>It is on whatever amount you enter.</p>
+    <button type="button" data-testid="faq-q-2" aria-expanded="false">How is rounding done?</button>
+    <p data-testid="faq-a-2" hidden>To the nearest cent, at the end.</p>
+    <button type="button" data-testid="faq-q-3" aria-expanded="false">Is anything saved?</button>
+    <p data-testid="faq-a-3" hidden>No, everything stays on this page.</p>
+  </section>
+</main>
+<footer>Reference page for AI Bench.</footer>
+<script>
+  const $ = id => document.querySelector(`[data-testid="${id}"]`);
+  const fmt = u => '$' + (Math.floor(u / 1e3 + 0.5 + 1e-9) / 100).toFixed(2);
+  function update() {
+    const billS = $('bill').value.trim(), b = Number(billS), t = Number($('tip').value) || 0, p = Number($('people').value);
+    const bad = billS === '' || !(b >= 0) || !Number.isInteger(p) || p < 1 || $('people').value.trim() === '';
+    $('error').hidden = !bad;
+    if (bad) { for (const k of ['tip-amount', 'total', 'per-person']) $(k).textContent = '$0.00'; return; }
+    const billU = Math.round(b * 1e5), tipU = billU * t / 100, totalU = billU + tipU;
+    $('tip-amount').textContent = fmt(tipU); $('total').textContent = fmt(totalU); $('per-person').textContent = fmt(totalU / p);
+  }
+  document.querySelectorAll('input').forEach(i => i.addEventListener('input', update));
+  document.querySelectorAll('[data-tip]').forEach(b => b.addEventListener('click', () => { $('tip').value = b.dataset.tip; update(); }));
+  for (const i of [1, 2, 3]) $('faq-q-' + i).addEventListener('click', e => {
+    const a = $('faq-a-' + i); a.hidden = !a.hidden; e.currentTarget.setAttribute('aria-expanded', String(!a.hidden));
+  });
+  update();
+</script>
+</body>
+</html>
