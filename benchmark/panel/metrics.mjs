@@ -128,7 +128,7 @@ export function snapshotDir(dir) {
   const go = d => {
     let entries; try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
-      if (SKIP.has(e.name)) continue;
+      if (SKIP.has(e.name) || e.isSymbolicLink()) continue;
       const p = path.join(d, e.name);
       if (e.isDirectory()) { go(p); continue; }
       let buf; try { const st = fs.statSync(p); if (st.size > 2e6) { files[path.relative(dir, p)] = null; continue; } buf = fs.readFileSync(p); } catch { continue; }
