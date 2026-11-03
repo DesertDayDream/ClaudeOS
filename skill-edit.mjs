@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { APPS, appsInText } from './public/apps.js';
 
 // Claude Code's rule for skill names
 const NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
@@ -117,5 +118,15 @@ export function createSkillEditor({ dataDir }) {
     return { ok: true, folder: path.basename(e.dir), name: e.name };
   }
 
-  return { read, save, fire, restore };
+  function addApp(teamDir, folder, key) {
+    if (!Object.hasOwn(APPS, key)) return { error: 'Choose an app from the list.' };
+    const file = path.join(teamDir, folder, 'SKILL.md');
+    const text = fs.readFileSync(file, 'utf8');
+    if (appsInText(text).some(a => a.key === key)) return { ok: true };
+    const app = APPS[key];
+    fs.writeFileSync(file, text.trimEnd() + `\n\n## App: ${app.title}\nUse ${app.title} through its connected integration when the task calls for it. If it is unavailable or needs sign-in, tell the user to connect it in Apps before continuing with work that needs it.\n`);
+    return { ok: true };
+  }
+
+  return { read, save, fire, restore, addApp };
 }

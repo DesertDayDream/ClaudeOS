@@ -1155,6 +1155,11 @@ function renderBoard(el, s) {
     <div class="k">${esc(SOURCE_TITLES[s.source] || s.source)}${s.owner ? ' · ' + esc(s.owner) : ''} · ${work.load.get(s.id) || 0} jobs</div>
     <div class="desc">${esc(s.description)}</div>${mindHtml(s)}${coachedHtml(s)}`;
   const apps = appsOf(s);
+  if (s.source === 'project' && s.owner === brainFolder()) {
+    const assigned = new Set((s.apps || []).map(a => a.key));
+    const choices = Object.entries(APPS).filter(([key]) => !assigned.has(key)).sort((a, b) => a[1].title.localeCompare(b[1].title));
+    html += `<div class="runs-h">Assign an app</div><div class="deptpick"><select data-employee-app aria-label="App to assign"><option value="">Choose an app…</option>${choices.map(([key, a]) => `<option value="${esc(key)}">${esc(a.title)}${(state.integrations || []).some(i => i.key === key && i.status === 'connected') ? ' · connected' : ''}</option>`).join('')}</select><button class="btn mini" data-add-employee-app>Add app</button></div><div class="k">Saved in their instructions. Apps that need setup will show a connect button below.</div>`;
+  }
   if (apps.length) {
     html += `<div class="runs-h">Apps</div><div class="apps-l">${apps.map(a => `<div class="row">${appBadge(a)}
       <div><b>${esc(a.title)}</b><span>${a.runs ? `used in ${a.runs} run${a.runs > 1 ? 's' : ''}` : a.why === 'tools' ? 'its SKILL.md calls it' : 'named in its SKILL.md'}</span></div>
@@ -1259,6 +1264,17 @@ addEventListener('keydown', e => {
 });
 document.getElementById('detail').addEventListener('click', async e => {
   if (e.target.closest('[data-desk-back]')) return backToManager();
+  const addApp = e.target.closest('[data-add-employee-app]');
+  if (addApp) {
+    const key = document.querySelector('[data-employee-app]')?.value;
+    if (!key) return toast('Choose an app first.');
+    addApp.disabled = true;
+    try {
+      const r = await api('/api/skills/app', { id: selected, key });
+      toast(r.error || `${APPS[key].title} added to their instructions.`);
+    } finally { addApp.disabled = false; }
+    return;
+  }
   const t = e.target.closest('[data-desk-view]');
   if (t) { deskView = t.dataset.deskView; return renderDetail(); }
   if (employees.has(selected)) office.click(e);

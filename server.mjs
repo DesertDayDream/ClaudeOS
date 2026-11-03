@@ -688,6 +688,10 @@ function skillApi(active, route, body) {
   if (route === 'restore') { const r = skillEditor.restore(String(body.trashId || '')); return r.error ? r : { ...r, id: idOf(r.name) }; }
   const s = body.id ? teamSkill(active, body.id) : null;
   if (body.id && !s) return { error: 'That employee is gone, or isn’t on this brain’s team.' };
+  if (route === 'app') {
+    if (!s) return { error: 'Pick an employee first.' };
+    return skillEditor.addApp(team, s.folder, body.key);
+  }
   if (route === 'save') {
     const r = skillEditor.save(team, s?.folder || null, body);
     if (r.error) return r;
@@ -933,7 +937,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/skills/copy') return json(res, 200, copySkill(active, body));
   if (url.pathname === '/api/skills/coach') return json(res, 200, await coachSkill(active, body));
   if (url.pathname === '/api/skills/uncoach') { const r = coaching.undo(String(body.id || '')); refresh(); return json(res, 200, r); }
-  if (/^\/api\/skills\/(save|fire|restore)$/.test(url.pathname)) {
+  if (/^\/api\/skills\/(save|fire|restore|app)$/.test(url.pathname)) {
     try { const r = skillApi(active, url.pathname.split('/').pop(), body); refresh(); return json(res, 200, r); }
     catch (err) { return json(res, 200, { error: err.message }); }
   }

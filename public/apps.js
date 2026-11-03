@@ -23,6 +23,9 @@ const COMMON_WORDS = new Set(['x', 'box', 'zoom', 'linear', 'notion', 'teams', '
 // apps named in a SKILL.md: as integration tools (mcp__claude_ai_Gmail__search) or by name ("Gmail")
 export function appsInText(text) {
   const found = new Map();
+  for (const [key, app] of Object.entries(APPS)) {
+    if (String(text).split(/\r?\n/).includes(`## App: ${app.title}`)) found.set(key, 'named');
+  }
   for (const m of String(text).matchAll(/mcp__([A-Za-z0-9_.-]+?)__/g)) {
     const key = appForServer(m[1]);
     found.set(key || 'mcp:' + m[1], 'tools');
