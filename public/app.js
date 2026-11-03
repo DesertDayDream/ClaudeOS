@@ -709,6 +709,8 @@ const FLOOR_Y = -2.0, DESK_X = 3.3, DESK_Z = 3.0;
 const ENTRANCE = 0.55; // the gap in the ring of rooms, in front of the Manager's desk
 const rooms = new Map(); // dept id -> { group, center, pickables }
 let roomsKey = '', ground = null;
+// not one of the user's departments: the app makes it, it can't be opened, edited or dropped into
+const CONTRACTOR_ROOM = { id: '~contractors', name: 'Contractors', color: '#8a8fa8', projects: [], employees: [], builtin: true };
 const sourceOrder = (a, b) => (a.data.source === b.data.source ? 0 : a.data.source === 'project' ? -1 : b.data.source === 'project' ? 1 : a.data.source.localeCompare(b.data.source))
   || a.data.name.localeCompare(b.data.name);
 function layoutEmployees(org) {
@@ -716,8 +718,11 @@ function layoutEmployees(org) {
   const where = new Map();
   for (const d of depts) for (const id of d.employees) where.set(id, d.id);
   const all = [...employees.values()].sort(sourceOrder);
-  const plan = depts.map(d => {
-    const members = all.filter(e => where.get(e.data.id) === d.id && e.data.source !== 'contractor');
+  // built-in skills Claude has called work in a room of their own, kept apart from the team
+  const hired = all.filter(e => e.data.source === 'contractor');
+  const roomList = hired.length ? [...depts, CONTRACTOR_ROOM] : depts;
+  const plan = roomList.map(d => {
+    const members = d === CONTRACTOR_ROOM ? hired : all.filter(e => where.get(e.data.id) === d.id && e.data.source !== 'contractor');
     const n = members.length, cols = Math.max(2, Math.ceil(Math.sqrt(n * 1.5))), rows = Math.max(1, Math.ceil(n / cols));
     return { d, members, cols, rows, w: cols * DESK_X + 1.6, depth: rows * DESK_Z + 1.4 };
   });
@@ -807,7 +812,7 @@ function buildRooms(plan, outer) {
     sign.userData = { kind: 'dept', id: pickId };
     g.add(sign);
     building.add(g);
-    rooms.set(p.d.id, { group: g, center: new THREE.Vector3(p.cx, -0.5, p.cz), pickables: [floor, sign], color: col });
+    rooms.set(p.d.id, { group: g, center: new THREE.Vector3(p.cx, -0.5, p.cz), pickables: p.d.builtin ? [] : [floor, sign], color: col });
   }
 }
 // the name over a room's back wall, with its active projects
@@ -823,7 +828,8 @@ function roomSign(p) {
   g.font = '28px system-ui, Segoe UI, sans-serif';
   g.fillStyle = '#8c93b8';
   const n = p.members.length;
-  g.fillText(`${n} ${n === 1 ? 'person' : 'people'} · ${projects.length} project${projects.length === 1 ? '' : 's'}`, 256, 98);
+  g.fillText(p.d.builtin ? `${n} built-in skill${n === 1 ? '' : 's'}`
+    : `${n} ${n === 1 ? 'person' : 'people'} · ${projects.length} project${projects.length === 1 ? '' : 's'}`, 256, 98);
   g.font = '500 30px system-ui, Segoe UI, sans-serif';
   g.fillStyle = '#e9ecff';
   projects.slice(0, 3).forEach((x, i) => g.fillText('▸ ' + (x.name.length > 26 ? x.name.slice(0, 25) + '…' : x.name), 256, 142 + i * 36));
