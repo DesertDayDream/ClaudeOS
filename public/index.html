@@ -512,12 +512,13 @@
   .brainpick .caret { color: var(--dim); }
   .menu { position: absolute; top: calc(100% + 6px); left: 0; width: 320px; background: rgba(14,17,30,0.96); border: 1px solid var(--line);
     border-radius: 12px; padding: 6px; z-index: 10; box-shadow: 0 12px 40px rgba(0,0,0,0.5); }
-  .menu .item { display: grid; grid-template-columns: 16px 1fr auto; gap: 2px 8px; align-items: center; padding: 7px 8px; border-radius: 8px; cursor: pointer; }
+  .menu .item { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto auto; gap: 2px 8px; align-items: center; padding: 7px 8px; border-radius: 8px; cursor: pointer; }
+  .menu .item [data-unlink] { grid-column: 3; grid-row: 1 / span 2; }
   .menu .item:hover { background: rgba(255,255,255,0.06); }
   .menu .item .check { color: var(--brain); grid-row: span 2; }
   .menu .item .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .menu .item .pt { grid-column: 2; color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .menu .item .rm { grid-row: span 2; grid-column: 3; background: none; border: 0; color: var(--dim); cursor: pointer; font-size: 15px; padding: 2px 6px; border-radius: 6px; }
+  .menu .item .rm { grid-row: 1 / span 2; grid-column: 4; background: none; border: 0; color: var(--dim); cursor: pointer; font-size: 15px; padding: 2px 6px; border-radius: 6px; }
   .menu .item .rm:hover { color: #ff8a8a; background: rgba(255,255,255,0.06); }
   .menu hr { border: 0; border-top: 1px solid var(--line); margin: 6px 4px; }
   .menu .act { display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--text); font: inherit; padding: 8px; border-radius: 8px; cursor: pointer; }

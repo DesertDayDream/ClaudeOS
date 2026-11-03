@@ -51,13 +51,14 @@ function renderMenu() {
     <div class="item" data-id="${esc(b.id)}" title="${esc(b.path)}">
       <span class="check">${b.id === current?.id ? '●' : ''}</span>
       <span class="nm">${esc(b.name)}${current?.links?.includes(b.id) ? ' <em class="lk">linked</em>' : ''}</span>
+      ${current?.links?.includes(b.id) ? `<button class="btn mini" data-unlink="${esc(b.id)}" title="Unlink ${esc(b.name)} from ${esc(current.name)}">Unlink</button>` : ''}
       <button class="rm" data-rm="${esc(b.id)}" title="Remove from this list (the folder stays)">×</button>
       <span class="pt">${esc(b.path)}</span>
     </div>`).join('') + `
     <hr>
     <button class="act" data-act="new">+ New brain<span>Create a new folder with an empty cloud</span></button>
     <button class="act" data-act="add">Add existing folder<span>Turn a folder you already have into a brain</span></button>
-    ${list.length > 1 ? `<button class="act" data-act="link">Link brains…<span>Let ${esc(current?.name || 'this brain')} read another brain's memory, hand it work and copy its skills</span></button>` : ''}`;
+    ${list.length > 1 ? `<button class="act" data-act="link">Manage brain links…<span>Link or unlink brains for ${esc(current?.name || 'this brain')}</span></button>` : ''}`;
 }
 
 function openMenu(open) {
@@ -70,6 +71,23 @@ document.addEventListener('click', e => { if (!menu.hidden && !menu.contains(e.t
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { openMenu(false); if (modal && modal.dataset.kind !== 'welcome') closeModal(); } });
 
 menu.addEventListener('click', async e => {
+  const unlink = e.target.closest('[data-unlink]');
+  if (unlink) {
+    e.stopPropagation();
+    const source = current;
+    const target = list.find(b => b.id === unlink.dataset.unlink);
+    if (!source || !target) return;
+    unlink.disabled = true;
+    try {
+      const r = await api('/api/brains/links', { id: source.id, links: source.links.filter(id => id !== target.id) });
+      if (r.error) { alert(r.error); return; }
+      if (current?.id === source.id) current.links = r.links;
+      renderMenu();
+      toast(`Unlinked ${target.name} from ${source.name}`, 'Both brains and their files stay in place.');
+    } catch (err) { alert(`Could not unlink brain: ${err.message}`); }
+    finally { unlink.disabled = false; }
+    return;
+  }
   const rm = e.target.closest('[data-rm]');
   if (rm) {
     e.stopPropagation();
@@ -277,7 +295,8 @@ function signinDialog() {
 function linkDialog() {
   const others = list.filter(b => b.id !== current.id);
   const d = showModal(`
-    <h2>Link brains to ${esc(current.name)}</h2>
+    <h2>Manage links for ${esc(current.name)}</h2>
+    <p class="sub">Check a brain to link it, or uncheck it to unlink, then save. Unlinking keeps both brains and all their files. Links go one way; any link back from the other brain stays.</p>
     <p class="sub">A linked brain stays its own folder. ${esc(current.name)} can:</p>
     <ul class="sub">
       <li><b>read its memory</b>: Claude here can search it, but never changes it. Its dots float beside this cloud.</li>
