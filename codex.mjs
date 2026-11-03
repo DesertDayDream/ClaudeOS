@@ -7,7 +7,7 @@ import { runAppServerTurn } from './codex-app-server.mjs';
 import { codexCommand, codexHome } from './agents.mjs';
 
 export const CODEX_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
-const FALLBACK_MODELS = [{ id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' }];
+const FALLBACK_MODELS = [{ id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol', inferred: true }];
 
 // Where Codex is and how to start it: agents.mjs finds it however it was installed.
 export { codexCommand } from './agents.mjs';
@@ -49,12 +49,19 @@ export function shortCommand(cmd) {
 }
 
 // One private App Server connection per message, with a UI approval channel.
+export function codexMcpConfig(server) {
+  const transport = server.url ? { url: server.url, ...(server.headers ? { http_headers: server.headers } : {}),
+    ...(server.bearer_token_env_var ? { bearer_token_env_var: server.bearer_token_env_var } : {}) }
+    : { command: server.command, args: server.args || [], ...(server.env ? { env: server.env } : {}) };
+  return { ...transport, ...(server.enabled_tools ? { enabled_tools: server.enabled_tools } : {}), ...(server.disabled_tools ? { disabled_tools: server.disabled_tools } : {}) };
+}
+
 export function runCodexTurn(options) {
   const cmd = codexCommand();
   if (!cmd) return { proc: null, done: Promise.resolve({ error: 'Codex is not installed on this PC. Install it from Apps → Accounts (Install), then sign in there.' }), stop() {} };
   const cfg = [];
   for (const [name, server] of Object.entries(options.mcpServers || {})) {
-    cfg.push('-c', `mcp_servers.${name}=${toml({ command: server.command, args: server.args || [], ...(server.env ? { env: server.env } : {}), ...(server.enabled_tools ? { enabled_tools: server.enabled_tools } : {}), ...(server.disabled_tools ? { disabled_tools: server.disabled_tools } : {}) })}`);
+    cfg.push('-c', `mcp_servers.${JSON.stringify(name)}=${toml(codexMcpConfig(server))}`);
   }
   return runAppServerTurn({ ...options, command: cmd.command, args: [...cmd.args, ...cfg], env: cmd.env });
 }

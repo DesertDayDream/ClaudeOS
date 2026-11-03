@@ -1,6 +1,6 @@
 {
   "name": "claude-os",
-  "version": "0.3.13",
+  "version": "0.3.14",
   "private": true,
   "type": "module",
   "description": "ClaudeOS: give Claude a brain you can see. A live 3D view of its memory and skills, with a chat, for any number of brain folders.",
@@ -14,6 +14,7 @@
     "test:desktop": "node --test --test-isolation=none desktop/*.test.cjs",
     "test:desktop-backend": "node scripts/test-desktop-backend.mjs",
     "test:codex": "node --test --test-isolation=none tests/codex-app-server.test.mjs",
+    "test:models": "node --test --test-isolation=none tests/model-routing.test.mjs",
     "icon": "node scripts/make-icon.mjs",
     "apps": "node scripts/make-apps.mjs"
   },

@@ -63,6 +63,7 @@ try {
   else await step('Install desktop dependencies', () => run(process.execPath, [npmCli, '--prefix', 'desktop', fs.existsSync(lock) ? 'ci' : 'install']));
   await step('Run shell and security checks', () => run(process.execPath, [npmCli, 'run', 'test:desktop']));
   await step('Run Codex approval protocol checks', () => run(process.execPath, [npmCli, 'run', 'test:codex']));
+  await step('Run model selection and fallback checks', () => run(process.execPath, [npmCli, 'run', 'test:models']));
   await step('Run isolated backend integration check', async () => { await freePort(4800); await freePort(4810); await run(process.execPath, [npmCli, 'run', 'test:desktop-backend']); });
   await step('Test the actual Electron development window and terminal', () => smoke(process.execPath, [require.resolve('electron/cli.js'), path.join(root, 'desktop', 'main.cjs')], 'development'));
   await step('Build Windows installer', () => run(process.execPath, [path.join(root, 'scripts', 'build-desktop.mjs')]));

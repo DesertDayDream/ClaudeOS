@@ -130,6 +130,19 @@ try {
   const stopped = await waitFor(state => !state.busy);
   assert.equal(stopped.approvals.length, 0);
   console.log('PASS: Codex approval card, available choices, invalid/stale answer rejection, allowed command, and cancellation cleanup through HTTP.');
+  const chatId = stopped.id;
+  const catalog = (await api('/api/desk/model_catalog', { chat: chatId })).value;
+  assert.ok(Array.isArray(JSON.parse(catalog.text).providers.codex.models));
+  assert.match((await api('/api/desk/run_model_task', { chat: chatId, task: 'Invalid choice', selection: { complexity: 'unknown' } })).value.error, /complexity/);
+  const specialist = api('/api/desk/run_model_task', { chat: chatId, task: 'Bounded review', selection: { engine: 'codex', complexity: 'simple', reason: 'Small review' } });
+  const specialistPending = await waitFor(state => state.approvals.some(a => a.who === 'Model specialist'));
+  const specialistCard = specialistPending.approvals.find(a => a.who === 'Model specialist');
+  assert.equal(specialistCard.engine, 'codex');
+  await api('/api/approval/answer', { id: specialistCard.id, decision: 'accept' });
+  const specialistResult = (await specialist).value;
+  assert.match(specialistResult.text, /Model: codex/);
+  assert.match(specialistResult.text, /Approval result: accept/);
+  console.log('PASS: model catalog, invalid selection, specialist dispatch, approval and returned model/result through authenticated HTTP in the lab copy.');
   console.log(`PASS: lab backend startup, CSP, API authentication, native settings IPC, hotkey setting, update routing, rollback guidance. Lab: ${lab}`);
 } catch (error) { exitCode = 1; console.error(error.stack); }
 finally {

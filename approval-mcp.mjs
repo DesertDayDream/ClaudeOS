@@ -3,6 +3,7 @@
 // Allow/Deny card in the page and answers once the user clicks.
 import http from 'node:http';
 import readline from 'node:readline';
+import { MODEL_SELECTION_SCHEMA } from './model-routing.mjs';
 
 const PORT = Number(process.env.CLAUDEOS_PORT || 4747);
 const TOKEN = process.env.CLAUDEOS_TOKEN || '';
@@ -22,6 +23,12 @@ try { TEAM = JSON.parse(process.env.CLAUDEOS_TEAM || '[]'); } catch { /* no team
 // A chat also gets the desk tools: terminal tabs, artifacts, and (unless it is a side session
 // itself) side sessions of its own.
 const DESK = process.env.CLAUDEOS_DESK === '1';
+const MODEL_TASK = process.env.CLAUDEOS_MODEL_TASK === '1';
+const MODEL_TOOLS = [
+  { name: 'model_catalog', description: 'List installed model providers and locally offered Codex models/efforts. Does not guarantee quota or specialist tools.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'run_model_task', description: 'Run one bounded specialist task on a model selected for its complexity and tools. Returns the result here. Include context, exact file ownership and acceptance criteria. No recursive delegation. Keeps human approvals; usage-limit fallback is attempted once unless prohibited.',
+    inputSchema: { type: 'object', required: ['task'], properties: { task: { type: 'string' }, selection: MODEL_SELECTION_SCHEMA } } },
+];
 const SESSIONS = DESK && process.env.CLAUDEOS_SESSIONS === '1';
 const DESK_TOOLS = [
   { name: 'terminal_run', description: 'Run a shell command (PowerShell on Windows) in a tab of the ClaudeOS Terminal tab, which the user can watch, type into and stop. Use it for long-running things the user should see: dev servers, watchers, test runners, builds. Returns at once with the tab id; read the output with terminal_read. Use your Bash tool for short commands whose output you need right away. Pass tab to reuse a tab whose command has ended: each tab keeps one shell, so its folder (after cd), variables and functions carry over. Tabs are real terminals (the user can run vim or other full-screen programs in them); the tab shows a command as finished when its prompt comes back, with its exit code.',
@@ -106,14 +113,19 @@ rl.on('line', async line => {
           after: { type: 'array', items: { type: 'string' }, description: 'Ids of earlier tasks whose output this one needs. Leave empty to run at once.' },
           request: { type: 'array', items: { type: 'string' }, description: 'Ids of the inbox requests this task works on.' },
           project: { type: 'string', description: 'Id of the active project this task is work on, if any.' },
+          selection: MODEL_SELECTION_SCHEMA,
         } } },
         skipped: { type: 'array', items: { type: 'object', properties: { request: { type: 'string' }, reason: { type: 'string' } } }, description: 'Requests nobody on the team can do, or too unclear to act on.' },
         notes: { type: 'string', description: 'Anything the user should know.' },
       } },
-    }] : []), ...(DESK ? DESK_TOOLS : [])] });
+    }] : []), ...(DESK ? DESK_TOOLS : []), ...(DESK || MODEL_TASK ? MODEL_TOOLS : [])] });
   }
-  if (method === 'tools/call' && DESK && DESK_TOOLS.some(t => t.name === params?.name)) {
-    const r = await ask({ ...(params.arguments || {}), chat: CHAT }, `/api/desk/${params.name}`);
+  if (method === 'tools/call' && ((DESK && DESK_TOOLS.some(t => t.name === params?.name)) || ((DESK || MODEL_TASK) && MODEL_TOOLS.some(t => t.name === params?.name)))) {
+    let modelCaller, parentSelection;
+    if (MODEL_TASK) {
+      try { modelCaller = JSON.parse(process.env.CLAUDEOS_MODEL_CALLER || '{}'); parentSelection = JSON.parse(process.env.CLAUDEOS_MODEL_SELECTION || '{}'); } catch { /* defaults */ }
+    }
+    const r = await ask({ ...(params.arguments || {}), chat: CHAT, modelCaller, parentSelection }, `/api/desk/${params.name}`);
     return reply(id, { content: [{ type: 'text', text: r.error || r.text || JSON.stringify(r) }], isError: !!r.error });
   }
   if (method === 'tools/call' && params?.name === 'ask_brain') {

@@ -17,6 +17,7 @@ import { createSchedules } from './schedules.mjs';
 import { createPlugins } from './plugins.mjs';
 import { runHandoff } from './handoff.mjs';
 import { createManager } from './manager.mjs';
+import { modelCatalog } from './model-routing.mjs';
 import { createTerminals } from './terminals.mjs';
 import { createGit } from './git.mjs';
 import { createArtifacts } from './artifacts.mjs';
@@ -447,6 +448,17 @@ const chatOwning = id => [...chats.values()].find(c => c.owns(id));
 async function desk(tool, a) {
   const owner = chatOwning(String(a.chat || ''));
   if (!owner) return { error: 'This chat is not running in ClaudeOS anymore.' };
+  if (tool === 'model_catalog') return { text: JSON.stringify(modelCatalog(), null, 2) };
+  if (tool === 'run_model_task') {
+    const brainId = [...chats.entries()].find(([, c]) => c === owner)?.[0];
+    const brain = brains.find(brainId);
+    if (!brain) return { error: 'This brain is no longer registered.' };
+    const parent = a.parentSelection || {};
+    return managerFor(brain).specialist({ ...a, caller: a.modelCaller || owner.optionsFor(a.chat),
+      requiredEngine: parent.requiredEngine || (parent.fallback === false && parent.model ? parent.engine : undefined),
+      requiredModel: parent.fallback === false ? parent.model : undefined,
+      allowFallback: parent.fallback !== false, workDir: owner.chatFolder(a.chat), fromBrief: !!a.modelCaller });
+  }
   const state = t => `${t.title} (tab ${t.id}, ${t.cwd}): ${t.running ? 'running' : t.code == null ? 'idle' : `exited with code ${t.code}`}`;
   if (tool === 'terminal_run') {
     const r = terminals.run({ command: a.command, tab: a.tab, title: a.title, cwd: a.cwd || owner.chatFolder(a.chat), by: 'Claude' });
@@ -514,7 +526,7 @@ function chatFor(brain) {
       broadcast: (event, data) => { if (brains.active()?.id === brain.id) broadcast(event, data); },
       othersWorking: () => managerFor(brain).busy(), team: () => teamOf(brain), projects: () => projectsOf(brain),
       // the chat is the Manager: when it stops, the Manager desk stops typing and unbriefed requests wait again
-      onIdle: chatId => managerFor(brain).chatDone(chatId),
+      onIdle: chatId => { managerFor(brain).stopChatSpecialists(chatId); managerFor(brain).chatDone(chatId); },
       notify: n => notify({ ...n, brain: brain.name }), onLimits: setLimits,
       onCodexTurn: () => setTimeout(() => broadcast('codexLimits', codexLimits()), 800), // Codex writes its log just after
       scope: () => scopeFor(brains.find(brain.id) || brain) }));
@@ -586,6 +598,13 @@ function managerFor(brain) {
   if (!managers.has(brain.id)) {
     managers.set(brain.id, createManager({ cwd: brain.path, dataFile: path.join(DATA, 'manager', `${brain.id}.json`), activityFile: ACTIVITY,
       memoryFile: memoryFileOf(brain), helper, memoryServer, port: PORT, token: TOKEN, team: () => teamOf(brain), scope: () => scopeFor(brains.find(brain.id) || brain),
+      optionsFor: (chat, skill) => {
+        const base = chatFor(brain).optionsFor(chat);
+        const s = teamSkills(brain).find(s => s.name === skill);
+        const idx = readJsonCached(path.join(DATA, 'chats', brain.id, 'index.json')) || {};
+        return { ...base, ...(s ? idx.empOptions?.[s.id] || {} : {}) };
+      },
+      onApproval: (chat, request, who) => chatFor(brain).requestCodexApproval(chat, request, who),
       project: id => org.findProject(brain.id, id),
       cabinet: skill => { const s = skillsIn(teamDir(brain), 'project', path.basename(brain.path)).find(x => x.name === skill); return s ? cabinetFor(brain, s.id) : null; }, logWork: (id, entry) => { org.logWork(brain.id, id, entry); refresh(); },
       chatBusy: () => chatFor(brain).anyBusy(),
@@ -930,7 +949,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/chat/tools') return json(res, 200, chat.setTools(body.tools || {}));
   if (url.pathname === '/api/chat/mode') return json(res, 200, chat.setMode(String(body.mode || '')));
   if (url.pathname === '/api/chat/folder') return json(res, 200, chat.setFolder(body.folder || null));
-  if (url.pathname === '/api/chat/stop') { chat.stop(); for (const h of handoffs.values()) h.stop(); return json(res, 200, { ok: true }); }
+  if (url.pathname === '/api/chat/stop') { managerFor(active).stopChatSpecialists(chat.snapshot().id); chat.stop(); for (const h of handoffs.values()) h.stop(); return json(res, 200, { ok: true }); }
   if (url.pathname === '/api/handoff') return json(res, 200, await handoff(active, body, req));
   if (url.pathname === '/api/org') { const r = org.apply(active.id, body); if (r.ok && /^(assign|editDept|removeDept)$/.test(body.op)) organizeCabinets(active); refresh(); return json(res, 200, r); }
   if (url.pathname.startsWith('/api/employee/')) return json(res, 200, await employeeApi(active, url.pathname.split('/').pop(), body));
@@ -976,7 +995,9 @@ async function handleApi(req, res, url) {
     return json(res, 200, r);
   }
   if (url.pathname.startsWith('/api/inbox/') || url.pathname === '/api/brief') {
-    const m = managerFor(active), what = url.pathname.split('/').pop();
+    const sender = body.chat && chatOwning(body.chat);
+    const senderBrain = sender && brains.find([...chats.entries()].find(([, c]) => c === sender)?.[0]);
+    const m = managerFor(senderBrain || active), what = url.pathname.split('/').pop();
     if (what === 'brief') return json(res, 200, m.postBrief(body)); // from the chat's post_brief tool
     if (what === 'add') return json(res, 200, m.add(body.text, body.files));
     if (what === 'remove') return json(res, 200, m.remove(String(body.id || '')));

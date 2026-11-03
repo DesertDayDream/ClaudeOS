@@ -2,22 +2,22 @@
 // chat: talking in the Chat tab is talking to the Manager. Requests you Queue in the chat (with their
 // attachments), and files dropped into the brain's inbox/ folder, wait until "Send to team" hands them to the chat; the
 // Manager (or any chat message that is work for the team) splits the work into tasks through the
-// post_brief tool. Each task runs as its own `claude -p` in the brain folder, so employees work at the
+// post_brief tool. Each task runs on its selected provider in the brain folder, so employees work at the
 // same time (MAX_PARALLEL at most, across all briefs), a task that needs another's output waits for it
 // and gets its report, and the finished brief reports back to the Manager in the chat.
-import { spawn, execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { toolSummary } from './chat.mjs';
 import { workFolder, logFile } from './cabinets.mjs';
+import { MODEL_GUIDANCE, cleanSelection } from './model-routing.mjs';
+import { runModelTask } from './model-runner.mjs';
 
 const MAX_PARALLEL = 3;
 const MAX_TASKS = 12;
 const MAX_BRIEFS = 30;
 const clip = (s, n) => (s = String(s || '').trim()).length > n ? s.slice(0, n - 1) + '…' : s;
 
-export function createManager({ cwd, dataFile, activityFile, memoryFile, helper, memoryServer, port, token, broadcast, team, project = () => null, logWork = () => {}, cabinet = () => null, chatBusy = () => false, onBriefDone = () => {}, scope = () => ({ disallowed: [], settings: null }) }) {
+export function createManager({ cwd, dataFile, activityFile, memoryFile, helper, memoryServer, port, token, broadcast, team, project = () => null, logWork = () => {}, cabinet = () => null, chatBusy = () => false, onBriefDone = () => {}, scope = () => ({ disallowed: [], settings: null }), optionsFor = () => ({}), onApproval, taskRunner = runModelTask, taskCatalog }) {
   let state = { inbox: [], briefs: [] };
   try { state = { ...state, ...JSON.parse(fs.readFileSync(dataFile, 'utf8')) }; } catch { /* first run */ }
   // runs from before a restart are gone
@@ -36,7 +36,7 @@ export function createManager({ cwd, dataFile, activityFile, memoryFile, helper,
     for (const b of [...state.briefs].reverse()) for (const t of b.tasks) {
       if (t.employee !== skill) continue;
       out.push({ key: `${b.id}:${t.id}`, brief: b.title, task: t.task, status: t.status, result: t.result, start: t.start, end: t.end,
-        folder: t.folder || null, logFile: t.logFile || null, project: t.projectName || null, log: logs.get(`${b.id}:${t.id}`)?.entries || null });
+        folder: t.folder || null, logFile: t.logFile || null, model: t.model || null, project: t.projectName || null, log: logs.get(`${b.id}:${t.id}`)?.entries || null });
       if (out.length >= 15) return out;
     }
     return out;
@@ -109,74 +109,6 @@ export function createManager({ cwd, dataFile, activityFile, memoryFile, helper,
     });
   }
 
-  // ---------- one headless Claude run in the brain folder ----------
-  // onLog gets each step as it happens: { ts, kind: 'tool' | 'text' | 'error', text }
-  function runClaude(key, prompt, { who, allowed, denied = [], extraEnv = {}, addDir, onLog = () => {} }, onDone) {
-    const session = crypto.randomUUID();
-    const mcpServers = {
-      memory: memoryServer(memoryFile),
-      claudeos: { ...helper('approval-mcp'), env: { CLAUDEOS_PORT: String(port), CLAUDEOS_TOKEN: token, CLAUDEOS_WHO: who, ...extraEnv } },
-    };
-    const sc = scope();
-    denied = [...denied, ...sc.disallowed];
-    const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--session-id', session,
-      '--mcp-config', JSON.stringify({ mcpServers }), '--permission-prompt-tool', 'mcp__claudeos__approve',
-      '--allowedTools', allowed.join(','), ...(denied.length ? ['--disallowedTools', denied.join(',')] : []),
-      // a project's own folder, beside the brain (whose .claude/skills the employee needs)
-      ...(addDir ? ['--add-dir', addDir] : []),
-      ...(sc.settings ? ['--settings', JSON.stringify(sc.settings)] : [])];
-    const proc = spawn('claude', args, { cwd, windowsHide: true,
-      env: { ...process.env, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } });
-    const run = { proc, session, stopped: false };
-    procs.set(key, run);
-    let buf = '', err = '', last = null;
-    // the run streams its steps: tool calls and what it says go to the log, the last line is the result
-    proc.stdout.on('data', d => {
-      buf += d;
-      let nl;
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        let ev;
-        try { ev = JSON.parse(line); } catch { continue; }
-        if (ev.type === 'result') last = ev;
-        if (ev.type === 'assistant') for (const b of ev.message?.content || []) {
-          if (b.type === 'text' && b.text.trim()) onLog({ ts: Date.now(), kind: 'text', text: clip(b.text, 600) });
-          if (b.type === 'tool_use' && b.name !== 'mcp__claudeos__approve') onLog({ ts: Date.now(), kind: 'tool', text: toolSummary(b.name, b.input) });
-        }
-        if (ev.type === 'user') for (const b of ev.message?.content || []) {
-          if (b.type === 'tool_result' && b.is_error) onLog({ ts: Date.now(), kind: 'error', text: clip(typeof b.content === 'string' ? b.content : (b.content || []).map(x => x.text || '').join(' '), 300) });
-        }
-      }
-    });
-    proc.stderr.on('data', d => { err += d; });
-    let ended = false;
-    const end = r => {
-      if (ended) return;
-      ended = true;
-      procs.delete(key);
-      // a killed or failed run never reaches Claude's Stop hook, so close its task on the boards here
-      if (run.stopped || r.error) logStop(session, run.stopped ? 'stopped' : 'error', run.stopped ? 'Stopped from ClaudeOS.' : r.error);
-      onDone(run.stopped ? { stopped: true } : r);
-    };
-    proc.on('error', e => end({ error: `Could not start Claude Code: ${e.message}` }));
-    proc.on('close', code => {
-      try {
-        const r = last;
-        if (!r) throw new Error('no result');
-        const usage = { cost: r.total_cost_usd ?? null, turns: r.num_turns || 0,
-          sent: ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'].reduce((a, k) => a + (Number(r.usage?.[k]) || 0), 0),
-          output: Number(r.usage?.output_tokens) || 0 };
-        end(r.is_error ? { error: String(r.result || 'Claude failed.'), usage } : { result: String(r.result || ''), usage });
-      } catch { end({ error: err.trim().split('\n').pop() || `Claude exited with code ${code}` }); }
-    });
-    return run;
-  }
-  function logStop(session, outcome, result) {
-    const ev = { ts: Date.now(), session, cwd, type: 'stop', outcome, result: clip(result, 600) };
-    try { fs.appendFileSync(activityFile, JSON.stringify(ev) + '\n'); } catch { /* the board shows it as unfinished */ }
-  }
-
   // ---------- the Manager (the chat) writes the brief ----------
   // "Brief & assign": the message the chat gets, the short line the chat shows, and the requests it covers
   function handOver() {
@@ -225,11 +157,13 @@ Files in inbox/ with no typed request are work too when an employee's skill says
       seen.add(id);
       if (!skills.has(t.employee)) problems.push(`Task ${id}: "${t.employee}" isn't on the team. Use one of: ${[...skills].join(', ')}.`);
       if (!String(t.task || '').trim()) problems.push(`Task ${id} says nothing to do.`);
+      const chosen = cleanSelection(t.selection);
+      if (chosen.error) problems.push(`Task ${id}: ${chosen.error}`);
       const proj = t.project ? project(String(t.project)) : null;
       if (t.project && (!proj || proj.p.status !== 'active')) problems.push(`Task ${id}: "${t.project}" isn't an active project id. Leave "project" out, or use one from the project list.`);
       return { id, employee: String(t.employee), name: crew.find(c => c.skill === t.employee)?.name || String(t.employee), task: clip(t.task, 6000), after, request: (Array.isArray(t.request) ? t.request : []).map(String),
         ...(proj ? { project: proj.p.id, projectName: proj.p.name } : {}),
-        status: 'waiting', result: '', start: 0, end: 0, usage: null, session: null };
+        selection: chosen.selection, status: 'waiting', result: '', start: 0, end: 0, usage: null, session: null };
     });
     if (problems.length) return { error: problems.join('\n') };
     const skipped = (Array.isArray(args.skipped) ? args.skipped : []).map(s => ({ request: String(s.request || ''), reason: clip(s.reason, 400) }));
@@ -301,10 +235,12 @@ Files in inbox/ with no typed request are work too when an employee's skill says
     } catch { cab = null; /* no cabinet: they work as before */ }
     const cabText = t.folder ? `\nYour file cabinet is ${cab}. Save everything you make for this task in ${t.folder} (add subfolders there if it helps, and give files clear names). Write somewhere else only when the task names that exact place.` : '';
     // the task comes first: the first line is what the boards and the speech bubble show
+    const skillFile = path.join(cwd, '.claude', 'skills', me.skill, 'SKILL.md');
     const prompt = `${t.task}${earlier}${projText}
 
 ---
-You are ${me.name}, the ${me.skill} employee on this brain's team, working on the Manager's brief "${brief.title}".${deptText} Start by using the ${me.skill} skill, then do only this task. Other employees may be working in this folder at the same time, so only touch the files your task names or creates.${cabText} End with a short report: what you did and where the output is.`;
+You are ${me.name}, the ${me.skill} employee on this brain's team, working on the Manager's brief "${brief.title}".${deptText} If your engine exposes the Skill tool, invoke ${me.skill}; otherwise read and follow ${skillFile}, including its referenced role playbooks, then do only this task. Follow this folder's AGENTS.md and CLAUDE.md. Other employees may be working in this folder at the same time, so only touch the files your task names or creates.${cabText} End with a short report: what you did and where the output is.
+${MODEL_GUIDANCE}`;
     t.status = 'working';
     t.start = Date.now();
     const key = brief.id + ':' + t.id;
@@ -317,18 +253,37 @@ You are ${me.name}, the ${me.skill} employee on this brain's team, working on th
       if (t.logFile) try { fs.appendFileSync(t.logFile, `- ${new Date(entry.ts).toLocaleTimeString()} ${entry.kind === 'tool' ? '**' + entry.text + '**' : entry.kind === 'error' ? '! ' + entry.text : entry.text.replace(/\n/g, ' ')}\n`); } catch { /* the page still has it */ }
     };
     if (t.logFile) try { fs.writeFileSync(t.logFile, `# ${title}\n\n${me.name} (${me.skill}) · brief "${brief.title}"${proj ? ` · project ${proj.p.name}` : ''} · ${new Date().toLocaleString()}\nFolder: ${t.folder}\n\n## Task\n\n${t.task}\n\n## Log\n\n`); } catch { /* fine */ }
-    const run = runClaude(key, prompt, { who: `${me.name} (${me.skill})`, allowed: ['mcp__memory'], addDir: proj?.p.folder, onLog: note }, r => {
+    const session = crypto.randomUUID();
+    const who = `${me.name} (${me.skill})`;
+    const caller = optionsFor(brief.chat, me.skill);
+    const run = launchTask({ prompt, selection: t.selection, caller, cwd, scope: scope(), session,
+      onModel: (pick, attempt) => {
+        t.model = { engine: pick.engine, model: pick.model, effort: pick.effort, reason: pick.reason };
+        if (pick.engine === 'codex' && attempt === 0) {
+          activity({ session, type: 'task', prompt: t.task, engine: pick.engine });
+          activity({ session, type: 'skill', skill: me.skill });
+        }
+      },
+      ...(taskCatalog ? { catalog: taskCatalog } : {}),
+      addDirs: proj?.p.folder ? [proj.p.folder] : [],
+      allowed: ['mcp__memory', 'mcp__claudeos__model_catalog', 'mcp__claudeos__run_model_task'],
+      onApproval: request => onApproval?.(brief.chat, request, who) || Promise.resolve('decline'), onLog: note }, { who, chat: brief.chat, nested: true, caller, selection: t.selection });
+    procs.set(key, run);
+    t.session = session;
+    run.done.then(r => {
+      procs.delete(key);
       t.end = Date.now();
       t.usage = r.usage || null;
+      t.model = r.model || null;
       if (r.stopped) { t.status = 'stopped'; t.result = 'Stopped.'; }
       else if (r.error) { t.status = 'error'; t.result = clip(r.error, 2000); }
       else { t.status = 'done'; t.result = clip(r.result, 4000); }
+      activity({ session, type: 'stop', outcome: t.status, result: t.result });
       note({ ts: Date.now(), kind: t.status === 'done' ? 'done' : 'error', text: t.status === 'done' ? 'Finished.' : t.result });
       if (t.logFile) try { fs.appendFileSync(t.logFile, `\n## Report (${t.status})\n\n${t.result}\n`); } catch { /* fine */ }
       if (proj && !r.stopped) logWork(proj.p.id, { employee: t.employee, name: t.name, task: t.task.split('\n')[0], status: t.status, result: t.result });
       tickAll();
     });
-    t.session = run.session;
   }
 
   function stop() {
@@ -338,13 +293,56 @@ You are ${me.name}, the ${me.skill} employee on this brain's team, working on th
       reopen(brief);
     }
     for (const run of procs.values()) {
-      run.stopped = true;
-      // end Claude and anything it started
-      execFile('taskkill', ['/pid', String(run.proc.pid), '/T', '/F'], () => {});
+      run.stop();
     }
     changed();
     return { ok: true };
   }
 
-  return { snapshot, add, remove, upload, handOver, markSent, chatDone, stop, postBrief, busy, workOf };
+  function taskServers({ who, chat, nested, caller, selection }) {
+    let project = {};
+    try {
+      const file = path.join(cwd, '.mcp.json');
+      if (fs.existsSync(file)) project = JSON.parse(fs.readFileSync(file, 'utf8')).mcpServers || {};
+    } catch { throw new Error('This brain’s .mcp.json could not be read. Fix it before delegating model tasks.'); }
+    return { ...project, memory: memoryServer(memoryFile), claudeos: { ...helper('approval-mcp'), env: {
+      CLAUDEOS_PORT: String(port), CLAUDEOS_TOKEN: token, CLAUDEOS_WHO: who, CLAUDEOS_CHAT: chat || '',
+      ...(nested ? { CLAUDEOS_MODEL_TASK: '1', CLAUDEOS_MODEL_CALLER: JSON.stringify(caller || {}), CLAUDEOS_MODEL_SELECTION: JSON.stringify(selection || {}) } : {}) } } };
+  }
+
+  function activity(event) {
+    try { fs.appendFileSync(activityFile, JSON.stringify({ ts: Date.now(), cwd, ...event }) + '\n'); } catch { /* task report is still saved */ }
+  }
+
+  function launchTask(options, info) {
+    try { return taskRunner({ ...options, mcpServers: taskServers(info) }); }
+    catch (e) { return { done: Promise.resolve({ error: e.message }), stop() {} }; }
+  }
+
+  async function specialist({ task, selection, chat, caller, requiredEngine, requiredModel, allowFallback = true, workDir, fromBrief = false }) {
+    const checked = cleanSelection(selection);
+    if (checked.error) return checked;
+    if (!String(task || '').trim() || String(task).length > 20000) return { error: 'Give a specialist task of 1–20000 characters.' };
+    if (requiredEngine && checked.selection.requiredEngine && checked.selection.requiredEngine !== requiredEngine) return { error: 'Specialist selection conflicts with the parent task provider requirement.' };
+    if (requiredModel && checked.selection.model && checked.selection.model !== requiredModel) return { error: 'Specialist selection conflicts with the parent task exact-model requirement.' };
+    const chosen = { ...checked.selection, ...(requiredEngine ? { requiredEngine } : {}), ...(requiredModel ? { model: requiredModel } : {}), ...(!allowFallback ? { fallback: false } : {}) };
+    if (procs.size >= MAX_PARALLEL + 2) return { error: 'Specialist capacity is full. Continue locally or wait for existing work.' };
+    const key = `specialist-${crypto.randomUUID()}`;
+    const who = 'Model specialist';
+    const log = [];
+    const run = launchTask({ prompt: `${task}\n\nFollow ${cwd}/AGENTS.md and CLAUDE.md if present. You are a bounded specialist. Verify your output; report files/actions completed and uncertainties. Do not launch other model processes or delegate.`,
+      selection: chosen, caller: caller || optionsFor(chat), cwd: workDir || cwd, addDirs: workDir && workDir !== cwd ? [cwd] : [], scope: scope(),
+      ...(taskCatalog ? { catalog: taskCatalog } : {}),
+      onApproval: request => onApproval?.(chat, request, who) || Promise.resolve('decline'),
+      onLog: e => { log.push(e.text); broadcast('tasklog', { key, employee: who, entry: e }); } }, { who, chat, nested: false });
+    procs.set(key, run);
+    run.parentChat = chat;
+    run.fromBrief = fromBrief;
+    try { const r = await run.done; return r.error || r.stopped ? { error: r.error || 'Specialist stopped.' }
+      : { text: `${log.filter(s => s.startsWith('Model:') || s.startsWith('Usage limit')).join('\n')}\n\n${String(r.result || '').slice(0, 20000)}` }; }
+    finally { procs.delete(key); }
+  }
+
+  const stopChatSpecialists = chat => { for (const [key, run] of procs) if (key.startsWith('specialist-') && run.parentChat === chat && !run.fromBrief) run.stop(); };
+  return { snapshot, add, remove, upload, handOver, markSent, chatDone, stop, stopChatSpecialists, postBrief, specialist, busy: () => busy() || procs.size > 0, workOf };
 }
