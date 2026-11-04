@@ -162,7 +162,7 @@ export async function coach(skill, runs, grades, ask = askClaude, since = 0) {
   return { ...r, weak: lessons.weak.length, strong: lessons.strong.length };
 }
 
-export function createGrades({ file, ask = askHaiku, onChange = () => {} }) {
+export function createGrades({ file, ask = askHaiku, onChange = () => {}, onCorrection = () => {} }) {
   let grades = {};
   try { grades = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* none yet */ }
   const failed = new Set(); // tried this session and couldn't grade: don't loop on it
@@ -201,7 +201,9 @@ export function createGrades({ file, ask = askHaiku, onChange = () => {} }) {
         for (const employee of employees) {
           if (!ranAs(run, employee.name)) continue;
           const findings = grades[run.key].corrections.filter(c => c.employee === employee.name || c.employee === (run.skillNames || []).find(n => n.split(':').pop() === employee.name));
-          try { applyReview(employee, run.key, findings); }
+          try {
+            if (applyReview(employee, run.key, findings)) onCorrection({ id: employee.id, brain: employee.brain, name: employee.name, task: run.key, at: Date.now() });
+          }
           catch (err) { grades[run.key].correctionError = err.message; }
         }
         save();

@@ -98,12 +98,12 @@ test('all briefs serialize and save full cabinet reports before advancing', asyn
 
 test('headless turns validate split completion tokens, flush final JSON, and reload changed skills', async () => {
   const lab = fs.mkdtempSync(path.join(os.tmpdir(), 'headless-lab-'));
-  const processes = [], launches = [], writes = [];
+  const processes = [], launches = [], writes = [], telemetry=[];
   const skill = path.join(lab, '.claude', 'skills', 'builder', 'SKILL.md');
   fs.mkdirSync(path.dirname(skill), { recursive: true }); fs.writeFileSync(skill, 'Original rules');
   const chat = createChat({ cwd: lab, dir: path.join(lab, 'chats'), memoryFile: path.join(lab, 'memory.jsonl'),
     activityFile: path.join(lab, 'activity.jsonl'), helper: () => ({ command: 'test' }), memoryServer: () => ({ command: 'test' }),
-    broadcast() {}, team: () => [], spawnProcess: (command, args) => {
+    broadcast(_event, data) { telemetry.push(data); }, team: () => [], spawnProcess: (command, args) => {
       launches.push(args); const proc = new EventEmitter(); proc.stdout = new PassThrough(); proc.stderr = new PassThrough();
       proc.stdin = new Writable({ write(chunk, enc, cb) { writes.push(JSON.parse(String(chunk))); cb(); } });
       processes.push(proc); return proc;
@@ -113,6 +113,9 @@ test('headless turns validate split completion tokens, flush final JSON, and rel
     const first = chat.runInline({ chat: id, skillId: 'builder', headless: true, prompt: 'Execute' }); await turn();
     assert.match(writes.at(-1).message.content, /=== SPHERE EXECUTION BOUNDARY: builder ===\nExecute\n===$/);
     assert.equal(launches[0][launches[0].indexOf('--permission-mode') + 1], 'bypassPermissions');
+    processes[0].stdout.write(JSON.stringify({type:'assistant',message:{content:[],usage:{input_tokens:10, cache_read_input_tokens:900}}})+'\n');
+    assert.ok(telemetry.some(e=>e.kind==='sphere-cache' && e.skillId==='builder' && e.cached===900));
+    assert.ok(telemetry.some(e=>e.kind==='stdout' && e.skillId==='builder'));
     const event = JSON.stringify({ type:'result', session_id:'warm', result:'Report [TASK_COMPLETE]' });
     processes[0].stdout.write(event.slice(0, -8)); processes[0].stdout.end(event.slice(-8));
     assert.equal((await first.done).result, 'Report');

@@ -488,6 +488,10 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
           if (!line) continue;
           let ev;
           try { ev = JSON.parse(line); } catch { continue; /* not JSON */ }
+          if (inlineActive?.headless && run?.live === me) {
+            const text = ev.event?.delta?.text || (ev.type === 'result' ? ev.result : '') || `[${ev.type}${ev.subtype ? ':' + ev.subtype : ''}]`;
+            send1({ kind: 'stdout', skillId: inlineActive.skillId, text: String(text).slice(0, 1200), ts: Date.now() });
+          }
           if (ev.type === 'system' && ev.subtype === 'init') setCommands(ev);
           if (ev.type === 'rate_limit_event' && ev.rate_limit_info) onLimits(ev.rate_limit_info);
           if (run?.live === me) { try { handle(ev); } catch { /* a malformed event */ } }
@@ -633,6 +637,8 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     // Codex's events (codex exec --json) as the chat's reply: its messages, a line per command, tool
     // call or file change, and its plan as the checklist.
     function handleCodex(ev) {
+      if (inlineActive?.headless) send1({ kind: 'stdout', skillId: inlineActive.skillId,
+        text: String(ev.text || ev.item?.text || `[${ev.type}]`).slice(0, 1200), ts: Date.now() });
       if (ev.type === 'turn.completed') { run.usage = ev.usage || null; try { onCodexTurn(); } catch { /* meters only */ } return; }
       if (ev.type === 'agent.delta') {
         const first = !run.streamed.has(ev.itemId);
@@ -766,7 +772,10 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         }
         if (ev.uuid) run.lastEntry = ev.uuid;
         // the first API call shows whether the cache was still warm, the last one how big the context is now
-        if (msg.usage) { run.first ||= msg.usage; run.last = msg.usage; }
+        if (msg.usage) {
+          run.first ||= msg.usage; run.last = msg.usage;
+          if (inlineActive) send1({ kind: 'sphere-cache', skillId: inlineActive.skillId, cached: Number(msg.usage.cache_read_input_tokens) || 0, ts: Date.now() });
+        }
         for (const block of msg.content || []) {
           if (block.type === 'text' && !run.streamed.has(msg.id)) {
             run.reply.text += block.text;
@@ -824,6 +833,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       if (error && !run.reply.error) fields.error = error;
       const usage = run.engine === 'codex' ? codexUsage() : measure();
       if (usage) fields.usage = usage;
+      if (inlineActive) send1({ kind: 'sphere-cache', skillId: inlineActive.skillId, cached: usage?.cached || 0, ts: Date.now() });
       update(fields);
       // this engine has the chat up to here in its own session now
       if (!run.reply.error && (run.engine === 'codex' ? state.codexThread : state.sessionId)) markSeen(run.engine || 'claude', run.reply.id);
@@ -1006,7 +1016,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     function enqueueInline({ prompt, skillId = 'assignment', headless = false, matrixFile = '', onLog = () => {} }) {
       let resolve;
       if (matrixFile && state.folder) prompt = `The matrix path in the directive resolves to ${matrixFile}.\n${prompt}`;
-      const job = { prompt: `=== SPHERE EXECUTION BOUNDARY: ${String(skillId).replace(/[\r\n]/g, '')} ===\n${prompt}\n===`, headless, onLog, resolve: null };
+      const job = { skillId, prompt: `=== SPHERE EXECUTION BOUNDARY: ${String(skillId).replace(/[\r\n]/g, '')} ===\n${prompt}\n===`, headless, onLog, resolve: null };
       const done = new Promise(r => { resolve = r; });
       job.resolve = resolve;
       inlineQueue.push(job);

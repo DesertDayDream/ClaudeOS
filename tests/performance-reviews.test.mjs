@@ -23,7 +23,9 @@ test('grade output updates only the attributed employee and survives restart wit
     const at = Date.now() - 120000;
     const activity = [{ session:'brief-one-task', type:'task', ts:at, prompt:'Build modules' }, {session:'brief-one-task', type:'skill', skill:'builder', ts:at+1}, {session:'brief-one-task', type:'stop', outcome:'done', ts:at+2, result:'Used one monolithic script.'}];
     const grade = parseGrade(JSON.stringify({grade:2, why:finding.mistake, corrections:[finding]}));
-    await createGrades({file, ask:async () => grade}).tick(activity, employees);
+    const written=[];
+    await createGrades({file, ask:async () => grade, onCorrection:e=>written.push(e)}).tick(activity, employees);
+    assert.equal(written.length,1); assert.equal(written[0].name,'builder'); assert.equal(written[0].task,`brief-one-task:${at}`);
     const text = fs.readFileSync(employees[0].file, 'utf8');
     assert.match(text, /From Task brief-one-task:/);
     assert.match(text, /NEW RULE: You must not/);
@@ -47,4 +49,15 @@ test('coaching preserves learned corrections and adds only findings from this em
     assert.match(text,/From Task old:1/);assert.match(text,/From Task new:1/);assert.doesNotMatch(text,/From Task wrong:1/);
     assert.equal(text.match(/## Performance Corrections & Constraints/g).length,1);
   } finally {fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('failed skill writes never announce a correction animation', async () => {
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'review-event-failure-'));
+ try {
+  const at=Date.now()-120000, events=[];
+  const g=createGrades({file:path.join(dir,'grades.json'), ask:async()=>({grade:2,why:'Technical mistake',corrections:[finding]}),onCorrection:e=>events.push(e)});
+  await g.tick([{session:'failed',type:'task',ts:at,prompt:'Build modules'},{session:'failed',type:'skill',skill:'builder',ts:at+1},{session:'failed',type:'stop',outcome:'done',ts:at+2}], [{id:'builder',name:'builder',file:path.join(dir,'missing.md')}]);
+  assert.equal(events.length,0);assert.match(g.all()[`failed:${at}`].correctionError,/ENOENT/);
+ } finally {fs.rmSync(dir,{recursive:true,force:true});}
 });

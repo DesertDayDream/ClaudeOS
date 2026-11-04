@@ -183,6 +183,7 @@ function skillsIn(dir, source, owner) {
       invokeAs: owner ? `${owner}:${fm.name || name}` : (fm.name || name),
       description: fm.description || '',
       source, owner: owner || null, file,
+      constraints: text.split(/\r?\n/).filter(line => /\b(must not|never|do not)\b/i.test(line)).map(line => line.trim()).slice(0, 80),
       apps: appsInText(text), // integrations its SKILL.md uses or names
       craft: craftOf(text, fm.description, skillFiles(path.join(dir, name))), // what its SKILL.md gives it to work with
       // a model or effort the SKILL.md itself asks for
@@ -327,7 +328,10 @@ function ensureHome() {
 try { ensureHome(); } catch (e) { console.error('Could not set up the Home brain:', e.message); }
 
 // The quality of each finished run: Haiku's grade and the user's thumbs (grades.mjs)
-const grades = createGrades({ file: path.join(DATA, 'grades.json'), onChange: () => refresh() });
+const grades = createGrades({ file: path.join(DATA, 'grades.json'), onChange: () => refresh(), onCorrection: event => {
+  const b = brains.active();
+  if (b && b.id === event.brain) broadcast('skill-correction', { ...event, brain: b.id });
+} });
 const coaching = createCoaching({ file: path.join(DATA, 'coaching.json'), backupDir: path.join(DATA, 'coaching'), onChange: () => refresh() });
 function withGrades(activity) { return { activity, grades: grades.for(finishedRuns(activity).map(r => r.key)) }; }
 setInterval(() => { const b = brains.active(); if (b) grades.tick(collectActivity(b), coachable(b)).catch(() => {}); }, 15000);
@@ -340,6 +344,11 @@ function snapshot() {
   return {
     brain: { id: brain.id, name: brain.name, path: brain.path, home: !!brain.home },
     brains: list,
+    foundations: (() => {
+      const file = path.join(brain.path, 'CLAUDE.md');
+      try { const st = fs.statSync(file); return { file, modified: st.mtimeMs, text: fs.readFileSync(file, 'utf8').slice(0, 60000), truncated: st.size > 60000 }; }
+      catch { return { file, text: '', missing: true }; }
+    })(),
     memories: [...collectBrain(brain), ...collectMemories(brain)], skills, names: { ...nameSkills(skills) },
     minds: mindsOf(brain, skills),
     // linked brains: their shared brain (read-only here), their own team, and whether they're working for us
@@ -403,7 +412,7 @@ let last = snapshot();
 let lastKey = keyOf(last);
 const clients = new Set();
 function keyOf(s) {
-  return JSON.stringify([s.brain?.id, s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id + s.craft?.score), s.minds, s.activity.length && s.activity[s.activity.length - 1], s.grades, s.coaching, s.org]);
+  return JSON.stringify([s.brain?.id, s.foundations, s.skills.map(x => x.constraints), s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id + s.craft?.score), s.minds, s.activity.length && s.activity[s.activity.length - 1], s.grades, s.coaching, s.org]);
 }
 function refresh() {
   checkIntegrations(brains.active());
@@ -732,10 +741,11 @@ function skillApi(active, route, body) {
 // never while a chat or the Manager is working. The Coach button does the same on demand.
 function coachable(brain) {
   const team = teamDir(brain);
-  return skillsIn(team, 'project', path.basename(brain.path)).map(s => ({ id: s.id, name: s.name, file: path.join(team, s.folder, 'SKILL.md'),
+  return skillsIn(team, 'project', path.basename(brain.path)).map(s => ({ id: s.id, brain: brain.id, name: s.name, file: path.join(team, s.folder, 'SKILL.md'),
     read: () => skillEditor.read(team, s.folder), write: fields => skillEditor.save(team, s.folder, fields) }));
 }
 function announceCoached(e, r) {
+  if (r.ok && e.brain === brains.active()?.id) broadcast('skill-correction', { id: e.id, name: e.name, at: r.at, brain: e.brain });
   if (r.ok) broadcast('coached', { id: e.id, name: e.name, employee: names[e.id] || e.name, summary: r.summary });
 }
 setInterval(() => {

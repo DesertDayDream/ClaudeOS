@@ -768,6 +768,37 @@
   :root[data-theme="light"] :is(aside, #preview, #plugins, #settingsMenu, #brainMenu, .toast, #tip, #conn) { filter: invert(1) hue-rotate(180deg); --panel: rgba(14,17,30,0.97); }
   :root[data-theme="light"] :is(aside, #preview, #plugins) :is(img, video, iframe, .app, .ap-tile .app, .lskill .app) { filter: invert(1) hue-rotate(180deg); }
   :root[data-theme="light"] .hud h1, :root[data-theme="light"] .stats, :root[data-theme="light"] .legend { text-shadow: 0 1px 4px #000; }
+
+  body { --ops-left: 265px; --ops-right: 285px; }
+  #scene { left: var(--ops-left); top: 86px; width: calc(100% - var(--ops-left) - var(--ops-right)); height: calc(100% - 270px); }
+  .hud { top: 12px; left: 20px; right: 20px; display: flex; gap: 24px; align-items: center; height: 60px; }
+  .hud .stats { display: flex; gap: 18px; margin: 0; }
+  .hud .legend { display: none; }
+  .ops-panel { position: fixed; top: 86px; bottom: 20px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: #0c101c; overflow: auto; }
+  #opsLeft { left: 12px; width: calc(var(--ops-left) - 24px); }
+  #opsRight { right: 12px; width: calc(var(--ops-right) - 24px); }
+  .ops-panel h2, #opsStream h2 { margin: 0 0 12px; font-size: 11px; color: #00f3ff; letter-spacing: .12em; text-transform: uppercase; }
+  .ops-panel h3 { font-size: 13px; margin: 22px 0 10px; }
+  .ops-muted { color: var(--dim); font-size: 12px; }
+  #opsFoundations { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.6 ui-monospace, monospace; max-height: 32vh; overflow: auto; }
+  .ops-card { border-top: 1px solid var(--line); padding: 12px 0; overflow-wrap: anywhere; }
+  .ops-card b { display: block; } .ops-card ul { padding-left: 16px; font-size: 11px; color: #c1c8dd; }
+  .ops-rank { display: inline-block; margin: 6px 0; padding: 2px 7px; border: 1px solid #ad751e; color: #eab860; border-radius: 4px; font-size: 10px; }
+  #opsStream { position: fixed; left: calc(var(--ops-left) + 8px); right: calc(var(--ops-right) + 8px); bottom: 20px; height: 155px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: #090e18; }
+  #opsTicker { height: 102px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 ui-monospace, monospace; color: #9aacbf; }
+  #opsControls { margin-left: auto; pointer-events: auto; display: flex; gap: 8px; }
+  body:not(.ops-chat) > aside { display: none; }
+  body.ops-chat > aside { top: 86px; bottom: 185px; left: calc(var(--ops-left) + 8px); right: calc(var(--ops-right) + 8px); width: auto !important; border-radius: 12px; background: #0c101cf5; z-index: 12; }
+  body.ops-chat #asideGrip { display: none; }
+  #conn { bottom: 3px; }
+  @media (max-width: 1100px) { body { --ops-left: 215px; --ops-right: 230px; } .hud .stats { display:none; } .ops-panel { padding: 12px; } }
+  @media (max-width: 760px) {
+    html { overflow: auto; } body { height: auto; min-height: 100%; overflow: visible; } .hud { position: absolute; top: 0; left: 0; right: 0; padding: 8px 12px; gap: 10px; height: 76px; } .hud h1 { display:none; }
+    #scene { position: relative; left: 0; top: 0; width: 100%; height: 45vh; margin-top: 76px; display:block; }
+    #opsLeft, #opsRight, #opsStream { position: relative; inset: auto; width: auto; margin: 12px; }
+    #opsStream { height: 155px; } body.ops-chat > aside { position: fixed; top: 76px; left: 8px; right: 8px; bottom: 8px; }
+  }
+
 </style>
 </head>
 <body>
@@ -782,6 +813,7 @@
     <button class="brainpick gear" id="settingsBtn" title="Settings: own window, hotkey, notifications, updates and rollback, start with Windows">⚙</button>
     <div id="settingsMenu" hidden></div>
   </div>
+  <div id="opsControls"><button class="btn" id="opsChatToggle" aria-expanded="false">Open chat & tools</button></div>
   <div class="stats">
     <div><b id="nMem">0</b>memories</div>
     <div><b id="nEmp">0</b>employees</div>
@@ -795,6 +827,9 @@
     <span><i style="color:var(--reference);background:var(--reference)"></i>reference</span>
   </div>
 </div>
+<section class="ops-panel" id="opsLeft" aria-label="Master operations"><h2>Master operations</h2><h3>CLAUDE.md foundations</h3><p id="opsFoundationStatus" class="ops-muted">Loading foundations...</p><details><summary>Read master instructions</summary><pre id="opsFoundations"></pre></details><h3>Active brief queue</h3><div id="opsQueue" aria-live="polite">Loading queue...</div></section>
+<section class="ops-panel" id="opsRight" aria-label="Skill roster"><h2>Skill roster</h2><p class="ops-muted">Rank from rated work / live SKILL.md constraints</p><div id="opsRoster"></div></section>
+<section id="opsStream" aria-label="Headless stdout stream"><h2>Headless stdout / live <span id="opsStreamState"></span></h2><div id="opsTicker" role="log" aria-live="off">Waiting for headless work...</div></section>
 <aside>
   <div id="asideGrip" title="Drag to make the panel wider (double-click: back to normal)"></div>
   <header>
@@ -887,6 +922,7 @@
 <script type="module" src="/app.js"></script>
 <script type="module" src="/chat.js"></script>
 <script type="module" src="/queue.js"></script>
+<script type="module" src="/operations.js"></script>
 <script type="module" src="/brains.js"></script>
 <script type="module" src="/desk.js"></script>
 <script type="module" src="/git.js"></script>

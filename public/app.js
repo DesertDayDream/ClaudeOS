@@ -6,6 +6,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { events } from '/events.js';
+import { SphereStatus } from './sphere-status.js';
 import { APPS, appForServer, normServer } from './apps.js';
 import * as office from './office.js';
 import { modelTier, effortLevel, rating, modelFamily, runQuality, needsWork, weakRun } from './minds.js';
@@ -78,15 +79,16 @@ composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
 function resize() {
-  const w = innerWidth, h = innerHeight;
+  const { width: w, height: h } = canvas.getBoundingClientRect();
   renderer.setSize(w, h, false);
   composer.setSize(w, h);
   camera.aspect = w / h;
   // keep the brain centred in the space left of the side panel
-  if (w > 760) camera.setViewOffset(w, h, 206, 0, w, h); else camera.clearViewOffset();
+  camera.clearViewOffset();
   camera.updateProjectionMatrix();
 }
 addEventListener('resize', resize);
+new ResizeObserver(resize).observe(canvas);
 resize();
 
 // ---------- textures ----------
@@ -247,6 +249,7 @@ function linkedDot(sel) {
 }
 
 // ---------- employees (skills) ----------
+const sphereStatus = new SphereStatus(scene, () => matchMedia('(prefers-reduced-motion: reduce)').matches);
 const employees = new Map(); // id -> { root, body, sphere, eyes, label, data, ... }
 const empGroup = new THREE.Group();
 scene.add(empGroup);
@@ -698,6 +701,7 @@ function removeEmployee(id) {
   scene.remove(e.beam);
   for (const s of e.sparks) scene.remove(s);
   employees.delete(id);
+  sphereStatus.remove(id);
 }
 
 // ---------- the building: each department is a glass room round the brain, all desks facing it ----------
@@ -973,7 +977,7 @@ const STATUS_TEXT = { working: 'working', done: 'done', stopped: 'stopped', erro
 let brainId = null;
 function apply(next) {
   // switching brains: let the new cloud fill in dot by dot again
-  if (next.brain && brainId && next.brain.id !== brainId) { firstLoad = true; selected = null; }
+  if (next.brain && brainId && next.brain.id !== brainId) { firstLoad = true; selected = null; sphereStatus.reset(); }
   brainId = next.brain?.id ?? brainId;
   const prevMemIds = new Set(memories.keys());
   const memSorted = [...next.memories].sort((a, b) => a.created - b.created);
@@ -1957,7 +1961,8 @@ const mouse = new THREE.Vector2();
 const tip = document.getElementById('tip');
 let downAt = null;
 function pick(ev) {
-  mouse.set(ev.clientX / innerWidth * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
+  const bounds = canvas.getBoundingClientRect();
+  mouse.set((ev.clientX - bounds.left) / bounds.width * 2 - 1, -(ev.clientY - bounds.top) / bounds.height * 2 + 1);
   ray.setFromCamera(mouse, camera);
   const targets = [boss.sphere, boss.screen, ...[...employees.values()].flatMap(e => [e.sphere, e.screen, ...(e.cabinet ? [e.cabinet] : [])]), ...[...memories.values()].map(m => m.mesh),
     ...[...satellites.values()].flatMap(s => [...s.dots.values()]), ...[...rooms.values()].flatMap(r => r.pickables)];
@@ -1983,6 +1988,7 @@ canvas.addEventListener('pointerdown', ev => { downAt = [ev.clientX, ev.clientY]
 canvas.addEventListener('pointerup', ev => {
   if (!downAt || Math.hypot(ev.clientX - downAt[0], ev.clientY - downAt[1]) > 5) return;
   const u = pick(ev);
+  if (u) { document.body.classList.add('ops-chat'); document.getElementById('opsChatToggle').setAttribute('aria-expanded', 'true'); document.getElementById('opsChatToggle').textContent = 'Return to workspace'; }
   if (u?.kind === 'dept') return openDept(u.id.slice(5));
   if (u?.kind === 'employee') deskView = u.view || 'chat';
   if (u?.kind === 'manager') { backToManager(); document.querySelector('aside header [data-tab="chat"]').click(); return document.getElementById('input').focus(); }
@@ -2083,6 +2089,7 @@ function animate() {
     if (now > e.blinkAt) { e.blinkAt = now + 2500 + Math.random() * 5000; e.blinkUntil = now + 140; }
     e.eyes.scale.y = now < (e.blinkUntil || 0) ? 0.1 : 1;
     e.sphere.material.emissiveIntensity = 0.08 + e.busyAmt * (0.6 + Math.sin(t * 6 + e.phase) * 0.25);
+    sphereStatus.update(e, dt, now);
     e.aura.material.opacity = e.busyAmt * 0.35;
     e.label.material.opacity = 0.5 + e.busyAmt * 0.45 + (selected === e.data.id ? 0.3 : 0);
     e.brainIcon.material.opacity = Math.min(1, 0.6 + e.busyAmt * 0.35 + (selected === e.data.id ? 0.4 : 0));
@@ -2103,6 +2110,8 @@ function animate() {
       sp.material.opacity = e.busyAmt * Math.sin(f * Math.PI) * 0.9;
     });
   }
+
+  sphereStatus.tick(now);
 
   // the Manager types while it answers you in the chat, then watches the team; idle it peeks over at you
   {
@@ -2158,6 +2167,19 @@ function connect() {
   events.addEventListener('message', ev => { lastRaw = JSON.parse(ev.data); apply(lastRaw); });
   events.addEventListener('error', () => { conn.textContent = 'reconnecting…'; });
 }
+events.addEventListener('chat', event => {
+  const ev = JSON.parse(event.data);
+  if (ev.kind !== 'sphere-cache') return;
+  const employee = employees.get(ev.skillId) || [...employees.values()].find(e => e.data.name === ev.skillId);
+  if (employee) sphereStatus.cache(employee.data.id, ev.cached);
+});
+events.addEventListener('skill-correction', event => {
+  const ev = JSON.parse(event.data);
+  if (ev.brain && ev.brain !== brainId) return;
+  const employee = employees.get(ev.id);
+  if (employee) sphereStatus.evolve(ev.id, employee, performance.now());
+});
+events.addEventListener('brain', () => sphereStatus.reset());
 let lastRaw = null;
 connect();
 setInterval(() => lastRaw && apply(lastRaw), 30000); // keep "x min ago" and busy timeouts fresh
