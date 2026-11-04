@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 
-export const REVIEW_HEADING = '## Performance Corrections & Constraints';
-export const LEGACY_REVIEW_HEADING = /## (?:Dynamic Performance Review Corrections & Constraints|Performance Review Corrections)(?=\r?\n|$)/g;
+export const REVIEW_HEADING = '## Dynamic Performance Review Corrections & Constraints';
+export const LEGACY_REVIEW_HEADING = /## (?:Performance Corrections & Constraints|Performance Review Corrections)(?=\r?\n|$)/g;
 
 export function atomicWrite(file, text) {
   const pending = file + '.' + process.pid + '.tmp';

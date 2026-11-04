@@ -47,7 +47,7 @@ test('coaching preserves learned corrections and adds only findings from this em
     assert.equal(result.ok,true);
     const text = fs.readFileSync(file,'utf8');
     assert.match(text,/From Task old:1/);assert.match(text,/From Task new:1/);assert.doesNotMatch(text,/From Task wrong:1/);
-    assert.equal(text.match(/## Performance Corrections & Constraints/g).length,1);
+    assert.equal(text.match(/## Dynamic Performance Review Corrections & Constraints/g).length,1);
   } finally {fs.rmSync(dir,{recursive:true,force:true});}
 });
 
