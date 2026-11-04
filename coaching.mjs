@@ -4,7 +4,7 @@
 // so the coach never rewrites twice from the same runs.
 import fs from 'node:fs';
 import path from 'node:path';
-import { reviewBody, REVIEW_HEADING, LEGACY_REVIEW_HEADING } from './performance-reviews.mjs';
+import { atomicWrite, reviewBody, REVIEW_HEADING, LEGACY_REVIEW_HEADING } from './performance-reviews.mjs';
 import crypto from 'node:crypto';
 import { coach as coachRun, ranAs } from './grades.mjs';
 import { rating, needsWork } from './public/minds.js';
@@ -49,7 +49,7 @@ export function createCoaching({ file, backupDir, coach = coachRun, onChange = (
       let body = r.body;
       if (prior >= 0) {
         const section = current.slice(prior).split(/\r?\n(?=## )/)[0];
-        body = body.replace(/## (?:Dynamic Performance Review Corrections & Constraints|Performance Review Corrections)[\s\S]*?(?=\r?\n## |$)/, '').trimEnd() + '\n\n' + section;
+        body = body.replace(/## (?:Performance Corrections & Constraints|Dynamic Performance Review Corrections & Constraints|Performance Review Corrections)[\s\S]*?(?=\r?\n## |$)/, '').trimEnd() + '\n\n' + section;
       }
       for (const c of r.corrections || []) {
         if (c.employee !== employee.name || !runs.some(run => run.key === c.task && ranAs(run, employee.name))) continue;
@@ -87,7 +87,7 @@ export function createCoaching({ file, backupDir, coach = coachRun, onChange = (
       if (!l || l.undone) return { error: 'Nothing to undo.' };
       let text;
       try { text = fs.readFileSync(l.backup, 'utf8'); } catch { return { error: 'The old instructions are gone.' }; }
-      fs.writeFileSync(l.file, text);
+      atomicWrite(l.file, text);
       l.undone = true; // stays in the history so the same runs don't trigger it again
       save();
       return { ok: true };

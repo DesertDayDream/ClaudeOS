@@ -200,7 +200,7 @@ export function createGrades({ file, ask = askHaiku, onChange = () => {} }) {
         grades[run.key] = { ...grades[run.key], ai: g.grade, why: g.why, corrections: concreteCorrections(g.corrections), ...(g.review ? { review: g.review } : {}), at: Date.now() };
         for (const employee of employees) {
           if (!ranAs(run, employee.name)) continue;
-          const findings = concreteCorrections(g.corrections).filter(c => c.employee === employee.name || c.employee === (run.skillNames || []).find(n => n.split(':').pop() === employee.name));
+          const findings = grades[run.key].corrections.filter(c => c.employee === employee.name || c.employee === (run.skillNames || []).find(n => n.split(':').pop() === employee.name));
           try { applyReview(employee, run.key, findings); }
           catch (err) { grades[run.key].correctionError = err.message; }
         }

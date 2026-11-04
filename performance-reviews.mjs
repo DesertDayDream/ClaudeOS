@@ -1,7 +1,13 @@
 import fs from 'node:fs';
 
-export const REVIEW_HEADING = '## Dynamic Performance Review Corrections & Constraints';
-export const LEGACY_REVIEW_HEADING = '## Performance Review Corrections';
+export const REVIEW_HEADING = '## Performance Corrections & Constraints';
+export const LEGACY_REVIEW_HEADING = /## (?:Dynamic Performance Review Corrections & Constraints|Performance Review Corrections)(?=\r?\n|$)/g;
+
+export function atomicWrite(file, text) {
+  const pending = file + '.' + process.pid + '.tmp';
+  try { fs.writeFileSync(pending, text); fs.renameSync(pending, file); }
+  finally { try { fs.unlinkSync(pending); } catch (err) { if (err.code !== 'ENOENT') throw err; } }
+}
 
 // Only structured, attributable technical findings become instructions. Scores and praise do not.
 export function concreteCorrections(value) {
@@ -32,6 +38,6 @@ export function reviewBody(body, task, corrections) {
 export function applyReview(employee, task, corrections) {
   const before = fs.readFileSync(employee.file, 'utf8');
   const after = reviewBody(before, task, corrections);
-  if (before !== after) fs.writeFileSync(employee.file, after);
+  if (before !== after) atomicWrite(employee.file, after);
   return before !== after;
 }

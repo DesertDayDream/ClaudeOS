@@ -1,3 +1,4 @@
+import { atomicWrite } from './performance-reviews.mjs';
 // Skill editor: hire, edit and fire the active brain's employees (folders in <brain>/.claude/skills).
 // The page edits three parts of a SKILL.md: name and description in the frontmatter, and the
 // instructions below it. Any other frontmatter (allowed-tools, model, ...) is kept as it was.
@@ -76,12 +77,12 @@ export function createSkillEditor({ dataDir }) {
       const dir = path.join(teamDir, v.name);
       if (fs.existsSync(dir)) return { error: `There's already a .claude/skills/${v.name} folder. Pick another name, or edit that one.` };
       fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, 'SKILL.md'), compose([], v));
+      atomicWrite(path.join(dir, 'SKILL.md'), compose([], v));
       return { ok: true, folder: v.name, name: v.name };
     }
     const file = path.join(teamDir, folder, 'SKILL.md');
     const old = parseSkill(fs.readFileSync(file, 'utf8'));
-    fs.writeFileSync(file, compose(old.lines, v));
+    atomicWrite(file, compose(old.lines, v));
     // a renamed skill gets a matching folder when that name is free, so the two never drift apart
     let to = folder;
     if (v.name !== folder && !fs.existsSync(path.join(teamDir, v.name))) {
@@ -124,7 +125,7 @@ export function createSkillEditor({ dataDir }) {
     const text = fs.readFileSync(file, 'utf8');
     if (appsInText(text).some(a => a.key === key)) return { ok: true };
     const app = APPS[key];
-    fs.writeFileSync(file, text.trimEnd() + `\n\n## App: ${app.title}\nUse ${app.title} through its connected integration when the task calls for it. If it is unavailable or needs sign-in, tell the user to connect it in Apps before continuing with work that needs it.\n`);
+    atomicWrite(file, text.trimEnd() + `\n\n## App: ${app.title}\nUse ${app.title} through its connected integration when the task calls for it. If it is unavailable or needs sign-in, tell the user to connect it in Apps before continuing with work that needs it.\n`);
     return { ok: true };
   }
 

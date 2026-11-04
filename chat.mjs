@@ -395,6 +395,18 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         : before.trimEnd() + (before.trim() ? '\n\n' : '') + block + '\n';
       if (after !== before) fs.writeFileSync(file, after);
     }
+    function skillRevision() {
+      const files = [];
+      function walk(dir) {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const file = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(file);
+          else if (entry.name === 'SKILL.md') files.push([file, fs.readFileSync(file, 'utf8')]);
+        }
+      }
+      try { walk(path.join(cwd, '.claude', 'skills')); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+      return crypto.createHash('sha256').update(JSON.stringify(files.sort())).digest('hex');
+    }
     function launch() {
       const setup = servers(), { mcpServers, allowed, tools, emp } = setup;
       // a brain other than Home starts clean: no personal skills, and only the plugins it turned on
@@ -412,10 +424,11 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       const opts = options();
       if (opts.model) args.push('--model', opts.model);
       if (opts.effort) args.push('--effort', opts.effort);
-      if (state.mode) args.push('--permission-mode', state.mode);
+      if (inlineActive?.headless) args.push('--permission-mode', 'bypassPermissions');
+      else if (state.mode) args.push('--permission-mode', state.mode);
       // each message comes back with its id, which rewinding to it needs
       args.push('--replay-user-messages');
-      return { args, key: JSON.stringify(args) };
+      return { args, key: JSON.stringify([args, skillRevision()]) };
     }
     // an employee runs on their own engine, model and effort; the Manager's chats on the brain's
     function options() { return state.benchmark ? {...state.options} : withEngine({ ...(index.options || {}), ...(state.employee ? state.options || {} : {}) }); }
@@ -481,7 +494,12 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         }
       });
       proc.stderr.on('data', d => { me.stderr = (me.stderr + d).slice(-4000); });
-      proc.stdin.on('error', () => { /* it quit; 'close' says why */ });
+      proc.stdout.on('end', () => { if (buf.trim()) { const tail = buf; buf = ''; proc.stdout.emit('data', tail + '\n'); } });
+      proc.stdin.on('error', err => {
+        if (live === me) live = null;
+        killTree(me.proc);
+        if (run?.live === me) finish(`Could not write to Claude: ${err.message}`);
+      });
       const gone = error => {
         if (live === me) live = null;
         clearTimeout(me.idle);
@@ -561,7 +579,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
           text = `Read ${contextFile} for this chat's runtime context before proceeding.\n\n${text}`;
           me.needsContext = false;
         }
-        me.proc.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: content(text, attached) } }) + '\n');
+        me.proc.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: content(text, attached) } }) + '\n', err => { if (err && run?.live === me) finish(`Could not reach Claude: ${err.message}`); });
       } catch (err) { finish(`Could not reach Claude: ${err.message}`); }
       return { ok: true };
     }
@@ -597,7 +615,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       const mine = run;
       const turn = runCodexTurn({
         cwd: where, thread: state.codexThread, prompt, images,
-        model: opts.codexModel, effort: opts.codexEffort, mode: state.mode,
+        model: opts.codexModel, effort: opts.codexEffort, mode: inlineActive?.headless ? 'bypassPermissions' : state.mode,
         mcpServers,
         addDirs: state.folder ? [cwd] : [],
         onThread: t => { if (!state.codexThread) { state.codexThread = t; save(); } },
@@ -774,6 +792,9 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       }
       if (ev.type === 'result') {
         run.result = ev;
+        if (inlineActive?.headless && !ev.is_error && !run.stopped && !/\[TASK_COMPLETE\]/.test(run.reply.text + (ev.result || ''))) {
+          update({ error: 'Headless task ended without [TASK_COMPLETE].' });
+        }
         if (ev.is_error && ev.result) update({ error: String(ev.result) });
         if (!run.reply.text.trim() && ev.result && !ev.is_error) update({ text: String(ev.result) });
         // the answer is done; the process stays, waiting for the next message
@@ -783,13 +804,14 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
 
     function finish(error) {
       if (!run) return;
+      if (inlineActive?.headless && !error && !run.stopped && !run.reply.error && !/\[TASK_COMPLETE\]/.test(run.reply.text + (run.result?.result || ''))) error = 'Headless task ended without [TASK_COMPLETE].';
       for (const [aid, a] of approvals) {
         if (a.card.who || a.card.chat !== id) continue;
         a.resolve({ behavior: 'deny', message: 'The request ended before you answered.' });
         approvals.delete(aid);
         emit({ kind: 'approval-done', id: aid, allowed: false });
       }
-      const fields = { streaming: false, text: run.reply.text.trim() };
+      const fields = { streaming: false, text: (inlineActive?.headless ? run.reply.text.replace(/\[TASK_COMPLETE\]/g, '') : run.reply.text).trim() };
       // the reply's last entry in Claude Code's session: a rewind to the message after it resumes here
       if (run.lastEntry) fields.endUuid = run.lastEntry;
       // the session has moved on from a rewind point once Claude got the message
@@ -822,7 +844,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
           body: (run.reply.error || run.reply.text).replace(/[#*_`>|]/g, '').replace(/s+/g, ' ').trim().slice(0, 200) || index.chats[id]?.title || '' });
       }
       const completed = run.onComplete;
-      const outcome = { result: run.reply.text.trim(), error: run.reply.error, stopped: run.stopped, usage, session: state.sessionId, model: options() };
+      const outcome = { result: fields.text, error: run.reply.error, stopped: run.stopped, usage, session: state.sessionId, model: options() };
       run = null;
       // a wrapped-up chat is finished with; any other keeps its process warm for the next message
       if (handover) cool(); else idleTimer();
@@ -981,9 +1003,10 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
 
     // Brief turns share this conversation's stdin and native session history.
     // post_brief returns immediately; its queued work starts after the calling turn ends.
-    function enqueueInline({ prompt, onLog = () => {} }) {
+    function enqueueInline({ prompt, skillId = 'assignment', headless = false, matrixFile = '', onLog = () => {} }) {
       let resolve;
-      const job = { prompt, onLog, resolve: null };
+      if (matrixFile && state.folder) prompt = `The matrix path in the directive resolves to ${matrixFile}.\n${prompt}`;
+      const job = { prompt: `=== SPHERE EXECUTION BOUNDARY: ${String(skillId).replace(/[\r\n]/g, '')} ===\n${prompt}\n===`, headless, onLog, resolve: null };
       const done = new Promise(r => { resolve = r; });
       job.resolve = resolve;
       inlineQueue.push(job);
@@ -1003,8 +1026,10 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         job.resolve(result);
         queueMicrotask(drainInline);
       };
-      const result = send(job.prompt, { from: 'sphere', onComplete: complete });
-      if (result.error) complete(result);
+      try {
+        const result = send(job.prompt, { from: 'sphere', onComplete: complete });
+        if (result.error) complete(result);
+      } catch (err) { complete({ error: err.message }); }
     }
 
     function snapshot() {

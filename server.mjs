@@ -997,7 +997,10 @@ async function handleApi(req, res, url) {
     const sender = body.chat && chatOwning(body.chat);
     const senderBrain = sender && brains.find([...chats.entries()].find(([, c]) => c === sender)?.[0]);
     const m = managerFor(senderBrain || active), what = url.pathname.split('/').pop();
-    if (what === 'brief') return json(res, 200, m.postBrief(body)); // from the chat's post_brief tool
+    if (what === 'brief') {
+      if (body.chat && !sender) return json(res, 200, { error: 'The parent chat no longer exists.' });
+      return json(res, 200, m.postBrief({ ...body, chat: body.chat || chatFor(senderBrain || active).currentId() }));
+    }
     if (what === 'add') return json(res, 200, m.add(body.text, body.files));
     if (what === 'remove') return json(res, 200, m.remove(String(body.id || '')));
     if (what === 'run') {
