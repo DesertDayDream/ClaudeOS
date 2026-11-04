@@ -1,6 +1,6 @@
 {
   "name": "claude-os",
-  "version": "0.3.23",
+  "version": "0.3.24",
   "private": true,
   "type": "module",
   "description": "ClaudeOS: give Claude a brain you can see. A live 3D view of its memory and skills, with a chat, for any number of brain folders.",
