@@ -1,0 +1,87 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ClaudeOS Lab benchmark</title><style>
+:root{color-scheme:dark;--bg:#13151c;--card:#1c202b;--line:#33394b;--dim:#a0a8ba;--text:#edf0f7;--accent:#96b3ff;--good:#7fd6a0;--warn:#f2c46d;--bad:#ff9c9c}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.5 system-ui}main{max-width:1100px;margin:auto;padding:20px}h1{font-size:23px;margin:0 0 6px}h2{font-size:16px;margin:18px 0 6px}p{margin:6px 0 12px}.dim,small{color:var(--dim)}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}button,select,input{font:inherit;padding:7px 11px;border-radius:7px;border:1px solid var(--line);color:var(--text);background:var(--card)}button{cursor:pointer}button:hover{border-color:var(--accent)}button:disabled{opacity:.45;cursor:default}.primary{background:#315d44}a{color:var(--accent)}label{display:flex;gap:6px;align-items:center}.card{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:12px 14px;margin:10px 0}.check{display:grid;grid-template-columns:16px 170px 1fr auto;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}.check:last-child{border-bottom:0}.dot{width:10px;height:10px;border-radius:50%;background:var(--dim)}.dot.ready{background:var(--good)}.dot.busy{background:var(--warn);animation:p 1s infinite alternate}@keyframes p{to{opacity:.3}}.dot.missing,.dot.stopped,.dot.broken{background:var(--bad)}.err{color:var(--bad)}.ok{color:var(--good)}.code{display:flex;gap:6px;margin-top:6px}.code input{flex:1;min-width:160px}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right}th:first-child,td:first-child{text-align:left}th{color:var(--dim);font-weight:500}.table{overflow:auto}#msg{color:var(--accent);white-space:pre-wrap}.verdict{font-size:15px;font-weight:600;margin:8px 0}@media(max-width:640px){.check{grid-template-columns:14px 1fr;}.check .act{grid-column:2}}
+</style></head><body><main>
+<h1>Lab benchmark</h1>
+<p class="dim">The method professional AI labs use (Harbor, the Terminal-Bench harness): ClaudeOS and plain Claude Code (what Claude Desktop runs) each do the same task several times, every attempt in a fresh container with the same model and effort. The results are checked automatically. <a href="/">Side-by-side benchmark</a></p>
+<p class="dim">Runs use your Claude subscription sign-in, never an API key. They count toward your plan's usage limits, so they run one at a time.</p>
+
+<h2>Setup</h2>
+<div class="card" id="checks"></div>
+
+<h2>Run</h2>
+<div class="card">
+  <div class="row">
+    <label>Task <select id="task"></select></label>
+    <label>Attempts each <select id="trials"><option>1</option><option>2</option><option selected>3</option><option>5</option><option>10</option></select></label>
+    <label><input type="checkbox" id="c-claudeos" checked> ClaudeOS</label>
+    <label><input type="checkbox" id="c-claude-code" checked> Claude Code</label>
+  </div>
+  <div class="row"><button id="run" class="primary" disabled>Run benchmark</button><button id="stop" disabled>Stop</button></div>
+  <p class="dim">Model and effort come from this brain's chat settings and are the same for both. Each attempt is one full task, usually a few minutes.</p>
+  <p id="msg" role="status"></p>
+</div>
+
+<div id="job"></div>
+<h2>Earlier runs</h2>
+<div class="card table"><table id="history"></table></div>
+
+<details><summary>How to read the results</summary>
+<p><b>Solved</b>: every gate passes (the page loads, has the required hooks, no console errors, no external requests) and all behaviour tests pass in a real browser. <b>Score</b>: behaviour tests (65) and robustness checks (10), out of 100; the appearance judge isn't part of the lab run.</p>
+<p><b>API-price cost</b>: what the attempt's tokens would cost at Anthropic's API prices, as estimated by Claude Code. You pay nothing extra: this is the fairest single number for comparing efficiency, because cached input is much cheaper than fresh input and output costs most.</p>
+<p><b>Chance ClaudeOS is cheaper / better</b>: how often ClaudeOS comes out ahead when the attempts are resampled 2,000 times (bootstrap). Around 50% means no real difference. Look for 90% or more, and run more attempts if it's close.</p>
+<p>The ClaudeOS contestant gets what a ClaudeOS chat adds to Claude Code: the foundations in CLAUDE.md, the runtime context, the brain's instructions and skills, and the shared memory (a copy). ClaudeOS's desk tools (terminal, artifacts, approval cards) aren't in the container.</p>
+</details>
+</main><script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const api=async(p,body)=>{const r=await fetch(p,body===undefined?{}:{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!r.ok||j.error)throw new Error(j.error||'Request failed');return j;};
+const num=n=>n==null?'—':Math.round(n).toLocaleString(), money=n=>n==null?'—':'$'+Number(n).toFixed(n<1?3:2), secs=n=>n==null?'—':n<90?Math.round(n)+'s':(n/60).toFixed(1)+' min', pct=n=>n==null?'—':Math.round(n*100)+'%';
+let s=null,codeOpen=false;
+const say=(t,bad)=>{$('#msg').textContent=t||'';$('#msg').className=bad?'err':'';};
+async function act(path,body){try{say('');await api('/api/harbor/'+path,body||{});}catch(e){say(e.message,true);}refresh();}
+const ROWS={
+  docker:['Docker',r=>r.state==='missing'?[['Install','docker-install']]:r.state==='stopped'?[['Start','docker-start']]:[], 'Runs each attempt in a clean container.'],
+  harbor:['Harbor',r=>r.state==='ready'?[['Update','harbor-install']]:[['Install','harbor-install']], 'The benchmark harness (open source, from the Terminal-Bench team).'],
+  claude:['Claude sign-in',r=>r.state==='ready'?[['Disconnect','claude-disconnect']]:r.state==='signing-in'?[['Cancel','claude-cancel']]:[['Connect','claude-connect']], 'Your Claude subscription, through a browser sign-in. No API key.'],
+};
+let lastChecks='';
+function checks(){
+  const html=Object.entries(ROWS).map(([k,[name,buttons,help]])=>{
+    const r=s.rows[k]||{};const busy=r.busy||r.state==='signing-in';
+    const extra=k==='claude'&&r.state==='signing-in'?`<div>${r.url?`<a href="${esc(r.url)}" target="_blank" rel="noopener">Open the sign-in page</a> if your browser didn't open it.`:''}<div class="code"><input id="code" placeholder="Paste the code the sign-in page shows" autocomplete="off"><button id="sendcode">Connect</button></div></div>`:'';
+    return `<div class="check"><span class="dot ${busy?'busy':esc(r.state)}"></span><b>${name}</b><div>${esc(r.action||r.text)}${r.error?`<div class="err">${esc(r.error)}</div>`:''}<div class="dim">${help}</div>${extra}</div><div class="act">${buttons(r).map(([l,p])=>`<button data-act="${p}" ${r.busy?'disabled':''}>${l}</button>`).join(' ')}</div></div>`;}).join('');
+  if(html===lastChecks)return;lastChecks=html;$('#checks').innerHTML=html;
+  for(const b of document.querySelectorAll('[data-act]'))b.onclick=()=>act(b.dataset.act);
+  const sc=$('#sendcode');if(sc){sc.onclick=()=>{const v=$('#code').value;$('#code').value='';act('claude-code',{code:v});};$('#code').onkeydown=e=>{if(e.key==='Enter')sc.click();};}
+}
+function jobView(j){
+  if(!j)return'';
+  const by=j.summary?.by||{};const names=s.agents;
+  const rows=Object.entries(by).map(([k,v])=>`<tr><td>${esc(v.name)}</td><td>${v.runs}</td><td>${v.solved}/${v.runs}</td><td>${num(v.score)}</td><td>${secs(v.seconds)}</td><td>${num(v.input)}</td><td>${num(v.cached)}</td><td>${num(v.output)}</td><td>${money(v.cost)}</td><td>${money(v.costPerSolved)}</td></tr>`).join('');
+  const sum=j.summary||{};
+  const verdict=sum.cheaper==null?'Results appear after at least 2 finished attempts each.':`Chance ClaudeOS is cheaper: ${pct(sum.cheaper)} · chance it scores higher: ${pct(sum.better)}${Math.max(sum.cheaper,1-sum.cheaper)<.9?' · not a clear difference yet':''}`;
+  const trials=j.trials.map(t=>`<tr><td>${esc(names[t.agent]||t.agent)} #${t.n}</td><td>${esc(t.status)}${t.error?` <span class="err" title="${esc(t.error)}">!</span>`:''}${t.note?` <span class="dim">${esc(t.note)}</span>`:''}</td><td>${t.solved?'<span class="ok">yes</span>':t.status==='done'?'no':'—'}</td><td>${num(t.score)}</td><td>${secs(t.seconds)}</td><td>${num(t.input)}</td><td>${num(t.cached)}</td><td>${num(t.output)}</td><td>${money(t.cost)}</td></tr>`).join('');
+  return `<h2>${j.status==='running'?'Running':'Latest run'}: ${esc(j.task)} <small>${new Date(j.started).toLocaleString()} · ${esc(j.status)}${j.model?` · ${esc(j.model)}`:''}${j.effort?` · ${esc(j.effort)} effort`:''}</small></h2>
+  <div class="card">${j.note?`<p class="${j.status==='failed'?'err':'dim'}">${esc(j.note)}</p>`:''}<div class="verdict">${verdict}</div>
+  <div class="table"><table><tr><th>Contestant</th><th>Attempts</th><th>Solved</th><th>Score</th><th>Time</th><th>Input tokens</th><th>Cached</th><th>Output</th><th>API-price cost</th><th>Cost per solved</th></tr>${rows}</table></div>
+  <p class="dim">Medians over finished attempts. Input tokens include cached ones.</p>
+  <details ${j.status==='running'?'open':''}><summary>Each attempt</summary><div class="table"><table><tr><th>Attempt</th><th>Status</th><th>Solved</th><th>Score</th><th>Time</th><th>Input</th><th>Cached</th><th>Output</th><th>API-price cost</th></tr>${trials}</table></div></details></div>`;
+}
+function history(){
+  const list=s.jobs||[];
+  $('#history').innerHTML=list.length?'<tr><th>Started</th><th>Task</th><th>Status</th><th>Attempts</th><th>ClaudeOS cheaper</th><th>ClaudeOS better</th></tr>'+list.map(j=>`<tr><td>${new Date(j.started).toLocaleString()}</td><td>${esc(j.task)}</td><td>${esc(j.status)}</td><td>${j.trials.filter(t=>t.status==='done').length}</td><td>${pct(j.summary?.cheaper)}</td><td>${pct(j.summary?.better)}</td></tr>`).join(''):'<tr><td class="dim">No lab runs yet.</td></tr>';
+}
+async function refresh(){
+  try{s=await api('/api/harbor');}catch(e){say(e.message,true);return;}
+  const focus=document.activeElement?.id==='code';
+  if(!focus)checks();
+  const sel=$('#task');if(!sel.options.length)sel.innerHTML=s.tasks.map(t=>`<option>${esc(t)}</option>`).join('');
+  $('#run').disabled=!s.ready||!!s.running;$('#stop').disabled=!s.running;
+  if(!s.ready&&!s.running&&!$('#msg').textContent)say('Finish the setup above to run a benchmark.');
+  if(s.ready&&$('#msg').textContent==='Finish the setup above to run a benchmark.')say('');
+  const jv=jobView(s.jobs?.[0]);if(jv!==$('#job').dataset.html){$('#job').innerHTML=jv;$('#job').dataset.html=jv;}history();
+}
+$('#run').onclick=()=>act('run',{task:$('#task').value,trials:Number($('#trials').value),contestants:['claudeos','claude-code'].filter(c=>$('#c-'+c).checked)});
+$('#stop').onclick=()=>act('stop');
+refresh();setInterval(refresh,3000);
+</script></body></html>

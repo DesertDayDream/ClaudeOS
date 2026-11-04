@@ -11,8 +11,9 @@ import { measure, snapshotDir } from './metrics.mjs';
 const graders = {};
 import { createTasks } from '../grader/tasks.mjs';
 import { scoreSide, verdict, replyRule } from '../grader/scoring.mjs';
+import { createHarbor } from '../harbor/runner.mjs';
 
-export function createBenchmark({ kit, dataDir, port, token, context, start, stop }) {
+export function createBenchmark({ kit, dataDir, port, token, context, start, stop, harbor: harborDeps = {} }) {
 const { listTasks, loadTask } = createTasks(path.join(kit, 'tasks'));
 const require = createRequire(path.join(kit, 'package.json'));
 let web = null, judge = null; // loaded on first use (Playwright is only needed for web tasks)
@@ -45,6 +46,10 @@ try { round = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { /* first
 const save = () => fs.writeFileSync(stateFile, JSON.stringify(round));
 if (round?.grading) { round.grading = null; round.gradeError = 'Grading was interrupted. Retry grading to finish.'; save(); }
 const log = (...a) => console.log(new Date().toLocaleTimeString(), ...a);
+// Harbor: repeated, isolated runs of ClaudeOS and Claude Code in containers (setup and jobs from buttons)
+const harbor = createHarbor({ kit, home: path.join(LIVE, 'harbor'), loadPty: harborDeps.loadPty, loadTask, log,
+  harness: harborDeps.harness || (() => ({ error: 'Harbor benchmarks need the ClaudeOS app.' })),
+  gradeWeb: async (...a) => (await webGrader()).gradeWeb(...a) });
 
 // ---------- windows ----------
 function ps(file, args, timeout = 60e3) {
@@ -302,6 +307,8 @@ return { async handle(req, res, url) {
       if (route === '/') return page(res, 'index.html');
       if (route === '/history') return page(res, 'history.html');
       if (route === '/vote') return page(res, 'vote.html');
+      if (route === '/harbor') return page(res, 'harbor.html');
+      if (route === '/api/harbor') return send(res, 200, { ...(await harbor.status()), jobs: harbor.listJobs(), tasks: listTasks() });
       if (route === '/report') return report(res, url.searchParams.get('run'));
       if (route === '/api/state') return send(res, 200, state());
       if (route === '/api/history') return send(res, 200, readResults().reverse());
@@ -309,6 +316,14 @@ return { async handle(req, res, url) {
       if (/^\/(shot|site)\//.test(route)) return serveBlind(res, route.slice(1).split('/'));
     }
     if (req.method !== 'POST') return send(res, 404, {error: 'not found'});
+    if (route.startsWith('/api/harbor/')) {
+      let raw = ''; for await (const ch of req) { raw += ch; if (raw.length > 10000) return send(res, 413, {error: 'Too large.'}); }
+      const body = raw ? JSON.parse(raw) : {};
+      const act = { 'docker-install': harbor.dockerInstall, 'docker-start': harbor.dockerStart, 'harbor-install': harbor.harborInstall,
+        'claude-connect': harbor.claudeConnect, 'claude-code': () => harbor.claudeCode(body.code), 'claude-cancel': harbor.claudeCancel,
+        'claude-disconnect': harbor.claudeDisconnect, run: () => harbor.runJob(body), stop: harbor.stopJob }[route.slice('/api/harbor/'.length)];
+      return act ? send(res, 200, await act()) : send(res, 404, {error: 'not found'});
+    }
     if (mutating) return send(res, 409, {error: 'Another benchmark action is in progress.'});
     mutating = true;
     try {
@@ -328,5 +343,5 @@ return { async handle(req, res, url) {
       return send(res, 404, {error:'not found'});
     } finally { mutating = false; }
   } catch (e) { log('benchmark error', e.message); return send(res, 500, {error: e.message}); }
-}, close: () => clearInterval(monitor), busy: () => !!round?.grading || !!round?.runId && !round.saved };
+}, close: () => clearInterval(monitor), busy: () => !!round?.grading || !!round?.runId && !round.saved || harbor.busy() };
 }

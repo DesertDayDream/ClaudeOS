@@ -1048,7 +1048,15 @@ const benchmark = createBenchmark({ kit: benchmarkDir(DATA), dataDir: DATA, port
     side.brainId = b.id; side.chatId = r.chat;
     return 'started';
   },
-  stop: async side => { const b = brains.find(side.brainId); if (b && side.chatId) { managerFor(b).stopChatSpecialists(side.chatId); chatFor(b).stopBenchmark(side.chatId); } }
+  stop: async side => { const b = brains.find(side.brainId); if (b && side.chatId) { managerFor(b).stopChatSpecialists(side.chatId); chatFor(b).stopBenchmark(side.chatId); } },
+  // Harbor benchmarks: what a ClaudeOS chat in the active brain gets, for the ClaudeOS contestant's container
+  harbor: { loadPty: () => loadNodePty(DATA), harness: () => {
+    const b = brains.active();
+    if (!b) return { error: 'Select a brain in ClaudeOS first.' };
+    const c = chatFor(b);
+    const h = c.benchmarkHarness({ folder: '/app', options: c.optionsFor(c.currentId()), mode: c.snapshot().mode || '' });
+    return h.error ? h : { ...h, brainDir: b.path, brainName: b.name, memoryFile: memoryFileOf(b) };
+  } },
 });
 const server = http.createServer((req, res) => {
   if (!LOCAL_HOSTS.has(req.headers.host)) { res.writeHead(421); return res.end('wrong host'); }

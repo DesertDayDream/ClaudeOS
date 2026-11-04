@@ -40,6 +40,24 @@ Give Claude a brain you can see.
 - **Linked brains:** from the brain menu, choose *Link brains…* to let this brain use another one. Claude here can read the linked brain's memory (never change it) and hand its team tasks, which run in that brain and send back the answer. Its skills show in the Team tab with a *Copy* button. Linked brains float beside the cloud.
 - **Brains** are folders. Make as many as you like (one per project, client or idea) and switch between them from the name under the title.
 
+## Lab benchmark (Harbor)
+
+The Benchmark tab's **Lab benchmark** page measures ClaudeOS the way AI labs measure agents: with
+[Harbor](https://harborframework.com) (the Terminal-Bench harness). ClaudeOS and plain Claude Code (what Claude Desktop runs)
+each do the same task several times. Every attempt runs in a fresh container with the same model and effort, and is checked automatically.
+
+- **No terminal:** a setup checklist installs and starts Docker Desktop, installs Harbor (with ClaudeOS's own copy of uv, so no
+  Python is needed) and connects Claude. Every step is a button.
+- **No API keys:** *Connect* signs in with your Claude subscription in the browser (`claude setup-token`, run hidden). The token is
+  encrypted with Windows data protection and only goes into the benchmark's environment; API-key variables are removed from it.
+  Runs count toward your plan's usage limits and run one at a time; a run that hits the limit pauses the job.
+- **What ClaudeOS brings:** the ClaudeOS contestant is Claude Code plus what a ClaudeOS chat adds: the CLAUDE.md foundations, the
+  runtime context, the brain's instructions and skills, and a copy of its shared memory over the same memory server. The desk tools
+  (terminal, artifacts, approval cards) need the app's own server and aren't in the container.
+- **Results:** solved attempts, score (browser behaviour and robustness tests run on this PC on the files each attempt left), time,
+  tokens, the API-price cost Claude Code estimates (you pay nothing extra), cost per solved task, and a bootstrap chance that
+  ClaudeOS is cheaper or better. Attempts alternate which side goes first.
+
 ## Dedicated desktop app (development)
 
 An Electron desktop shell is available in `desktop/`, with a separate Node

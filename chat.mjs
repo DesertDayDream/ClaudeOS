@@ -383,6 +383,13 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       if (state.carryOver) extra.push(`Handover from the previous chat in this brain (its details are in the brain's memory; search it if you need more):\n${state.carryOver}`);
       return extra;
     }
+    // what a chat in this brain is given on top of Claude Code: the CLAUDE.md foundations block, the runtime
+    // context file it reads first, and its MCP servers and tool rules (the benchmark runs these in a container)
+    function harness() {
+      const setup = servers();
+      return { foundations: [DESK_PROMPT, planPrompt('claude'), MODEL_GUIDANCE].join('\n\n'),
+        context: instructions(setup).slice(3).join('\n\n'), allowed: setup.allowed, denied: [...setup.denied, ...scope().disallowed], options: options(), mode: state.mode || '' };
+    }
     function writeFoundations(folder) {
       const file = path.join(folder, 'CLAUDE.md');
       const begin = '<!-- ClaudeOS foundations: begin -->', end = '<!-- ClaudeOS foundations: end -->';
@@ -1113,7 +1120,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     }
     // the text a search looks through
     const text = () => state.messages.map(m => m.text).join('\n');
-    return { id, send, enqueueInline, stop, wrapUp, rewind, report, startWith, snapshot, text, setFolder, setTools, setMode, setupSession, setEmployee, setOwnOptions, parentOf, warm, cool, file,
+    return { id, send, enqueueInline, stop, wrapUp, rewind, report, startWith, snapshot, text, setFolder, setTools, setMode, setupSession, harness, setEmployee, setOwnOptions, parentOf, warm, cool, file,
       folder: () => state.folder || cwd, tools: () => state.tools || {}, options,
       busy: () => !!run, empty: () => !state.messages.length, employee: () => state.employee,
       idleSince: () => (live && !run ? live.since : null) };
@@ -1223,6 +1230,14 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     if (r.error) { delete index.chats[c.id]; convs.delete(c.id); return r; }
     listChanged();
     return {ok: true, chat: c.id};
+  }
+  // the harness a benchmark chat would get, without starting one
+  function benchmarkHarness({ folder, options: picked, mode }) {
+    const checked = cleanOptions(picked);
+    if (checked.error) return checked;
+    const c = makeConv('bench-' + crypto.randomBytes(6).toString('hex'));
+    c.setupSession({ parent: null, folder, tools: {}, benchmark: true, options: checked.options, mode });
+    return { ok: true, ...c.harness() };
   }
   function stopBenchmark(id) {
     if (!index.chats[id]?.benchmark) return {error: 'No benchmark chat.'};
@@ -1363,7 +1378,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     // all of them
     setFolder: f => current().setFolder(f), setTools: t => current().setTools(t), setMode: m => current().setMode(m), warm: () => current().warm(), upload, attachmentFile,
     runInline: ({ chat, ...task }) => (chat ? conv(chat) : managerChat()).enqueueInline(task),
-    startSession, startScheduled, startBenchmark, stopBenchmark, messageSession, chatFolder, employeeChat, empChatId, view, owns: chatId => convs.has(chatId),
+    startSession, startScheduled, startBenchmark, stopBenchmark, benchmarkHarness, messageSession, chatFolder, employeeChat, empChatId, view, owns: chatId => convs.has(chatId),
     open, newChat, rename, remove, list, report, anyBusy, stopAll: () => { for (const c of convs.values()) { c.stop(); c.cool(); } },
     // idle chats start a fresh Claude at their next message (new plugins, skills or settings load then)
     coolAll: () => { for (const c of convs.values()) c.cool(); },
