@@ -58,7 +58,7 @@ for (const name of fs.readdirSync(root)) if (name.endsWith('.mjs') || name === '
 for (const name of ['public', 'hooks', 'templates', 'benchmark']) fs.cpSync(path.join(root, name), path.join(source, name), { recursive: true });
 fs.symlinkSync(path.join(root, 'node_modules'), path.join(source, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
 Object.assign(process.env, { PORT: '4800', ARTIFACT_PORT: '4810', CLAUDEOS_DESKTOP: '1', CLAUDEOS_NO_OPEN: '1',
-  CLAUDEOS_HOME: path.join(lab, 'data'), CLAUDE_CONFIG_DIR: path.join(lab, 'claude'), CODEX_HOME: path.join(lab, 'codex') });
+  CLAUDEOS_HOME: path.join(lab, 'data'), BENCH_NO_WINDOWS: '1', CLAUDE_CONFIG_DIR: path.join(lab, 'claude'), CODEX_HOME: path.join(lab, 'codex') });
 let resolveReady, rejectReady, updateChecks = 0;
 const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
 process.connected = true;
@@ -150,19 +150,22 @@ try {
   assert.match(specialistResult.text, /Approval result: accept/);
   console.log('PASS: model catalog, invalid selection, specialist dispatch, approval and returned model/result through authenticated HTTP in the lab copy.');
   const beforeBench = (await api('/api/chat')).value;
-  await api('/benchmark/api/prepare', {pair:'codex'});
-  const benchmarkRun = (await api('/benchmark/api/run', {prompt:'Fixture benchmark. Reply OK.', autoSend:false})).value;
+  const offered = (await api('/benchmark/api/state')).value.contestants;
+  const benchA = offered.find(c => c.id.startsWith('claudeos-codex:'))?.id;
+  assert.ok(benchA && offered.some(c => c.id === 'desktop-codex'), 'Benchmark offers ClaudeOS on Codex and the Codex setup');
+  assert.equal((await api('/benchmark/api/prepare', {a: benchA, b: 'desktop-codex'})).value.ok, true);
+  const benchmarkRun = (await api('/benchmark/api/run', {prompt:'Fixture benchmark. Reply OK.'})).value;
   assert.equal(benchmarkRun.results[0].start, 'started');
   const benchPending = await waitFor(state => state.approvals.length === 1);
   assert.equal(benchPending.id, beforeBench.id, 'Benchmark keeps the open chat');
   assert.deepEqual(benchPending.options, beforeBench.options, 'Benchmark keeps user model options');
   const benchState = (await api('/benchmark/api/state')).value;
   assert.notEqual(benchState.round.sides[0].chatId, beforeBench.id);
-  assert.equal(benchState.round.sides[1].start, 'waiting for you to send the tagged prompt');
+  assert.equal(benchState.round.sides[1].start, 'DRY', 'The Codex window is prepared (windows are off in this check)');
   await api('/benchmark/api/stop', {});
   await waitFor(state => !state.any && !state.approvals.length);
   assert.equal((await api('/benchmark/api/history')).value.length, 1);
-  console.log('PASS: benchmark starts a dedicated chat, preserves user settings, supports manual pairing and stops only its own run.');
+  console.log('PASS: benchmark starts a dedicated chat, preserves user settings, prepares the window for the other side and stops only its own run.');
   console.log(`PASS: lab backend startup, CSP, API authentication, native settings IPC, hotkey setting, update routing, rollback guidance. Lab: ${lab}`);
 } catch (error) { exitCode = 1; console.error(error.stack); }
 finally {
