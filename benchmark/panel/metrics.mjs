@@ -122,15 +122,19 @@ function codexMetrics(side) {
 }
 
 // ---------- the working folder ----------
+const MAX_FILES = 5000; // a big project copied in: measure the first 5,000 files, not every file every second
 const SKIP = new Set(['.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build', '.next', '.cache']);
 export function snapshotDir(dir) {
   const files = {};
+  let count = 0;
   const go = d => {
     let entries; try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
       if (SKIP.has(e.name) || e.isSymbolicLink()) continue;
+      if (count >= MAX_FILES) return;
       const p = path.join(d, e.name);
       if (e.isDirectory()) { go(p); continue; }
+      count++;
       let buf; try { const st = fs.statSync(p); if (st.size > 2e6) { files[path.relative(dir, p)] = null; continue; } buf = fs.readFileSync(p); } catch { continue; }
       files[path.relative(dir, p)] = buf.includes(0) ? null : buf.toString('utf8').split(/\r?\n/).filter((l, i, a) => i < a.length - 1 || l !== '');
     }

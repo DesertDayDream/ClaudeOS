@@ -3,7 +3,7 @@ const { spawn, execFile } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { externalUrl, appNavigation, windowBounds, backendSpec, installerPath } = require('./policy.cjs');
+const { externalUrl, appNavigation, benchWatchUrl, windowBounds, backendSpec, installerPath } = require('./policy.cjs');
 
 const dataDir = path.resolve(process.env.CLAUDEOS_HOME || path.join(os.homedir(), '.claudeos'));
 fs.mkdirSync(dataDir, { recursive: true });
@@ -67,7 +67,22 @@ function createWindow() {
     title: 'ClaudeOS', icon, show: false, backgroundColor: '#101019', autoHideMenuBar: true,
     webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
       allowRunningInsecureContent: false, webviewTag: false, navigateOnDragDrop: false, spellcheck: true } });
-  win.webContents.setWindowOpenHandler(({ url }) => { openExternal(url); return { action: 'deny' }; });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    // a benchmark contestant's live view opens as its own window, on the left half of the screen
+    if (benchWatchUrl(url, appUrl)) {
+      const area = screen.getDisplayMatching(win.getBounds()).workArea;
+      return { action: 'allow', overrideBrowserWindowOptions: { x: area.x, y: area.y, width: Math.floor(area.width / 2), height: area.height,
+        title: 'ClaudeOS benchmark', icon, backgroundColor: '#101019', autoHideMenuBar: true,
+        webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true, allowRunningInsecureContent: false, webviewTag: false, navigateOnDragDrop: false } } };
+    }
+    openExternal(url); return { action: 'deny' };
+  });
+  // a viewer window may not open further windows or leave its page
+  win.webContents.on('did-create-window', child => {
+    child.webContents.setWindowOpenHandler(({ url }) => { openExternal(url); return { action: 'deny' }; });
+    child.webContents.on('will-navigate', (event, url) => { if (!benchWatchUrl(url, appUrl)) { event.preventDefault(); openExternal(url); } });
+    child.webContents.on('will-attach-webview', event => event.preventDefault());
+  });
   win.webContents.on('will-navigate', (event, url) => {
     if (appNavigation(url, appUrl)) return;
     event.preventDefault(); openExternal(url);

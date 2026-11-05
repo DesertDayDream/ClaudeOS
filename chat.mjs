@@ -1239,6 +1239,12 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     c.setupSession({ parent: null, folder, tools: {}, benchmark: true, options: checked.options, mode });
     return { ok: true, ...c.harness() };
   }
+  // what a benchmark chat has said and done so far, for the benchmark's viewer window (read-only)
+  function benchmarkSnapshot(id) {
+    if (!index.chats[id]?.benchmark || !convs.has(id)) return { error: 'No benchmark chat.' };
+    const s = convs.get(id).snapshot();
+    return { ok: true, title: index.chats[id].title, busy: s.busy, messages: s.messages.slice(-60) };
+  }
   function stopBenchmark(id) {
     if (!index.chats[id]?.benchmark) return {error: 'No benchmark chat.'};
     conv(id).stop();
@@ -1378,7 +1384,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     // all of them
     setFolder: f => current().setFolder(f), setTools: t => current().setTools(t), setMode: m => current().setMode(m), warm: () => current().warm(), upload, attachmentFile,
     runInline: ({ chat, ...task }) => (chat ? conv(chat) : managerChat()).enqueueInline(task),
-    startSession, startScheduled, startBenchmark, stopBenchmark, benchmarkHarness, messageSession, chatFolder, employeeChat, empChatId, view, owns: chatId => convs.has(chatId),
+    startSession, startScheduled, startBenchmark, stopBenchmark, benchmarkHarness, benchmarkSnapshot, messageSession, chatFolder, employeeChat, empChatId, view, owns: chatId => convs.has(chatId),
     open, newChat, rename, remove, list, report, anyBusy, stopAll: () => { for (const c of convs.values()) { c.stop(); c.cool(); } },
     // idle chats start a fresh Claude at their next message (new plugins, skills or settings load then)
     coolAll: () => { for (const c of convs.values()) c.cool(); },

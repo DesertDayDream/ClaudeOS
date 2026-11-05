@@ -23,7 +23,8 @@ test('embedded routes enforce auth, preserve round files, export escaped evidenc
   process.env.BENCH_HOME = path.join(lab,'bench'); process.env.BENCH_DRY = '1';
   process.env.BENCH_NO_JUDGE = '1'; process.env.CLAUDE_CONFIG_DIR = path.join(lab,'claude');
   const {createBenchmark} = await import('../benchmark/panel/server.mjs');
-  const options = {kit:path.join(root,'benchmark'),dataDir:lab,port:0,token:'test-token',context:()=>({brainId:'fixture',brainName:'Lab',mode:'auto'}),start:async()=>{},stop:async()=>{}};
+  const options = {kit:path.join(root,'benchmark'),dataDir:lab,port:0,token:'test-token',context:()=>({brainId:'fixture',brainName:'Lab',mode:'auto',options:{model:'opus',effort:'high'}}),start:async()=>{},stop:async()=>{},
+    environments:()=>({brains:[{id:'fixture',name:'Lab',active:true},{id:'second',name:'Second'}],claude:{command:'claude',args:[],env:{}},codex:{command:'codex',args:[],env:{X:'1'}}})};
   let bench=createBenchmark(options);
   const server=http.createServer((req,res)=>bench.handle(req,res,new URL(req.url,'http://local')));
   await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>{bench.close();server.close();});
@@ -33,22 +34,23 @@ test('embedded routes enforce auth, preserve round files, export escaped evidenc
   assert.equal((await fetch(base+'/api/prepare',{method:'POST',headers:{origin:'https://evil.test','x-claudeos-token':'test-token'}})).status,403);
   const page=await (await fetch(base+'/')).text();
   assert.match(page,/benchFetch\(p,/);assert.doesNotMatch(page,/benchmark\/benchmark/);
-  assert.equal((await api('/api/prepare',{pair:'unknown'})).error,'Unknown pair.');
-  assert.equal((await api('/api/prepare',{pair:'claude'})).ok,true);
+  assert.equal((await api('/api/prepare',{a:'unknown',b:'desktop-claude'})).error,'Pick two contestants.');
+  assert.equal((await api('/api/prepare',{a:'desktop-claude',b:'desktop-claude'})).error,'Pick two different contestants.');
+  assert.equal((await api('/api/prepare',{a:'claudeos:fixture',b:'desktop-claude'})).ok,true);
   let state=await api('/api/state');assert.equal(state.round.context.brainName,'Lab');
   fs.writeFileSync(path.join(state.round.sides[0].dir,'marker.txt'),'preserve me');
   const result=await api('/api/run',{prompt:'<script>alert(1)</script> Reply OK.',autoSend:false});
   assert.equal(result.ok,true);
-  assert.match((await api('/api/prepare',{pair:'codex'})).error,/Stop or finish/);
+  assert.match((await api('/api/prepare',{a:'claudeos-codex:fixture',b:'desktop-codex'})).error,/Stop or finish/);
   await api('/api/stop',{});
   const history=await api('/api/history');assert.equal(history.length,1);assert.equal(history[0].verdict.winner,null);assert.equal(history[0].sides[0].score.pass,false);
   const report=await (await fetch(base+'/report?run='+result.runId)).text();
   assert.match(report,/&lt;script&gt;/);assert.doesNotMatch(report,/<script>alert/);assert.match(report,/preserve me/);
-  assert.equal((await api('/api/prepare',{pair:'codex'})).ok,true);
-  assert.equal(fs.readFileSync(path.join(lab,'bench','archive',result.runId,'claudeos-claude','marker.txt'),'utf8'),'preserve me');
+  assert.equal((await api('/api/prepare',{a:'claudeos-codex:fixture',b:'desktop-codex'})).ok,true);
+  assert.equal(fs.readFileSync(path.join(lab,'bench','archive',result.runId,'A','marker.txt'),'utf8'),'preserve me');
   bench.close();bench=createBenchmark(options);assert.equal((await api('/api/history')).length,1);
   assert.equal((await fetch(base+'/site/unknown/A/..%2F..%2Fpackage.json')).status,404);
-  await api('/api/prepare',{pair:'claude',template:'task:bill-splitter'});
+  await api('/api/prepare',{a:'claudeos:fixture',b:'desktop-claude',start:'task:bill-splitter'});
   await api('/api/run',{prompt:'Build the bill splitter. Reply DONE.',autoSend:false});
   state=await api('/api/state');
   const logs=path.join(lab,'claude','projects','fixture');fs.mkdirSync(logs,{recursive:true});
@@ -73,4 +75,88 @@ test('embedded routes enforce auth, preserve round files, export escaped evidenc
   const shot=await fetch(base+'/shot/'+runId+'/A/desktop.png');assert.equal(shot.status,200);
   const voted=await api('/api/history');assert.ok(voted.find(r=>r.runId===runId).vote);
   console.log('PASS: fixture logs ? browser checks and screenshots ? blind vote ? persisted verdict. No model calls.');
+});
+
+// ---------- any two environments, own windows, project copies, taking turns, repeats ----------
+async function bench(t, extra = {}) {
+  const lab = fs.mkdtempSync(path.join(os.tmpdir(), 'claudeos-bench-env-'));
+  process.env.BENCH_HOME = path.join(lab, 'bench'); process.env.BENCH_DRY = '1'; process.env.BENCH_NO_JUDGE = '1';
+  const { createBenchmark } = await import('../benchmark/panel/server.mjs');
+  const b = createBenchmark({ kit: path.join(root, 'benchmark'), dataDir: lab, port: 0, token: 'tk', start: async () => {}, stop: async () => {},
+    context: () => ({ brainId: 'one', brainName: 'One', mode: '', options: { model: 'sonnet', effort: 'medium', codexModel: 'gpt-x', codexEffort: 'high' } }),
+    environments: () => ({ brains: [{ id: 'one', name: 'One', active: true }, { id: 'two', name: 'Two' }], claude: { command: 'claude.exe', args: [], env: {} }, codex: { command: 'codex.exe', args: ['--x'], env: { CODEX_HOME_HINT: '1' } } }), ...extra });
+  const server = http.createServer((req, res) => b.handle(req, res, new URL(req.url, 'http://local')));
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  t.after(() => { b.close(); server.close(); fs.rmSync(lab, { recursive: true, force: true }); });
+  const base = 'http://127.0.0.1:' + server.address().port + '/benchmark';
+  const api = async (route, body) => (await fetch(base + route, { headers: { 'x-claudeos-token': 'tk', ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { method: 'POST', body: JSON.stringify(body) } : {}) })).json();
+  return { lab, api, live: path.join(lab, 'bench') };
+}
+function finishedLog(side, i) {
+  const logs = path.join(process.env.CLAUDE_CONFIG_DIR, 'projects', 'env-fixture'); fs.mkdirSync(logs, { recursive: true });
+  const rows = [{ type: 'user', timestamp: new Date().toISOString(), cwd: side.dir, message: { content: side.tag } },
+    { type: 'assistant', timestamp: new Date(Date.now() + 500).toISOString(), message: { id: 'r-' + side.tag, model: 'fixture', stop_reason: 'end_turn', content: [{ type: 'text', text: 'DONE' }], usage: { input_tokens: 10 + i, output_tokens: 5 } } }];
+  fs.writeFileSync(path.join(logs, side.tag.replace(/\W/g, '_') + '.jsonl'), rows.map(x => JSON.stringify(x)).join('\n'));
+}
+const until = async (api, ok, tries = 60) => { let s; for (let i = 0; i < tries; i++) { s = await api('/api/state'); if (ok(s)) return s; await new Promise(r => setTimeout(r, 250)); } return s; };
+
+test('every brain and your own Claude Code / Codex setups are offered as contestants', async t => {
+  const { api } = await bench(t);
+  const ids = (await api('/api/state')).contestants.map(c => c.id);
+  assert.deepEqual(ids, ['claudeos:one', 'claudeos:two', 'desktop-claude', 'claudeos-codex:one', 'claudeos-codex:two', 'desktop-codex']);
+});
+
+test('each side gets its own copy of the project; the original is never touched', async t => {
+  const { api, live } = await bench(t);
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'claudeos-bench-proj-'));
+  t.after(() => fs.rmSync(proj, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(proj, 'main.txt'), 'original');
+  fs.mkdirSync(path.join(proj, 'src')); fs.writeFileSync(path.join(proj, 'src', 'a.js'), 'x');
+  fs.mkdirSync(path.join(proj, 'node_modules', 'dep'), { recursive: true }); fs.writeFileSync(path.join(proj, 'node_modules', 'dep', 'i.js'), 'big');
+  assert.match((await api('/api/prepare', { a: 'claudeos:one', b: 'desktop-claude', start: 'folder:' + live })).error, /outside/);
+  assert.equal((await api('/api/prepare', { a: 'claudeos:one', b: 'desktop-claude', start: 'folder:' + proj })).ok, true);
+  const s = await api('/api/state');
+  for (const side of s.round.sides) {
+    assert.equal(fs.readFileSync(path.join(side.dir, 'src', 'a.js'), 'utf8'), 'x');
+    assert.ok(!fs.existsSync(path.join(side.dir, 'node_modules')));
+    fs.writeFileSync(path.join(side.dir, 'main.txt'), 'changed by ' + side.id);
+  }
+  assert.equal(fs.readFileSync(path.join(proj, 'main.txt'), 'utf8'), 'original');
+  assert.notEqual(s.round.sides[0].dir, s.round.sides[1].dir);
+});
+
+test('the Claude Desktop and Codex sides open with the exact prompt and the shared settings', async t => {
+  const { api, live } = await bench(t);
+  const prompt = 'Say "hi" & then | stop.\nSecond line with "quotes".';
+  await api('/api/prepare', { a: 'desktop-codex', b: 'desktop-claude', settings: { model: 'opus', effort: 'high', mode: 'bypassPermissions', codexModel: 'gpt-y', codexEffort: 'low' } });
+  const r = await api('/api/run', { prompt });
+  assert.equal(r.ok, true); assert.deepEqual(r.watch, []);
+  const a = JSON.parse(fs.readFileSync(path.join(live, 'window-A.json'), 'utf8')), b = JSON.parse(fs.readFileSync(path.join(live, 'window-B.json'), 'utf8'));
+  assert.equal(b.command, 'claude.exe');
+  assert.deepEqual(b.args.slice(0, 6), ['--model', 'opus', '--effort', 'high', '--permission-mode', 'bypassPermissions']);
+  assert.ok(b.args.at(-1).endsWith('\n\n' + prompt)); assert.match(b.args.at(-1), /^Benchmark run .*-B\./);
+  assert.equal(a.command, 'codex.exe'); assert.deepEqual(a.env, { CODEX_HOME_HINT: '1' });
+  assert.deepEqual(a.args.slice(0, 6), ['--x', '-m', 'gpt-y', '-c', 'model_reasoning_effort="low"', '--dangerously-bypass-approvals-and-sandbox']);
+  assert.ok(a.cwd.endsWith('side-A')); assert.ok(b.cwd.endsWith('side-B'));
+  await api('/api/stop', {});
+});
+
+test('two ClaudeOS brains take turns, and a repeat starts fresh with the other one first', async t => {
+  const { api } = await bench(t);
+  const p = await api('/api/prepare', { a: 'claudeos:one', b: 'claudeos:two', order: 'together', repeats: 2 });
+  assert.equal(p.order, 'sequence');
+  const r = await api('/api/run', { prompt: 'Reply DONE.' });
+  assert.deepEqual(r.watch, ['A', 'B']);
+  let s = await api('/api/state');
+  assert.equal(s.round.sides[0].waiting, false); assert.equal(s.round.sides[1].waiting, true);
+  finishedLog(s.round.sides[0], 0);
+  s = await until(api, x => x.round.sides[1].waiting === false);
+  assert.equal(s.round.sides[1].waiting, false, 'the second brain starts once the first has finished');
+  finishedLog(s.round.sides[1], 1);
+  s = await until(api, x => x.series?.n === 2 && x.round.runId);
+  assert.equal(s.series.n, 2); assert.equal(s.series.recorded, 1);
+  assert.equal(s.round.sides[0].id, 'B', 'the repeat lets the other side go first');
+  assert.equal(s.series.sides.A.rounds, 1); assert.equal(s.series.sides.B.done, 1);
+  await api('/api/stop', {});
+  assert.equal((await api('/api/state')).series.stopped, true);
 });

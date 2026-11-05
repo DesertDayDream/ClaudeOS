@@ -1,31 +1,130 @@
 ﻿<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ClaudeOS Benchmark</title><style>
-:root{color-scheme:dark;--bg:#13151c;--card:#1c202b;--line:#33394b;--dim:#a0a8ba;--text:#edf0f7;--accent:#96b3ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.5 system-ui}main{max-width:1100px;margin:auto;padding:20px}h1{font-size:23px;margin:0 0 6px}p{margin:6px 0 14px}.dim,small{color:var(--dim)}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0}button,select{font:inherit;padding:8px 12px;border-radius:7px;border:1px solid var(--line);color:var(--text);background:var(--card);cursor:pointer}button:hover,a:hover{border-color:var(--accent)}button:disabled{opacity:.45;cursor:default}.primary{background:#315d44}textarea{width:100%;min-height:150px;resize:vertical;background:#0e1118;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:12px;font:inherit}a{color:var(--accent)}label{display:flex;gap:6px;align-items:center}#msg{white-space:pre-wrap;color:var(--accent)}.error{color:#ff9c9c!important}.card{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:14px;margin:12px 0;overflow-wrap:anywhere}.paths{display:grid;grid-template-columns:1fr 1fr;gap:10px}.path{font-family:Consolas,monospace;font-size:11px;display:block;overflow-wrap:anywhere;margin:6px 0}.table{overflow:auto}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:right}th:first-child,td:first-child{text-align:left}th{color:var(--dim);font-weight:500}td{max-width:220px;overflow-wrap:anywhere}details{margin:14px 0}summary{cursor:pointer}#verdict{font-weight:600}button.on{border-color:var(--accent)}@media(max-width:420px){main{padding:12px}.paths{grid-template-columns:1fr}}
-</style></head><body><main><h1>Benchmark</h1><p class="dim">Compare ClaudeOS with Claude Desktop or Codex using the same prompt. Measure finished work, time and token usage.</p>
-<div class="row"><button data-pair="claude">Claude pair</button><button data-pair="codex">Codex pair</button><a href="/history">History</a><a href="/harbor"><b>Lab benchmark</b></a> <small class="dim">repeated runs in clean containers, the way AI labs measure</small></div>
-<label>Starting task <select id="template"><option value="">Your prompt · empty folders</option></select></label>
-<p><small>Match the model, effort and permission settings in both apps. Preparing a pair preserves the previous round's files.</small></p><div id="setup"></div>
-<textarea id="prompt" aria-label="Benchmark prompt" placeholder="Write your own prompt. Optional example tasks are available above."></textarea>
-<div class="row"><button id="run" class="primary" disabled>Run comparison</button><button id="stop" disabled>Stop</button><label><input id="auto" type="checkbox">Paste and send in the other app</label></div>
-<p class="dim">With paste and send off, copy the tagged prompt after Run and send it yourself in the other app's new chat. Open that app in the folder shown above. ClaudeOS starts automatically.</p>
-<p id="msg" role="status">Prepare a pair to begin.</p><div id="manual"></div><div id="verdict"></div><div class="table"><table id="metrics"></table></div>
-<details><summary>How to read these results</summary><p>Quality gates come first. The optional web task uses behaviour tests (65), robustness checks (10) and a blind appearance vote (25). Your vote replaces the other-family AI judge's appearance score. These weights are provisional.</p><p>Custom prompts have no automatic quality score. Fresh, cached and output tokens are reported separately; these are usage measurements, not subscription charges. Cached input is not evidence that research was avoided.</p><p>Accounting covers the matched session and native Claude subagents. Separate employee, coaching and judge sessions are excluded. This version does not measure the full cost of a multi-session team job. Match the other app's settings manually.</p></details></main><script>
+[hidden]{display:none!important}:root{color-scheme:dark;--bg:#13151c;--card:#1c202b;--line:#33394b;--dim:#a0a8ba;--text:#edf0f7;--accent:#96b3ff;--good:#7fd6a0;--bad:#ff9c9c;--warn:#f2c46d}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.5 system-ui}main{max-width:1100px;margin:auto;padding:20px}h1{font-size:23px;margin:0 0 4px}h2{font-size:15px;margin:0 0 8px;display:flex;gap:8px;align-items:center}.n{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;background:#2c3b63;font-size:12px}p{margin:6px 0 10px}.dim,small{color:var(--dim)}.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:8px 0}button,select,input[type=text]{font:inherit;padding:7px 11px;border-radius:7px;border:1px solid var(--line);color:var(--text);background:#151924}button{cursor:pointer;background:var(--card)}button:hover{border-color:var(--accent)}button:disabled,select:disabled{opacity:.45;cursor:default}.primary{background:#315d44;font-weight:600;padding:9px 18px}textarea{width:100%;min-height:120px;resize:vertical;background:#0e1118;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:12px;font:inherit}a{color:var(--accent)}label{display:flex;gap:6px;align-items:center}.card{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:14px;margin:12px 0;overflow-wrap:anywhere}.vs{display:grid;grid-template-columns:1fr auto 1fr;gap:12px;align-items:start}.vs select{width:100%}.vs .mid{padding-top:8px;color:var(--dim);font-weight:600}#msg{white-space:pre-wrap;color:var(--accent)}.error{color:var(--bad)!important}.warn{color:var(--warn)}.path{font-family:Consolas,monospace;font-size:11px;overflow-wrap:anywhere}.sides{display:grid;grid-template-columns:1fr 1fr;gap:10px}.table{overflow:auto}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right}th:first-child,td:first-child{text-align:left}th{color:var(--dim);font-weight:500}details{margin:12px 0}summary{cursor:pointer}#start-folder{flex:1;min-width:220px}.choice{display:flex;flex-direction:column;gap:8px}@media(max-width:640px){main{padding:12px}.vs,.sides{grid-template-columns:1fr}.vs .mid{display:none}}
+</style></head><body><main>
+<h1>Benchmark</h1>
+<p class="dim">Compare two of your real setups on the same work. Both open in their own windows and work at the same time (or one after the other), and ClaudeOS measures time, tokens and the result. <a href="/history">History</a> · <a href="/harbor">Lab benchmark</a> <small>(clean containers, the way AI labs measure)</small></p>
+
+<div class="card"><h2><span class="n">1</span>Who competes</h2>
+  <div class="vs"><div><select id="a" aria-label="First contestant"></select><p class="dim" id="a-note"></p></div><div class="mid">vs</div><div><select id="b" aria-label="Second contestant"></select><p class="dim" id="b-note"></p></div></div>
+  <p class="warn" id="family"></p>
+</div>
+
+<div class="card"><h2><span class="n">2</span>What they work on</h2>
+  <div class="choice">
+    <label><input type="radio" name="start" value="" checked> An empty folder <small>(you write the prompt)</small></label>
+    <label><input type="radio" name="start" value="task"> A test task with automatic checks <select id="task"></select></label>
+    <div class="row" style="margin:0"><label><input type="radio" name="start" value="folder"> A copy of my project</label><input type="text" id="start-folder" placeholder="Choose a folder…" readonly><button id="choose">Choose…</button></div>
+  </div>
+  <p class="dim">Each side gets its own copy, so they never touch each other or your original folder.</p>
+</div>
+
+<div class="card"><h2><span class="n">3</span>Settings, the same for both</h2>
+  <div class="row">
+    <label>Model <select id="model"><option value="">As set in ClaudeOS</option><option>fable</option><option>opus</option><option>sonnet</option><option>haiku</option></select></label>
+    <label>Effort <select id="effort"><option value="">As set</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
+    <label>Permissions <select id="mode"><option value="">Ask me</option><option value="acceptEdits">Accept edits</option><option value="auto">Auto</option><option value="bypassPermissions">Full access</option></select></label>
+    <label>Rounds <select id="repeats"><option>1</option><option>3</option><option>5</option></select></label>
+  </div>
+  <div class="row" id="codex-row" hidden><label>Codex model <input type="text" id="codexModel" placeholder="as set"></label><label>Codex effort <select id="codexEffort"><option value="">As set</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option></select></label></div>
+  <div class="row"><label><input type="radio" name="order" value="together" checked> At the same time</label><label><input type="radio" name="order" value="sequence"> One after the other <small>(when only one copy of an app can be open, like an editor)</small></label></div>
+  <p class="dim" id="mode-note"></p>
+  <textarea id="prompt" aria-label="Benchmark prompt" placeholder="What both of them should do. A test task fills this in."></textarea>
+  <div class="row"><button id="run" class="primary">Run</button><button id="stop" disabled>Stop</button></div>
+  <p id="msg" role="status"></p>
+</div>
+
+<div id="live"></div>
+<details><summary>How to read these results</summary><p><b>Claude Desktop settings</b> runs Claude Code, which is what Claude Desktop's Code tab runs, with your own setup: your plugins, MCP servers, skills, CLAUDE.md and sign-in. It opens in a window of its own so you can watch it. <b>ClaudeOS</b> runs a chat in the brain you pick, with its team, memory and skills; its window shows that chat live.</p><p>Measurements come from each side's own session log: model calls, tools, fresh, cached and output tokens. Compare tokens only between sides of the same model family. A test task is also checked in a real browser (behaviour 65, robustness 10, a blind appearance vote 25; the weights are provisional). With more than one round, the medians across rounds are what count; the first side alternates in "one after the other".</p><p>Background sessions a contestant starts by itself (ClaudeOS grading or coaching) are not counted.</p></details>
+</main><script>
 const $=s=>document.querySelector(s);
 const api=async(p,body)=>{const r=await fetch(p,body===undefined?{}:{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!r.ok||j.error)throw new Error(j.error||'Request failed');return j;};
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const number=n=>n==null?'—':Number(n).toLocaleString(),duration=n=>n==null?'—':(n/1000).toFixed(1)+'s';
-let state,busy=false,initialized=false;
-const say=(s,error=false)=>{$('#msg').textContent=s;$('#msg').className=error?'error':'';};
-const columns=[['Status',s=>s.error||s.metrics.status],['Model',s=>s.metrics.model||'—'],['Effort',s=>s.metrics.effort||'—'],['Elapsed',s=>s.startedAt?duration(s.metrics.elapsedMs):'—'],['First response',s=>duration(s.metrics.firstMs)],['Model calls',s=>number(s.metrics.calls)],['Tool calls',s=>number(s.metrics.tools)],['Tool errors',s=>number(s.metrics.toolErrors)],['Research tool calls',s=>number(Object.entries(s.metrics.toolNames||{}).filter(([k])=>/search|fetch|browse/i.test(k)).reduce((n,[,v])=>n+v,0))],['Fresh input tokens',s=>number(s.metrics.tokens.fresh)],['Cached input tokens',s=>number(s.metrics.tokens.cacheRead)],['Output tokens',s=>number(s.metrics.tokens.output)],['Total tokens',s=>number(s.metrics.tokens.total)],['Peak context',s=>number(s.metrics.contextPeak)],['Working folder',s=>s.metrics.cwdOk==null?'Unverified':s.metrics.cwdOk?'Matched':'MISMATCH'],['Files changed',s=>number(s.metrics.disk?s.metrics.disk.created+s.metrics.disk.changed+s.metrics.disk.deleted:null)],['Quality',s=>!s.score?'—':!s.score.pass?'FAIL':s.score.parts?.lookBy==='pending'?'Pending':s.score.quality==null?'Not measured':s.score.quality+'/100']];
-function draw(){const r=state?.round;if(!initialized&&state){for(const t of state.tasks||[])$('#template').add(new Option('Example: '+t,'task:'+t));initialized=true;if(r?.prompt&&!$('#prompt').value)$('#prompt').value=r.prompt;}document.querySelectorAll('[data-pair]').forEach(b=>{b.disabled=busy||!!r?.grading||!!r?.runId&&!r.saved;b.classList.toggle('on',r?.pair===b.dataset.pair);});$('#run').disabled=busy||!r||!!r.runId;$('#stop').disabled=busy||!r?.runId||r.saved;if(!r)return;
-$('#setup').innerHTML='<div class="paths">'+r.sides.map(s=>`<div class="card"><b>${esc(s.name)}</b><code class="path">${esc(s.dir)}</code><button data-copy="${esc(s.dir)}">Copy folder</button> <button data-open="${esc(s.id)}">Open folder</button></div>`).join('')+'</div><p class="dim">Brain: '+esc(r.context?.brainName||'—')+' · Permissions: '+esc(r.context?.mode||'default')+' · ClaudeOS '+esc(r.context?.version||'')+'</p>';
-$('#metrics').innerHTML='<tr><th>Measurement</th>'+r.sides.map(s=>'<th>'+esc(s.name)+'</th>').join('')+'</tr>'+columns.map(([k,fn])=>'<tr><td>'+k+'</td>'+r.sides.map(s=>'<td>'+esc(fn(s))+'</td>').join('')+'</tr>');
-$('#verdict').innerHTML=r.saved?'<div class="card">'+esc(r.grading||r.gradeError||r.verdict?.why||'Recorded.')+(r.blind?' <a href="/benchmark/vote?run='+encodeURIComponent(r.runId)+'">Blind vote</a>':'')+' · <a href="/benchmark/report?run='+encodeURIComponent(r.runId)+'">Export report</a></div>':'';
-if($('#retryGrade'))$('#retryGrade').onclick=()=>action(()=>api('/api/grade',{}));
-const other=r.sides.find(s=>s.via==='paste');$('#manual').innerHTML=r.runId?'<button id="copyPrompt">Copy tagged prompt for '+esc(other.name)+'</button>':'';if($('#copyPrompt'))$('#copyPrompt').onclick=()=>copy(other.tag+'\n\n'+r.prompt);}
-async function copy(text){try{await navigator.clipboard.writeText(text);say('Copied.');}catch{say('Clipboard unavailable. Select and copy manually.',true);}}
+const number=n=>n==null?'—':Math.round(Number(n)).toLocaleString(),duration=n=>n==null?'—':n<90e3?(n/1000).toFixed(1)+'s':(n/60000).toFixed(1)+' min';
+let state=null,busy=false,init=false,opened=new Set();
+const say=(s,error=false)=>{$('#msg').textContent=s||'';$('#msg').className=error?'error':'';};
+const startChoice=()=>document.querySelector('input[name=start]:checked').value;
+const contestant=id=>(state?.contestants||[]).find(c=>c.id===id);
+const stuck=s=>s.via==='window'&&!s.waiting&&s.startedAt&&s.metrics.status==='waiting for log'&&Date.now()-s.startedAt>15000;
+const columns=[['Status',s=>s.error||(s.waiting?'waiting for its turn':stuck(s)?'waiting for you in its window':s.metrics.status)],['Model',s=>s.metrics.model||'—'],['Effort',s=>s.metrics.effort||'—'],['Elapsed',s=>s.startedAt&&!s.waiting?duration(s.metrics.elapsedMs):'—'],['First response',s=>duration(s.metrics.firstMs)],['Model calls',s=>number(s.metrics.calls)],['Tool calls',s=>number(s.metrics.tools)],['Tool errors',s=>number(s.metrics.toolErrors)],['Fresh input tokens',s=>number(s.metrics.tokens?.fresh)],['Cached input tokens',s=>number(s.metrics.tokens?.cacheRead)],['Output tokens',s=>number(s.metrics.tokens?.output)],['Total tokens',s=>number(s.metrics.tokens?.total)],['Peak context',s=>number(s.metrics.contextPeak)],['Working folder',s=>s.metrics.cwdOk==null?'—':s.metrics.cwdOk?'Matched':'MISMATCH'],['Files changed',s=>number(s.metrics.disk?s.metrics.disk.created+s.metrics.disk.changed+s.metrics.disk.deleted:null)],['Quality',s=>!s.score?'—':!s.score.pass?'FAIL':s.score.parts?.lookBy==='pending'?'Pending':s.score.quality==null?'Not measured':s.score.quality+'/100']];
+function setupForm(){
+  const list=state.contestants||[];
+  const opts=list.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
+  $('#a').innerHTML=opts;$('#b').innerHTML=opts;
+  const cfg=state.round?.config;
+  const active=list.find(c=>c.via==='claudeos'&&c.active)||list.find(c=>c.via==='claudeos');
+  $('#a').value=cfg?.a||active?.id||list[0]?.id||'';
+  $('#b').value=cfg?.b||list.find(c=>c.id==='desktop-claude')?.id||list.find(c=>c.id!==$('#a').value)?.id||'';
+  $('#task').innerHTML=(state.tasks||[]).map(t=>`<option>${esc(t)}</option>`).join('');
+  const d=state.defaults?.options||{};
+  const set=cfg?.settings||{};
+  $('#model').value=set.model??d.model??'';$('#effort').value=set.effort??d.effort??'';$('#mode').value=set.mode??state.defaults?.mode??'';
+  $('#codexModel').value=set.codexModel??d.codexModel??'';$('#codexEffort').value=set.codexEffort??d.codexEffort??'';
+  if(cfg){$('#repeats').value=String(cfg.repeats||1);document.querySelector(`input[name=order][value=${cfg.order||'together'}]`).checked=true;
+    const st=cfg.start||'';if(st.startsWith('task:')){document.querySelector('input[name=start][value=task]').checked=true;$('#task').value=st.slice(5);}else if(st.startsWith('folder:')){document.querySelector('input[name=start][value=folder]').checked=true;$('#start-folder').value=st.slice(7);}}
+  if(state.round?.prompt)$('#prompt').value=state.round.prompt;
+  notes();
+}
+function notes(){
+  const A=contestant($('#a').value),B=contestant($('#b').value);
+  $('#a-note').textContent=A?.note||(A?.via==='claudeos'?'A chat in this brain, with its team, memory and skills. Opens in a viewer window.':'');
+  $('#b-note').textContent=B?.note||(B?.via==='claudeos'?'A chat in this brain, with its team, memory and skills. Opens in a viewer window.':'');
+  $('#family').textContent=A&&B&&A.engine!==B.engine?'These use different model families (Claude vs GPT): compare time and the result, not token counts.':A&&B&&A.id===B.id?'Pick two different contestants.':'';
+  $('#codex-row').hidden=!(A?.engine==='codex'||B?.engine==='codex');
+  const both=A?.via==='claudeos'&&B?.via==='claudeos';
+  document.querySelector('input[name=order][value=together]').disabled=both;
+  if(both)document.querySelector('input[name=order][value=sequence]').checked=true;
+  const m=$('#mode').value;
+  $('#mode-note').textContent=(both?'Two ClaudeOS brains take turns: ClaudeOS runs one benchmark chat at a time. ':'')+(m===''?'With "Ask me", each side stops to ask before acting: answer in its window.':m==='bypassPermissions'?'Full access: both act without asking, on their own copy of the files.':'');
+}
+function live(){
+  const r=state.round;
+  if(!r){$('#live').innerHTML='';return;}
+  const running=!!r.runId&&!r.saved;
+  const series=state.series;
+  const head=`<h2>${running?'Running':r.saved?'Latest round':'Ready'}${series&&series.total>1?` · round ${series.n} of ${series.total}${series.stopped?' (stopped)':''}`:''}</h2>`;
+  const cards='<div class="sides">'+r.sides.map(s=>`<div class="card"><b>${esc(s.name)}</b><div class="dim">${esc(s.error||(s.waiting?'Waiting for its turn':s.start||'Not started'))}</div>${stuck(s)?'<div class="warn">It is waiting for you in its window. The first time, it asks whether to trust the benchmark folder: choose Yes. With “Ask me” it also asks before acting.</div>':''}<div class="path">${esc(s.dir)}</div><div class="row">${s.via==='claudeos'&&r.runId?`<button data-watch="${esc(s.id)}">Show its window</button>`:''}<button data-open="${esc(s.id)}">Open folder</button></div></div>`).join('')+'</div>';
+  const table='<div class="table"><table><tr><th>Measurement</th>'+r.sides.map(s=>'<th>'+esc(s.name)+'</th>').join('')+'</tr>'+columns.map(([k,fn])=>'<tr><td>'+k+'</td>'+r.sides.map(s=>'<td>'+esc(fn(s))+'</td>').join('')+'</tr>').join('')+'</table></div>';
+  const verdict=r.saved?'<div class="card">'+esc(r.grading||r.gradeError||r.verdict?.why||'Recorded.')+(r.blind?' · <a href="/benchmark/vote?run='+encodeURIComponent(r.runId)+'">Blind vote</a>':'')+' · <a href="/benchmark/report?run='+encodeURIComponent(r.runId)+'">Export report</a></div>':'';
+  let sum='';
+  if(series&&series.total>1&&series.recorded){const S=Object.values(series.sides);sum=`<div class="card"><b>Across ${series.recorded} recorded round${series.recorded===1?'':'s'} (medians)</b><div class="table"><table><tr><th></th>${S.map(x=>`<th>${esc(x.name)}</th>`).join('')}</tr>`+[['Rounds won',x=>x.wins],['Finished',x=>`${x.done}/${x.rounds}`],['Time',x=>duration(x.elapsedMs)],['Fresh input',x=>number(x.fresh)],['Cached input',x=>number(x.cached)],['Output',x=>number(x.output)],['Total tokens',x=>number(x.total)],['Quality',x=>x.quality==null?'—':Math.round(x.quality)+'/100']].map(([k,f])=>`<tr><td>${k}</td>${S.map(x=>`<td>${esc(f(x))}</td>`).join('')}</tr>`).join('')+'</table></div></div>';}
+  $('#live').innerHTML=head+cards+table+verdict+sum;
+}
+function openWatch(id,force){
+  if(!force&&opened.has(state?.round?.runId+id))return;
+  opened.add(state?.round?.runId+id);
+  window.open('/benchmark/watch?side='+encodeURIComponent(id),'bench-'+id);
+}
+function draw(){
+  if(!state)return;
+  if(!init){setupForm();init=true;}
+  const r=state.round,running=!!r?.runId&&(!r.saved||(state.series&&!state.series.stopped&&state.series.n<state.series.total));
+  $('#run').disabled=busy||running;$('#stop').disabled=busy||!running;
+  for(const el of document.querySelectorAll('#a,#b,#model,#effort,#mode,#repeats,#task,#choose'))el.disabled=running;
+  live();
+}
 async function poll(){try{state=await api('/api/state');draw();}catch(e){say(e.message,true);}}
 async function action(fn){busy=true;draw();try{await fn();}catch(e){say(e.message,true);}finally{busy=false;await poll();}}
-document.querySelectorAll('[data-pair]').forEach(b=>b.onclick=()=>action(async()=>{const r=await api('/api/prepare',{pair:b.dataset.pair,template:$('#template').value});if(r.prompt)$('#prompt').value=r.prompt;say('Ready. Open a new chat in the other app using its folder above.');}));
-$('#run').onclick=()=>action(async()=>{if(!$('#prompt').value.trim())throw new Error('Write a prompt first.');say('Starting comparison…');const r=await api('/api/run',{prompt:$('#prompt').value,autoSend:$('#auto').checked});say(r.results.map(s=>s.name+': '+(s.error||s.start)).join('\n'),r.results.some(s=>s.error));});
-$('#stop').onclick=()=>action(async()=>{const r=await api('/api/stop',{});say(r.note);});$('#prompt').onkeydown=e=>{if(e.ctrlKey&&e.key==='Enter'&&!$('#run').disabled)$('#run').click();};document.addEventListener('click',e=>{const c=e.target.closest('[data-copy]');if(c)copy(c.dataset.copy);const o=e.target.closest('[data-open]');if(o)action(()=>api('/api/open',{id:o.dataset.open}));});setInterval(()=>{if(!document.hidden)poll();},1500);poll();
+$('#a').onchange=$('#b').onchange=$('#mode').onchange=notes;
+$('#task').onchange=()=>{document.querySelector('input[name=start][value=task]').checked=true;};
+document.querySelectorAll('input[name=start]').forEach(r=>r.onchange=()=>{if(r.value==='task'&&r.checked)$('#prompt').value='';});
+$('#choose').onclick=()=>action(async()=>{say('Choose the project folder in the window that opened…');const r=await api('/api/pick-folder',{});if(r.folder){$('#start-folder').value=r.folder;document.querySelector('input[name=start][value=folder]').checked=true;say('');}else say('No folder chosen.');});
+$('#run').onclick=()=>action(async()=>{
+  const choice=startChoice();
+  if(choice==='folder'&&!$('#start-folder').value)throw new Error('Choose the project folder first.');
+  const start=choice==='task'?'task:'+$('#task').value:choice==='folder'?'folder:'+$('#start-folder').value:'';
+  const settings={model:$('#model').value,effort:$('#effort').value,mode:$('#mode').value,codexModel:$('#codexModel').value.trim(),codexEffort:$('#codexEffort').value};
+  say(choice==='folder'?'Copying your project for both sides…':'Getting both sides ready…');
+  const p=await api('/api/prepare',{a:$('#a').value,b:$('#b').value,start,settings,order:document.querySelector('input[name=order]:checked').value,repeats:Number($('#repeats').value)});
+  if(p.prompt&&!$('#prompt').value.trim())$('#prompt').value=p.prompt;
+  if(!$('#prompt').value.trim())throw new Error('Write what both should do first.');
+  say('Starting…');
+  const r=await api('/api/run',{prompt:$('#prompt').value});
+  await poll();
+  for(const id of r.watch||[])openWatch(id);
+  say(r.results.map(s=>s.name+': '+(s.error||s.start)).join('\n'),r.results.some(s=>s.error));
+});
+$('#stop').onclick=()=>action(async()=>{const r=await api('/api/stop',{});say(r.note);});
+$('#prompt').onkeydown=e=>{if(e.ctrlKey&&e.key==='Enter'&&!$('#run').disabled)$('#run').click();};
+document.addEventListener('click',e=>{const o=e.target.closest('[data-open]');if(o)action(()=>api('/api/open',{id:o.dataset.open}));const w=e.target.closest('[data-watch]');if(w)openWatch(w.dataset.watch,true);});
+setInterval(()=>{if(!document.hidden)poll();},1500);poll();
 </script></body></html>

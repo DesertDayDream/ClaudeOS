@@ -14,6 +14,9 @@ async function run() {
     await import('./approval-mcp.mjs');
   } else if (sub === 'computer-mcp') {
     await import('./computer-mcp.mjs');
+  } else if (sub === 'bench-window') {
+    process.argv.splice(2, 1); // the job file is argv[2]
+    await import('./bench-window.mjs');
   } else if (process.argv.some(a => /conpty_console_list_agent/.test(a))) {
     // node-pty forks this helper (as our own exe) to list a console's processes; with the bundled
     // ConPTY it shouldn't, but if it does, answer with just the shell instead of starting a second ClaudeOS

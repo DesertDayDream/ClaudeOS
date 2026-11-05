@@ -13,7 +13,7 @@ import { createTasks } from '../grader/tasks.mjs';
 import { scoreSide, verdict, replyRule } from '../grader/scoring.mjs';
 import { createHarbor } from '../harbor/runner.mjs';
 
-export function createBenchmark({ kit, dataDir, port, token, context, start, stop, harbor: harborDeps = {} }) {
+export function createBenchmark({ kit, dataDir, port, token, context, start, stop, environments, launcher, watch, harbor: harborDeps = {} }) {
 const { listTasks, loadTask } = createTasks(path.join(kit, 'tasks'));
 const require = createRequire(path.join(kit, 'package.json'));
 let web = null, judge = null; // loaded on first use (Playwright is only needed for web tasks)
@@ -28,15 +28,7 @@ const DRY = process.env.BENCH_DRY === '1'; // tests: don't touch windows or the 
 const NOWIN = DRY || process.env.BENCH_NO_WINDOWS === '1'; // tests: don't move or type into windows
 
 const { contestants } = JSON.parse(fs.readFileSync(path.join(kit, 'contestants.json'), 'utf8'));
-const APP = { // how to reach each contestant
-  'claudeos-claude': { engine: 'claude', via: 'claudeos' },
-  'claudeos-codex': { engine: 'codex', via: 'claudeos' },
-  'claude-desktop': { engine: 'claude', via: 'paste', proc: 'claude' },
-  'chatgpt': { engine: 'codex', via: 'paste', proc: 'ChatGPT' },
-};
 const JUDGE_FOR = { claude: 'codex', codex: 'claude' }; // the judge comes from the other model family
-const PAIRS = { claude: ['claudeos-claude', 'claude-desktop'], codex: ['claudeos-codex', 'chatgpt'] };
-const TEMPLATES = [''];
 const nameOf = id => contestants.find(c => c.id === id)?.name || id;
 
 fs.mkdirSync(LIVE, { recursive: true });
@@ -51,93 +43,167 @@ const harbor = createHarbor({ kit, home: path.join(LIVE, 'harbor'), loadPty: har
   harness: harborDeps.harness || (() => ({ error: 'Harbor benchmarks need the ClaudeOS app.' })),
   gradeWeb: async (...a) => (await webGrader()).gradeWeb(...a) });
 
-// ---------- windows ----------
-function ps(file, args, timeout = 60e3) {
-  if (NOWIN) return { ok: true, out: 'DRY' };
-  const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, ...args], { encoding: 'utf8', timeout, windowsHide: true });
-  const out = `${r.stdout || ''}${r.stderr || ''}`.trim();
-  return { ok: r.status === 0, out };
+// ---------- the environments that can compete ----------
+// Every ClaudeOS brain (Claude or Codex engine), and the user's own Claude Code / Codex setup
+// (what Claude Desktop's Code tab and the Codex app run), each in a window of its own.
+function contestantList() {
+  const e = environments ? environments() : { brains: [], claude: null, codex: null };
+  const list = [];
+  for (const b of e.brains) list.push({ id: `claudeos:${b.id}`, name: `ClaudeOS · ${b.name}`, engine: 'claude', via: 'claudeos', brainId: b.id, active: b.active });
+  if (e.claude) list.push({ id: 'desktop-claude', name: 'Claude Desktop settings', engine: 'claude', via: 'window',
+    note: 'Claude Code with your own setup (plugins, MCP servers, skills, CLAUDE.md, sign-in), in its own window. The first time, answer its question about trusting the benchmark folder.' });
+  if (e.codex) {
+    for (const b of e.brains) list.push({ id: `claudeos-codex:${b.id}`, name: `ClaudeOS · ${b.name} (Codex engine)`, engine: 'codex', via: 'claudeos', brainId: b.id });
+    list.push({ id: 'desktop-codex', name: 'Codex settings', engine: 'codex', via: 'window', note: 'Codex with your own setup and ChatGPT sign-in, in its own window' });
+  }
+  return list;
 }
-const arrange = () => ({ok: true, out: 'Use the folder shown below in a new chat in the other app.'});
+
+// ---------- the contestants' own windows ----------
+const winFile = (s, ext) => path.join(LIVE, `window-${s.id}.${ext}`);
+function closeWindows(r) {
+  for (const s of r?.sides || []) {
+    if (s.via !== 'window') continue;
+    let pid = 0; try { pid = Number(fs.readFileSync(winFile(s, 'pid'), 'utf8')); } catch { /* never opened */ }
+    if (pid && !NOWIN) spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => {});
+    fs.rmSync(winFile(s, 'pid'), { force: true });
+  }
+}
+// Claude Code or Codex, started with the user's own setup in a console window of its own
+function startWindow(side, text) {
+  const e = environments ? environments() : {};
+  const cli = side.engine === 'codex' ? e.codex : e.claude;
+  if (!cli) throw new Error(`${side.engine === 'codex' ? 'Codex' : 'Claude Code'} isn't installed. Install it from Apps → Accounts.`);
+  const o = side.options || {}, mode = side.mode || '';
+  const args = side.engine === 'codex'
+    ? [...(o.codexModel ? ['-m', o.codexModel] : []), ...(o.codexEffort ? ['-c', `model_reasoning_effort="${o.codexEffort}"`] : []),
+       ...(mode === 'bypassPermissions' ? ['--dangerously-bypass-approvals-and-sandbox'] : mode === 'plan' ? ['-s', 'read-only'] : mode ? ['--full-auto'] : []), text]
+    : [...(o.model ? ['--model', o.model] : []), ...(o.effort ? ['--effort', o.effort] : []), ...(mode ? ['--permission-mode', mode] : []), text];
+  const job = { title: `Benchmark ${side.id}: ${side.name}`, command: cli.command, args: [...cli.args, ...args], env: cli.env || {}, cwd: side.dir, pidFile: winFile(side, 'pid') };
+  fs.writeFileSync(winFile(side, 'json'), JSON.stringify(job));
+  if (NOWIN) return 'DRY';
+  if (!launcher) throw new Error('This ClaudeOS build cannot open benchmark windows.');
+  const q = s => `"${String(s).replace(/"/g, '')}"`;
+  // `start` gives it a console window of its own; the helper then runs the program with the exact arguments
+  const line = ['start', q(job.title), '/D', q(side.dir), q(launcher.command), ...launcher.args.map(q), q(winFile(side, 'json'))].join(' ');
+  spawn('cmd.exe', ['/d', '/s', '/c', `"${line}"`], { windowsVerbatimArguments: true, windowsHide: true, stdio: 'ignore', detached: true }).unref();
+  return 'opened its window';
+}
 
 // ---------- fresh folders ----------
-function prepare({ pair, template = '' }) {
-  if (!context()) return {error: 'Select a brain in ClaudeOS first.'};
-  if (!PAIRS[pair]) return { error: 'Unknown pair.' };
-  let task = null;
-  if (template.startsWith('task:')) { task = loadTask(template.slice(5)); if (!task) return { error: 'Unknown task.' }; template = ''; }
-  if (!TEMPLATES.includes(template)) return { error: 'Unknown starting files.' };
-  if (round?.runId && !round.saved) return {error: 'Stop or finish the current round first.'};
-  if (round?.grading) return {error: 'Wait for grading to finish.'};
+// a copy of the user's project for each side, so the two never touch each other or the original
+const COPY_SKIP = new Set(['node_modules', '.venv', 'venv', '__pycache__', '.next', '.cache']);
+function copyProject(from, to) {
+  let files = 0;
+  fs.cpSync(from, to, { recursive: true, filter: src => {
+    if (COPY_SKIP.has(path.basename(src))) return false;
+    if (++files > 200000) throw new Error('That folder has more than 200,000 files. Pick a smaller one.');
+    return true;
+  } });
+}
+const inside = (child, parent) => { const r = path.relative(parent, child); return r === '' || (!r.startsWith('..') && !path.isAbsolute(r)); };
+function prepare(body = {}) {
+  const list = contestantList(), pick = id => list.find(c => c.id === id);
+  const A = pick(body.a), B = pick(body.b);
+  if (!A || !B) return { error: 'Pick two contestants.' };
+  if (A.id === B.id) return { error: 'Pick two different contestants.' };
+  if (round?.runId && !round.saved) return { error: 'Stop or finish the current round first.' };
+  if (round?.grading) return { error: 'Wait for grading to finish.' };
+  const start = String(body.start || '');
+  let task = null, folder = null;
+  if (start.startsWith('task:')) { task = loadTask(start.slice(5)); if (!task) return { error: 'Unknown task.' }; }
+  else if (start.startsWith('folder:')) {
+    folder = path.resolve(start.slice(7));
+    try { if (!fs.statSync(folder).isDirectory()) throw 0; } catch { return { error: `No such folder: ${folder}` }; }
+    if (inside(LIVE, folder) || inside(folder, LIVE)) return { error: "Pick a project folder outside ClaudeOS's benchmark folder." };
+  } else if (start) return { error: 'Unknown starting files.' };
+  // the same model, effort and permissions for both sides
+  const ctx = context() || {};
+  const set = body.settings || {}, base = ctx.options || {};
+  const options = { model: set.model ?? base.model ?? '', effort: set.effort ?? base.effort ?? '', codexModel: set.codexModel ?? base.codexModel ?? '', codexEffort: set.codexEffort ?? base.codexEffort ?? '' };
+  for (const k of Object.keys(options)) if (!options[k]) delete options[k];
+  const mode = String(set.mode ?? ctx.mode ?? '');
+  // two ClaudeOS chats can't work at once; a single app (an editor, a device) may need one at a time too
+  const order = A.via === 'claudeos' && B.via === 'claudeos' ? 'sequence' : body.order === 'sequence' ? 'sequence' : 'together';
+  const repeats = Math.max(1, Math.min(10, Number(body.repeats) || 1));
+  closeWindows(round);
   if (round?.sides) {
     const archiveId = round.runId || 'prepared-' + crypto.randomUUID();
     for (const side of round.sides) {
       if (!fs.existsSync(side.dir)) continue;
       const dest = path.join(LIVE, 'archive', archiveId, side.id);
-      fs.mkdirSync(path.dirname(dest), {recursive:true});
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
       if (fs.existsSync(dest)) throw new Error('Archive already exists; previous files were preserved.');
       fs.renameSync(side.dir, dest);
     }
   }
-  const sides = PAIRS[pair].map(id => {
-    const dir = path.join(LIVE, id);
-    if (fs.existsSync(dir)) {
-      const archive = path.join(LIVE, 'archive', round?.runId || crypto.randomUUID(), id);
-      fs.mkdirSync(path.dirname(archive), {recursive: true});
-      if (!fs.existsSync(archive)) fs.renameSync(dir, archive);
-      else throw new Error('Archive already exists; previous files have been preserved.');
-    }
-    fs.mkdirSync(dir, {recursive: true});
-    if (template) fs.cpSync(path.join(kit, 'template', template), dir, { recursive: true });
-    return { id, name: nameOf(id), dir, engine: APP[id].engine, via: APP[id].via, proc: APP[id].proc || null, baseline: snapshotDir(dir) };
+  // a repeat alternates who goes first
+  const flip = order === 'sequence' && body.flip;
+  const sides = (flip ? [B, A] : [A, B]).map(c => {
+    const id = c === A ? 'A' : 'B', dir = path.join(LIVE, `side-${id}`);
+    fs.rmSync(dir, { recursive: true, force: true });
+    if (folder) copyProject(folder, dir); else fs.mkdirSync(dir, { recursive: true });
+    return { id, name: c.name, contestant: c.id, dir, engine: c.engine, via: c.via, brainId: c.brainId || null, options, mode, baseline: snapshotDir(dir) };
   });
-  round = { context: context(), accounting: 'Matched session and Claude native subagents only. Separate employee, coaching and judge sessions are not included. Token counts are usage, not subscription charges.', pair, template, task: task?.id || null, preparedAt: Date.now(), runId: null, prompt: '', sides, saved: false, notes: [] };
+  const config = { a: A.id, b: B.id, start, settings: { ...options, mode }, order, repeats };
+  const series = body.series || { id: crypto.randomBytes(4).toString('hex'), total: repeats, n: 1, prompt: '' };
+  round = { context: ctx, config, series, accounting: 'Every Claude Code / Codex session tagged for this round, with its native subagents. Background sessions a contestant starts on its own (grading, coaching) are not included. Token counts are usage, not subscription charges.',
+    pair: A.engine, template: '', task: task?.id || null, folder, order, preparedAt: Date.now(), runId: null, prompt: '', sides, saved: false, notes: [] };
   save();
-  const w = arrange(pair);
-  log('prepared', pair, task ? 'task ' + task.id : template || '(empty)', w.out);
-  return { ok: true, arranged: w.ok, arrangeOutput: w.out, prompt: task?.prompt || null };
+  log('prepared', A.id, 'vs', B.id, task ? 'task ' + task.id : folder || '(empty)', order, `x${repeats}`);
+  return { ok: true, prompt: task?.prompt || null, order };
 }
 
 // ---------- starting the contestants ----------
-async function startClaudeOS(side, text) {
-  if (DRY) return 'DRY';
-  return await start(side, text, round.context);
+async function startSide(s, text) {
+  if (s.via === 'claudeos') return DRY ? 'DRY' : await start(s, text, round.context);
+  return startWindow(s, text);
 }
-function startPaste(side, text, auto) {
-  if (!auto) return 'waiting for you to send the tagged prompt';
-  const file = path.join(LIVE, `prompt-${side.id}.txt`);
-  fs.writeFileSync(file, text);
-  if (NOWIN) return 'DRY';
-  const r = ps(path.join(here, 'paste.ps1'), ['-Proc', side.proc, '-TextFile', file, ...(auto ? [] : ['-NoEnter'])], 20e3);
-  if (/NOWINDOW/.test(r.out)) throw new Error(`${side.name} isn't open.`);
-  if (/NOFOCUS/.test(r.out)) throw new Error(`Couldn't bring ${side.name} to the front. The prompt is on the clipboard: click its message box, Ctrl+V, Enter.`);
-  if (!r.ok) throw new Error(r.out || 'paste failed');
-  return auto ? 'pasted + sent' : 'pasted (press Enter)';
+async function launch(s) {
+  s.waiting = false;
+  s.startedAt = Date.now();
+  try { s.start = await startSide(s, `${s.tag}\n\n${round.prompt}`); }
+  catch (e) { s.start = 'failed'; s.error = e.message; s.failed = true; }
+  save();
+  return { name: s.name, start: s.start, error: s.error || null };
 }
-async function run({ prompt, autoSend = true }) {
+async function run({ prompt }) {
   prompt = String(prompt || '').trim();
-  if (!round) return { error: 'Pick a pair first.' };
-  if (context()?.brainId !== round.context?.brainId) return {error: 'The active brain changed. Prepare a new pair.'};
-  if (prompt.length > 80000) return {error: 'Prompt exceeds 80,000 characters.'};
-  if (round.context == null) return {error: 'Prepare a new pair.'};
+  if (!round) return { error: 'Pick the contestants first.' };
+  if (prompt.length > 80000) return { error: 'Prompt exceeds 80,000 characters.' };
   if (!prompt) return { error: 'Write a prompt first.' };
-  if (round.runId) return { error: 'This round already ran. Press a pair button for a fresh round.' };
+  if (round.runId) return { error: 'This round already ran. Press Run for a fresh round.' };
   const d = new Date(), pad = n => String(n).padStart(2, '0');
   round.runId = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}-${crypto.randomBytes(3).toString('hex')}`;
   round.prompt = prompt;
+  round.series.prompt = prompt;
+  for (const s of round.sides) { s.tag = `Benchmark run ${round.runId}-${s.id}.`; s.waiting = true; }
   const results = [];
-  for (const s of round.sides) {
-    s.tag = `Benchmark run ${round.runId}-${s.id}.`;
-    s.startedAt = Date.now();
-    const text = `${s.tag}\n\n${prompt}`;
-    if (s.via === 'paste' && round.sides.find(x => x.via === 'claudeos')?.failed) {s.start = 'failed'; s.failed = true; s.error = 'ClaudeOS did not start; comparison was not sent.'; results.push({name:s.name,start:s.start,error:s.error}); continue;}
-    try { s.start = s.via === 'claudeos' ? await startClaudeOS(s, text) : startPaste(s, text, autoSend); }
-    catch (e) { s.start = 'failed'; s.error = e.message; s.failed = true; }
-    results.push({ name: s.name, start: s.start, error: s.error || null });
-  }
+  if (round.order === 'sequence') results.push(await launch(round.sides[0]));
+  else for (const s of round.sides) results.push(await launch(s));
   save();
   log('run', round.runId, JSON.stringify(results));
-  return { ok: true, runId: round.runId, results };
+  return { ok: true, runId: round.runId, results, watch: round.sides.filter(s => s.via === 'claudeos').map(s => s.id) };
+}
+// one after the other: the next side starts when the one before it has finished
+let advancing = false;
+async function advance() {
+  if (advancing || !round?.runId || round.saved) return;
+  const next = round.sides.find(s => s.waiting);
+  if (!next) return;
+  const before = round.sides.slice(0, round.sides.indexOf(next));
+  if (!before.every(s => s.failed || ['done', 'failed'].includes(cache.get(s.id)?.metrics?.status))) return;
+  advancing = true;
+  try { closeWindows({ sides: before }); await launch(next); } finally { advancing = false; }
+}
+// repeats: once a round is recorded and graded, the next one starts with fresh copies
+async function repeat() {
+  const r = round;
+  if (!r?.saved || r.grading || !r.series || r.series.stopped || r.series.n >= r.series.total) return;
+  const series = { ...r.series, n: r.series.n + 1 };
+  const p = prepare({ ...r.config, series, flip: series.n % 2 === 0 });
+  if (p.error) { r.series.stopped = true; r.notes.push('Repeats stopped: ' + p.error); save(); return; }
+  await run({ prompt: series.prompt });
 }
 
 // ---------- live state ----------
@@ -187,9 +253,9 @@ function rescore(r) { // r: the live round, or a saved record (whose sides carry
 function record(r, rows) {
   const sides = r.sides.map((s, i) => {
     const metrics = rows ? rows[i] : { id: s.id, name: s.name, ...(s.final || {}), grade: s.grade, error: s.error || null };
-    return { ...metrics, settings: {engine:s.engine, permissionMode:r.context?.mode, tools:{}}, evidence: s.evidence || null, score: s.score, web: s.web ? { ...s.web, shots: undefined } : null };
+    return { ...metrics, settings: {engine:s.engine, contestant:s.contestant || s.id, options:s.options || null, permissionMode:s.mode ?? r.context?.mode, tools:{}}, evidence: s.evidence || null, score: s.score, web: s.web ? { ...s.web, shots: undefined } : null };
   });
-  return { context: r.context, accounting: r.accounting, runId: r.runId, at: Date.now(), pair: r.pair, template: r.template, task: r.task || null, prompt: r.prompt, ended: r.ended, grading: r.grading || null,
+  return { context: r.context, accounting: r.accounting, runId: r.runId, at: Date.now(), series: r.series ? { id: r.series.id, n: r.series.n, total: r.series.total } : null, config: r.config || null, pair: r.pair, template: r.template, task: r.task || null, prompt: r.prompt, ended: r.ended, grading: r.grading || null,
     gradeError: r.gradeError || null, judge: r.judge || null, vote: r.vote || null, blind: r.blind || null, verdict: r.verdict || null, sides };
 }
 function readResults() { return fs.existsSync(resultsFile) ? fs.readFileSync(resultsFile, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)) : []; }
@@ -220,7 +286,7 @@ function findRound(runId) { // the live round, or a saved one
   const rec = readResults().find(x => x.runId === runId);
   return rec ? { live: false, r: rec } : null;
 }
-const names = r => Object.fromEntries(Object.entries(r.blind).map(([k, id]) => [k, nameOf(id)]));
+const names = r => Object.fromEntries(Object.entries(r.blind).map(([k, id]) => [k, r.sides.find(x => x.id === id)?.name || nameOf(id)]));
 function voteInfo(runId) {
   const f = findRound(runId);
   if (!f) return { error: 'Unknown round.' };
@@ -255,7 +321,8 @@ function serveBlind(res, parts) { // /shot/<run>/<A|B>/<view>.png  and  /site/<r
   fs.createReadStream(file).pipe(res);
 }
 function state() {
-  if (!round) return { round: null, templates: TEMPLATES, tasks: listTasks(), pairs: Object.fromEntries(Object.entries(PAIRS).map(([k, v]) => [k, v.map(nameOf)])) };
+  const base = { tasks: listTasks(), contestants: contestantList(), defaults: context() || null };
+  if (!round) return { round: null, ...base };
   const sides = round.sides.map(sideView);
   if (round.runId && !round.saved && sides.every(s => ['done', 'failed'].includes(s.metrics.status))) finish('both done');
   for (const s of sides) {
@@ -263,14 +330,41 @@ function state() {
     s.grade = o?.grade || null; s.score = o?.score || null; s.web = o?.web ? { F: o.web.F, R: o.web.R } : null; delete s.final;
   }
   const { sides: _, ...r } = round;
-  return { round: { ...r, sides, replyRule: replyRule(round.prompt, round.task ? loadTask(round.task)?.checks : null) }, templates: TEMPLATES, tasks: listTasks(), pairs: Object.fromEntries(Object.entries(PAIRS).map(([k, v]) => [k, v.map(nameOf)])) };
+  return { round: { ...r, sides, replyRule: replyRule(round.prompt, round.task ? loadTask(round.task)?.checks : null) }, series: seriesSummary(round.series), ...base };
 }
 async function stopRound() {
   if (!round?.runId) return { error: 'Nothing is running.' };
-  const left = round.sides.find(s => s.via === 'claudeos');
-  if (left && !DRY) await stop(left).catch(() => {});
+  if (round.series) round.series.stopped = true;
+  if (round.saved) { save(); return { ok: true, note: 'Repeats stopped.' }; }
+  for (const s of round.sides) if (s.via === 'claudeos' && s.chatId && !DRY) await stop(s).catch(() => {});
+  for (const s of round.sides) if (s.waiting) { s.waiting = false; s.failed = true; s.error = 'Not started: stopped by you.'; }
+  closeWindows(round);
   finish('stopped by you');
-  return { ok: true, note: `Stop ${round.sides.find(s => s.via === 'paste')?.name} yourself if it's still working.` };
+  return { ok: true, note: 'Stopped. Their windows are closed and both folders are kept.' };
+}
+// medians over the rounds of one series (the repeats of one comparison)
+function seriesSummary(series) {
+  if (!series) return null;
+  const rows = readResults().filter(x => x.series?.id === series.id);
+  const med = a => { const v = a.filter(n => typeof n === 'number').sort((x, y) => x - y); return v.length ? (v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2) : null; };
+  const by = {};
+  for (const r of rows) for (const sd of r.sides) {
+    const b = by[sd.id] ||= { name: sd.name, rounds: 0, done: 0, elapsed: [], fresh: [], cached: [], output: [], total: [], quality: [], wins: 0 };
+    b.rounds++; if (sd.status === 'done') b.done++;
+    b.elapsed.push(sd.elapsedMs); b.fresh.push(sd.tokens?.fresh); b.cached.push(sd.tokens?.cacheRead); b.output.push(sd.tokens?.output); b.total.push(sd.tokens?.total);
+    if (sd.score?.quality != null) b.quality.push(sd.score.quality);
+    if (r.verdict?.winner === sd.id) b.wins++;
+  }
+  const out = Object.fromEntries(Object.entries(by).map(([k, b]) => [k, { name: b.name, rounds: b.rounds, done: b.done, wins: b.wins,
+    elapsedMs: med(b.elapsed), fresh: med(b.fresh), cached: med(b.cached), output: med(b.output), total: med(b.total), quality: med(b.quality) }]));
+  return { id: series.id, n: series.n, total: series.total, stopped: !!series.stopped, recorded: rows.length, sides: out };
+}
+// Windows' own folder picker, for "a copy of my project"
+function pickFolder() {
+  if (NOWIN) return { ok: true, folder: '' };
+  const script = 'Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = "Pick the project both contestants get a copy of"; $d.ShowNewFolderButton = $false; $f = New-Object System.Windows.Forms.Form; $f.TopMost = $true; if ($d.ShowDialog($f) -eq "OK") { [Console]::Out.Write($d.SelectedPath) }';
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-STA', '-Command', script], { encoding: 'utf8', timeout: 10 * 60e3, windowsHide: false });
+  return { ok: true, folder: String(r.stdout || '').trim() };
 }
 
 // ---------- http ----------
@@ -293,7 +387,10 @@ function report(res, id) {
   res.setHeader('content-disposition', `attachment; filename="benchmark-${r.runId}.html"`);
   return send(res, 200, `<!doctype html><meta charset="utf-8"><title>ClaudeOS Benchmark</title><style>body{font:16px/1.6 system-ui;max-width:1000px;margin:40px auto;padding:20px}pre{white-space:pre-wrap;background:#f1f3f5;padding:20px}h1{font-size:28px}</style><h1>ClaudeOS Benchmark</h1><p>${esc(r.runId)} ? ${esc(r.verdict?.why || 'No final verdict')}</p><p>${esc(r.accounting)}</p><p>Scoring weights are provisional. A custom prompt without task checks does not receive a quality score. Settings in the competing app must be matched manually. This report contains local paths and your prompt; review before sharing.</p><h2>Prompt</h2><pre>${esc(r.prompt)}</pre><h2>Recorded evidence</h2><pre>${esc(evidence)}</pre>`, 'text/html; charset=utf-8');
 }
-const monitor = setInterval(() => { if (round?.runId && !round.saved) { try {state();} catch (e) {log('benchmark monitor', e.message);} } }, 2000);
+const monitor = setInterval(() => {
+  try { if (round?.runId && !round.saved) { state(); advance().catch(e => log('benchmark next side', e.message)); } else repeat().catch(e => log('benchmark repeat', e.message)); }
+  catch (e) { log('benchmark monitor', e.message); }
+}, 2000);
 monitor.unref();
 let mutating = false;
 return { async handle(req, res, url) {
@@ -308,6 +405,8 @@ return { async handle(req, res, url) {
       if (route === '/history') return page(res, 'history.html');
       if (route === '/vote') return page(res, 'vote.html');
       if (route === '/harbor') return page(res, 'harbor.html');
+      if (route === '/watch') return page(res, 'watch.html');
+      if (route === '/api/watch') { const sd = round?.sides.find(x => x.id === url.searchParams.get('side')); if (!sd) return send(res, 404, {error: 'No such contestant in this round.'}); const v = sd.chatId && watch ? watch(sd) : { ok: true, messages: [] }; return send(res, 200, { name: sd.name, side: sd.id, waiting: !!sd.waiting, failed: !!sd.failed, error: sd.error || null, runId: round.runId, ...v }); }
       if (route === '/api/harbor') return send(res, 200, { ...(await harbor.status()), jobs: harbor.listJobs(), tasks: listTasks() });
       if (route === '/report') return report(res, url.searchParams.get('run'));
       if (route === '/api/state') return send(res, 200, state());
@@ -338,6 +437,7 @@ return { async handle(req, res, url) {
         return send(res, 200, {ok:true});
       }
       if (route === '/api/stop') return send(res, 200, await stopRound());
+      if (route === '/api/pick-folder') return send(res, 200, pickFolder());
       if (route === '/api/vote') return send(res, 200, castVote(body));
       if (route === '/api/open') { const s = round?.sides.find(x => x.id === body.id); if (s && !DRY) spawn('explorer.exe', [s.dir], {detached:true, windowsHide:true}).unref(); return send(res, 200, {ok:!!s}); }
       return send(res, 404, {error:'not found'});

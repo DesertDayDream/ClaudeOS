@@ -12,6 +12,13 @@ function appNavigation(value, appUrl) {
     return url.origin === app.origin && url.pathname === '/';
   } catch { return false; }
 }
+// the benchmark's viewer windows: the app's own /benchmark/watch page, opened beside the main window
+function benchWatchUrl(value, appUrl) {
+  try {
+    const url = new URL(value), app = new URL(appUrl);
+    return url.origin === app.origin && url.pathname === '/benchmark/watch';
+  } catch { return false; }
+}
 function windowBounds(saved, displays) {
   const width = Math.min(2400, Math.max(900, Number(saved?.width) || 1400));
   const height = Math.min(1800, Math.max(640, Number(saved?.height) || 900));
@@ -34,4 +41,4 @@ function installerPath(value, fs = require('node:fs')) {
   try { return fs.statSync(file).isFile() ? file : null; } catch { return null; }
 }
 function installerVersion(file) { return (INSTALLER.test(path.basename(file || '')) && /(\d+\.\d+\.\d+)\.exe$/i.exec(file)[1]) || null; }
-module.exports = { externalUrl, appNavigation, windowBounds, backendSpec, installerPath, installerVersion };
+module.exports = { externalUrl, appNavigation, benchWatchUrl, windowBounds, backendSpec, installerPath, installerVersion };

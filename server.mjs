@@ -33,7 +33,7 @@ import { ensureCabinet, findCabinet, cabinetTree } from './cabinets.mjs';
 import { appsInText, appForServer } from './public/apps.js';
 import { CATALOG, CONNECTORS_URL, KEY_HELP, addIntegration, removeIntegration, loginIntegration, isSigningIn, signInLink, cancelLogin, sendLoginRedirect, logoutIntegration, keysFor, saveKey, setPtyLoader } from './integrations.mjs';
 import { createAccounts } from './accounts.mjs';
-import { refreshPath } from './agents.mjs';
+import { refreshPath, findExe } from './agents.mjs';
 import { createRegistry, setupBrain, repairHooks, listFolder, slugFor, samePath, inside } from './brains.mjs';
 import { IS_EXE, helper, memoryServer, hookCommand, templatesDir, pageFile, loadNodePty, appVersion, benchmarkDir } from './runtime.mjs';
 import { startTray } from './tray.mjs';
@@ -1039,16 +1039,23 @@ async function handleApi(req, res, url) {
 const benchmark = createBenchmark({ kit: benchmarkDir(DATA), dataDir: DATA, port: PORT, token: TOKEN,
   context: () => { const b = brains.active(); const c = b && chatFor(b); return b ? {brainId:b.id, brainName:b.name, version:appVersion(), options:c.optionsFor(c.currentId()), mode:c.snapshot().mode || ''} : null; },
   start: async (side, text, ctx) => {
-    const b = brains.find(ctx?.brainId);
-    if (!b || anyBusy()) throw new Error('Finish or stop current work before running a benchmark.');
+    // each ClaudeOS contestant runs in its own brain, with the benchmark's model, effort and permissions
+    const b = brains.find(side.brainId || ctx?.brainId);
+    if (!b) throw new Error('That brain is gone. Pick the contestants again.');
+    if (anyBusy()) throw new Error('Finish or stop current work before running a benchmark.');
     const c = chatFor(b);
-    const options = {...ctx.options, engine:side.engine === 'codex' ? 'codex' : ''};
-    const r = c.startBenchmark({title:'Benchmark - ' + side.tag, prompt:text, folder:side.dir, options, mode:ctx.mode});
+    const options = {...(side.options || ctx.options), engine:side.engine === 'codex' ? 'codex' : ''};
+    const r = c.startBenchmark({title:'Benchmark - ' + side.tag, prompt:text, folder:side.dir, options, mode: side.mode ?? ctx.mode});
     if (r.error) throw new Error(r.error);
     side.brainId = b.id; side.chatId = r.chat;
     return 'started';
   },
   stop: async side => { const b = brains.find(side.brainId); if (b && side.chatId) { managerFor(b).stopChatSpecialists(side.chatId); chatFor(b).stopBenchmark(side.chatId); } },
+  // the environments on this PC a benchmark can compare: every brain in ClaudeOS, and the user's own Claude Code / Codex setup
+  environments: () => ({ brains: brains.list().map(b => ({ id: b.id, name: b.name, active: brains.active()?.id === b.id })),
+    claude: findExe('claude') ? { command: findExe('claude'), args: [], env: {} } : null, codex: codexCommand() }),
+  launcher: helper('bench-window'),
+  watch: side => { const b = brains.find(side.brainId); return b && side.chatId ? chatFor(b).benchmarkSnapshot(side.chatId) : { error: 'Not started yet.' }; },
   // Harbor benchmarks: what a ClaudeOS chat in the active brain gets, for the ClaudeOS contestant's container
   harbor: { loadPty: () => loadNodePty(DATA), harness: () => {
     const b = brains.active();

@@ -32,3 +32,12 @@ test('only a ClaudeOS installer given by full path can be run as an update', () 
   for (const bad of [path.join(dir, 'evil.exe'), path.join(dir, 'ClaudeOS-Setup-1.2.3.exe.cmd'), path.join(dir, 'ClaudeOS-Setup-9.9.9.exe'), 'ClaudeOS-Setup-1.2.3.exe', dir, null, 42]) assert.equal(installerPath(bad), null);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('only the app\'s own benchmark viewer may open as a window', () => {
+  const { benchWatchUrl } = require('./policy.cjs');
+  const app = 'http://127.0.0.1:4788/';
+  assert.equal(benchWatchUrl('http://127.0.0.1:4788/benchmark/watch?side=A', app), true);
+  assert.equal(benchWatchUrl('http://127.0.0.1:4788/benchmark/', app), false);
+  assert.equal(benchWatchUrl('http://127.0.0.1:9999/benchmark/watch?side=A', app), false);
+  assert.equal(benchWatchUrl('https://example.com/benchmark/watch', app), false);
+});
