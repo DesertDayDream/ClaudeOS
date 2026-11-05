@@ -81,6 +81,7 @@ test('embedded routes enforce auth, preserve round files, export escaped evidenc
 async function bench(t, extra = {}) {
   const lab = fs.mkdtempSync(path.join(os.tmpdir(), 'claudeos-bench-env-'));
   process.env.BENCH_HOME = path.join(lab, 'bench'); process.env.BENCH_DRY = '1'; process.env.BENCH_NO_JUDGE = '1';
+  process.env.CLAUDE_CONFIG_DIR ||= path.join(os.tmpdir(), 'claudeos-bench-env-claude'); // when this test runs on its own
   const { createBenchmark } = await import('../benchmark/panel/server.mjs');
   const b = createBenchmark({ kit: path.join(root, 'benchmark'), dataDir: lab, port: 0, token: 'tk', start: async () => {}, stop: async () => {},
     context: () => ({ brainId: 'one', brainName: 'One', mode: '', options: { model: 'sonnet', effort: 'medium', codexModel: 'gpt-x', codexEffort: 'high' } }),
@@ -90,7 +91,7 @@ async function bench(t, extra = {}) {
   t.after(() => { b.close(); server.close(); fs.rmSync(lab, { recursive: true, force: true }); });
   const base = 'http://127.0.0.1:' + server.address().port + '/benchmark';
   const api = async (route, body) => (await fetch(base + route, { headers: { 'x-claudeos-token': 'tk', ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { method: 'POST', body: JSON.stringify(body) } : {}) })).json();
-  return { lab, api, live: path.join(lab, 'bench') };
+  return { lab, api, base, live: path.join(lab, 'bench') };
 }
 function finishedLog(side, i) {
   const logs = path.join(process.env.CLAUDE_CONFIG_DIR, 'projects', 'env-fixture'); fs.mkdirSync(logs, { recursive: true });
@@ -159,4 +160,53 @@ test('two ClaudeOS brains take turns, and a repeat starts fresh with the other o
   assert.equal(s.series.sides.A.rounds, 1); assert.equal(s.series.sides.B.done, 1);
   await api('/api/stop', {});
   assert.equal((await api('/api/state')).series.stopped, true);
+});
+
+test('a copied project that names its own folder is repointed at the copy, so it cannot reach the original', async t => {
+  const { api } = await bench(t);
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'claudeos-bench-relink-'));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const proj = path.join(parent, 'My Game'), other = path.join(parent, 'My Game Old');
+  fs.mkdirSync(path.join(proj, 'brain'), { recursive: true }); fs.mkdirSync(other);
+  const fwd = p => p.replace(/\\/g, '/');
+  fs.writeFileSync(path.join(proj, '.mcp.json'), JSON.stringify({ mcpServers: { memory: { command: 'x', env: { MEMORY_FILE_PATH: fwd(proj) + '/brain/memory.jsonl' } } } }));
+  fs.writeFileSync(path.join(proj, 'CLAUDE.md'), `Memory: ${proj}\\brain\\memory.jsonl\nEscaped: ${JSON.stringify(proj)}\nOther: ${other}\\notes.md\n`);
+  fs.writeFileSync(path.join(proj, 'plain.txt'), 'nothing to change');
+  assert.equal((await api('/api/prepare', { a: 'claudeos:one', b: 'desktop-claude', start: 'folder:' + proj })).ok, true);
+  const s = await api('/api/state');
+  for (const side of s.round.sides) {
+    const mcp = JSON.parse(fs.readFileSync(path.join(side.dir, '.mcp.json'), 'utf8'));
+    assert.equal(mcp.mcpServers.memory.env.MEMORY_FILE_PATH, fwd(side.dir) + '/brain/memory.jsonl');
+    const md = fs.readFileSync(path.join(side.dir, 'CLAUDE.md'), 'utf8');
+    assert.ok(md.includes(`Memory: ${side.dir}\\brain\\memory.jsonl`));
+    assert.ok(md.includes(`Escaped: ${JSON.stringify(side.dir)}`));
+    assert.ok(md.includes(`Other: ${other}\\notes.md`), 'a different folder that merely starts the same way is left alone');
+    assert.deepEqual([...side.relinked].sort(), ['.mcp.json', 'CLAUDE.md']);
+  }
+  assert.match(fs.readFileSync(path.join(proj, '.mcp.json'), 'utf8'), /My Game\/brain/, 'the original is untouched');
+  assert.equal(s.round.sides[0].metrics.disk.changed, 0, 'repointing is not counted as the contestant changing files');
+});
+
+test('after a round, each side shows what it made, without ClaudeOS\'s own CLAUDE.md note, and the cost of its tokens', async t => {
+  const { api, base } = await bench(t);
+  await api('/api/prepare', { a: 'claudeos:one', b: 'desktop-claude' });
+  await api('/api/run', { prompt: 'Build a page.' });
+  let s = await api('/api/state');
+  const [A, B] = s.round.sides;
+  fs.writeFileSync(path.join(A.dir, 'CLAUDE.md'), '<!-- ClaudeOS foundations: begin -->\nDesk tools…\n<!-- ClaudeOS foundations: end -->\n');
+  fs.mkdirSync(path.join(A.dir, 'site')); fs.writeFileSync(path.join(A.dir, 'site', 'index.html'), '<h1>A</h1>'); fs.writeFileSync(path.join(A.dir, 'site', 'style.css'), 'h1{}');
+  fs.writeFileSync(path.join(B.dir, 'page.html'), '<h1>B</h1>');
+  finishedLog(A, 0); finishedLog(B, 1);
+  s = await until(api, x => x.round.saved);
+  const a = s.round.sides.find(x => x.id === 'A'), b = s.round.sides.find(x => x.id === 'B');
+  assert.deepEqual(a.results.map(x => x.file.replace(/\\/g, '/')), ['site/index.html', 'site/style.css']);
+  assert.equal(a.page, 'site/index.html'); assert.equal(b.page, 'page.html');
+  assert.equal(a.metrics.disk.created, 2, 'the CLAUDE.md note ClaudeOS adds is not counted');
+  assert.equal(a.metrics.tokens.cost, 10 + 5 * 5); assert.equal(b.metrics.tokens.cost, 11 + 5 * 5);
+  const history = await api('/api/history');
+  assert.deepEqual(history[0].sides.find(x => x.id === 'A').evidence.map(x => x.file.replace(/\\/g, '/')), ['site/index.html', 'site/style.css'], 'only the files it made are kept as evidence');
+  const ok = await fetch(base + '/result/' + s.round.runId + '/A/site/index.html');
+  assert.equal(ok.status, 200); assert.match(ok.headers.get('content-security-policy'), /sandbox allow-scripts/); assert.equal(await ok.text(), '<h1>A</h1>');
+  assert.equal((await fetch(base + '/result/' + s.round.runId + '/A/..%2F..%2Fstate.json')).status, 404);
+  assert.equal((await fetch(base + '/result/nope/A/site/index.html')).status, 404);
 });

@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { measure, snapshotDir } from './metrics.mjs';
+import { measure, snapshotDir, changedFiles } from './metrics.mjs';
 const graders = {};
 import { createTasks } from '../grader/tasks.mjs';
 import { scoreSide, verdict, replyRule } from '../grader/scoring.mjs';
@@ -100,6 +100,35 @@ function copyProject(from, to) {
     if (++files > 200000) throw new Error('That folder has more than 200,000 files. Pick a smaller one.');
     return true;
   } });
+  return relink(from, to);
+}
+// Settings and notes in the copy that name the original folder (a memory server's file, a project path in
+// CLAUDE.md) would let a contestant read or write the original. They now name the copy instead.
+// Returns the files changed.
+function relink(from, to) {
+  const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const forms = [[from, to], [from.replace(/\\/g, '/'), to.replace(/\\/g, '/')], [from.replace(/\\/g, '\\\\'), to.replace(/\\/g, '\\\\')]]
+    .filter(([f], i, all) => all.findIndex(([g]) => g === f) === i)
+    // only where the folder's name ends: a separator, a quote, punctuation or the end of a line
+    // ("My Game" must not match inside "My Game Old")
+    .map(([f, t]) => [new RegExp(esc(f) + '(?=[\\\\/"\'`,;)\\]}>|\\r\\n]|\\.(?=\\s|$)|$)', 'gi'), t]);
+  const changed = [];
+  let seen = 0;
+  (function walk(dir) {
+    let entries; try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.isSymbolicLink() || e.name === '.git' || COPY_SKIP.has(e.name) || ++seen > 50000) continue;
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { walk(p); continue; }
+      let buf; try { if (fs.statSync(p).size > 2e6) continue; buf = fs.readFileSync(p); } catch { continue; }
+      if (buf.includes(0)) continue;
+      const before = buf.toString('utf8');
+      let after = before;
+      for (const [re, t] of forms) after = after.replace(re, () => t);
+      if (after !== before) { fs.writeFileSync(p, after); changed.push(path.relative(to, p)); }
+    }
+  })(to);
+  return changed;
 }
 const inside = (child, parent) => { const r = path.relative(parent, child); return r === '' || (!r.startsWith('..') && !path.isAbsolute(r)); };
 function prepare(body = {}) {
@@ -142,8 +171,9 @@ function prepare(body = {}) {
   const sides = (flip ? [B, A] : [A, B]).map(c => {
     const id = c === A ? 'A' : 'B', dir = path.join(LIVE, `side-${id}`);
     fs.rmSync(dir, { recursive: true, force: true });
-    if (folder) copyProject(folder, dir); else fs.mkdirSync(dir, { recursive: true });
-    return { id, name: c.name, contestant: c.id, dir, engine: c.engine, via: c.via, brainId: c.brainId || null, options, mode, baseline: snapshotDir(dir) };
+    let relinked = [];
+    if (folder) relinked = copyProject(folder, dir); else fs.mkdirSync(dir, { recursive: true });
+    return { id, name: c.name, contestant: c.id, dir, engine: c.engine, via: c.via, brainId: c.brainId || null, options, mode, relinked: relinked.slice(0, 50), baseline: snapshotDir(dir) };
   });
   const config = { a: A.id, b: B.id, start, settings: { ...options, mode }, order, repeats };
   const series = body.series || { id: crypto.randomBytes(4).toString('hex'), total: repeats, n: 1, prompt: '' };
@@ -229,7 +259,11 @@ function finish(why) {
     let grade = null;
     if (round.template && graders[round.template]) try { grade = graders[round.template](s.dir); } catch (e) { grade = { correct: null, detail: e.message }; }
     s.grade = grade; s.final = v.metrics;
-    s.evidence = Object.entries(snapshotDir(s.dir)).map(([file, lines]) => ({file, text: lines ? lines.join('\n').slice(0, 100000) : null})).slice(0, 100);
+    // what this side made or changed: listed and previewable on the page; only these files are kept as evidence
+    const now = snapshotDir(s.dir);
+    s.results = changedFiles(s.baseline || {}, now).slice(0, 200);
+    s.page = pickPage(s.results);
+    s.evidence = s.results.filter(r => r.kind !== 'deleted').slice(0, 100).map(r => ({ file: r.file, text: now[r.file] ? now[r.file].join('\n').slice(0, 100000) : null }));
     return { id: s.id, name: s.name, ...v.metrics, grade, error: s.error || null };
   });
   round.saved = true; round.ended = why;
@@ -253,7 +287,7 @@ function rescore(r) { // r: the live round, or a saved record (whose sides carry
 function record(r, rows) {
   const sides = r.sides.map((s, i) => {
     const metrics = rows ? rows[i] : { id: s.id, name: s.name, ...(s.final || {}), grade: s.grade, error: s.error || null };
-    return { ...metrics, settings: {engine:s.engine, contestant:s.contestant || s.id, options:s.options || null, permissionMode:s.mode ?? r.context?.mode, tools:{}}, evidence: s.evidence || null, score: s.score, web: s.web ? { ...s.web, shots: undefined } : null };
+    return { ...metrics, settings: {engine:s.engine, contestant:s.contestant || s.id, options:s.options || null, permissionMode:s.mode ?? r.context?.mode, tools:{}}, evidence: s.evidence || null, results: s.results || null, page: s.page || null, relinked: s.relinked || [], score: s.score, web: s.web ? { ...s.web, shots: undefined } : null };
   });
   return { context: r.context, accounting: r.accounting, runId: r.runId, at: Date.now(), series: r.series ? { id: r.series.id, n: r.series.n, total: r.series.total } : null, config: r.config || null, pair: r.pair, template: r.template, task: r.task || null, prompt: r.prompt, ended: r.ended, grading: r.grading || null,
     gradeError: r.gradeError || null, judge: r.judge || null, vote: r.vote || null, blind: r.blind || null, verdict: r.verdict || null, sides };
@@ -307,6 +341,25 @@ function castVote({ runId, slot, note = '' }) {
   const judgeSlot = r.judge?.winner ? (r.judge.winner === 'tie' ? 'tie' : Object.keys(r.blind).find(k => r.blind[k] === r.judge.winner)) : null;
   return { ok: true, verdict: r.verdict, revealed: r.vote ? names(r) : null, judge: r.judge ? { slot: judgeSlot, agreement: r.judge.agreement, engine: r.judge.engine } : null };
 }
+// the web page a side made, to preview: an index.html first, else the shallowest .html it made or changed
+function pickPage(results = []) {
+  const html = results.filter(r => r.kind !== 'deleted' && /\.html?$/i.test(r.file));
+  return (html.find(r => /(^|[\\/])index\.html?$/i.test(r.file)) || html[0])?.file.replace(/\\/g, '/') || null;
+}
+// /result/<run>/<A|B>/<file...>: what a side made, for the page's side-by-side results (sandboxed like /site)
+// The sandbox comes from this header (an opaque origin, like artifacts): the preview frame adds no sandbox attribute,
+// because with one the browser would not show the page at all.
+function serveResult(res, [, runId, id, ...rest]) {
+  const f = findRound(runId), dir = f && sideDir(f.r, id);
+  if (!dir || !rest.join('')) return send(res, 404, { error: 'not found' });
+  let base, file;
+  try { base = fs.realpathSync(path.resolve(dir)); file = fs.realpathSync(path.resolve(base, ...rest.map(decodeURIComponent))); } catch { return send(res, 404, { error: 'not found' }); }
+  if (!file.startsWith(base + path.sep) || !fs.statSync(file).isFile()) return send(res, 404, { error: 'not found' });
+  res.writeHead(200, { 'content-type': MIME[path.extname(file).toLowerCase()] || 'text/plain; charset=utf-8', 'cache-control': 'no-store',
+    // a sandboxed page has no origin of its own, so 'self' would refuse the Benchmark page's preview: name the app
+    'content-security-policy': `sandbox allow-scripts allow-forms; default-src http://127.0.0.1:${PORT}/benchmark/result/ http://localhost:${PORT}/benchmark/result/ 'unsafe-inline' data: blob:; connect-src 'none'; frame-ancestors http://127.0.0.1:${PORT} http://localhost:${PORT}`, 'x-content-type-options': 'nosniff' });
+  fs.createReadStream(file).pipe(res);
+}
 function sideDir(r, id) { const s = r.sides.find(x => x.id === id); if (!s) return null; return round?.runId === r.runId ? s.dir : path.join(LIVE, 'archive', r.runId, id); }
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.mjs': 'text/javascript', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml', '.json': 'application/json', '.ico': 'image/x-icon', '.webp': 'image/webp', '.gif': 'image/gif', '.woff2': 'font/woff2' };
 function serveBlind(res, parts) { // /shot/<run>/<A|B>/<view>.png  and  /site/<run>/<A|B>/<file...>
@@ -323,8 +376,9 @@ function serveBlind(res, parts) { // /shot/<run>/<A|B>/<view>.png  and  /site/<r
 function state() {
   const base = { tasks: listTasks(), contestants: contestantList(), defaults: context() || null };
   if (!round) return { round: null, ...base };
-  const sides = round.sides.map(sideView);
-  if (round.runId && !round.saved && sides.every(s => ['done', 'failed'].includes(s.metrics.status))) finish('both done');
+  let sides = round.sides.map(sideView);
+  // finishing records each side's results: show them in this same reply
+  if (round.runId && !round.saved && sides.every(s => ['done', 'failed'].includes(s.metrics.status))) { finish('both done'); sides = round.sides.map(sideView); }
   for (const s of sides) {
     const o = round.sides.find(x => x.id === s.id);
     s.grade = o?.grade || null; s.score = o?.score || null; s.web = o?.web ? { F: o.web.F, R: o.web.R } : null; delete s.final;
@@ -349,14 +403,14 @@ function seriesSummary(series) {
   const med = a => { const v = a.filter(n => typeof n === 'number').sort((x, y) => x - y); return v.length ? (v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2) : null; };
   const by = {};
   for (const r of rows) for (const sd of r.sides) {
-    const b = by[sd.id] ||= { name: sd.name, rounds: 0, done: 0, elapsed: [], fresh: [], cached: [], output: [], total: [], quality: [], wins: 0 };
+    const b = by[sd.id] ||= { name: sd.name, rounds: 0, done: 0, elapsed: [], fresh: [], cached: [], output: [], total: [], cost: [], quality: [], wins: 0 };
     b.rounds++; if (sd.status === 'done') b.done++;
-    b.elapsed.push(sd.elapsedMs); b.fresh.push(sd.tokens?.fresh); b.cached.push(sd.tokens?.cacheRead); b.output.push(sd.tokens?.output); b.total.push(sd.tokens?.total);
+    b.elapsed.push(sd.elapsedMs); b.fresh.push(sd.tokens?.fresh); b.cached.push(sd.tokens?.cacheRead); b.output.push(sd.tokens?.output); b.total.push(sd.tokens?.total); b.cost.push(sd.tokens?.cost);
     if (sd.score?.quality != null) b.quality.push(sd.score.quality);
     if (r.verdict?.winner === sd.id) b.wins++;
   }
   const out = Object.fromEntries(Object.entries(by).map(([k, b]) => [k, { name: b.name, rounds: b.rounds, done: b.done, wins: b.wins,
-    elapsedMs: med(b.elapsed), fresh: med(b.fresh), cached: med(b.cached), output: med(b.output), total: med(b.total), quality: med(b.quality) }]));
+    elapsedMs: med(b.elapsed), fresh: med(b.fresh), cached: med(b.cached), output: med(b.output), total: med(b.total), cost: med(b.cost), quality: med(b.quality) }]));
   return { id: series.id, n: series.n, total: series.total, stopped: !!series.stopped, recorded: rows.length, sides: out };
 }
 // Windows' own folder picker, for "a copy of my project"
@@ -413,6 +467,7 @@ return { async handle(req, res, url) {
       if (route === '/api/history') return send(res, 200, readResults().reverse());
       if (route === '/api/vote') return send(res, 200, voteInfo(url.searchParams.get('run')));
       if (/^\/(shot|site)\//.test(route)) return serveBlind(res, route.slice(1).split('/'));
+      if (route.startsWith('/result/')) return serveResult(res, route.slice(1).split('/'));
     }
     if (req.method !== 'POST') return send(res, 404, {error: 'not found'});
     if (route.startsWith('/api/harbor/')) {

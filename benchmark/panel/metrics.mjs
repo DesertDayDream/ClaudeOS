@@ -39,7 +39,7 @@ export function findSession(side) {
 }
 
 const empty = () => ({ found: false, done: false, promptAt: null, firstAt: null, lastAt: null, doneAt: null, calls: 0, tools: 0, toolErrors: 0, toolNames: {},
-  input: 0, cacheWrite: 0, cacheRead: 0, output: 0, reasoning: 0, contextPeak: 0, models: new Set(), efforts: new Set(), cwd: null, subagents: 0, app: null, reply: null, writes: [] });
+  input: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0, output: 0, reasoning: 0, contextPeak: 0, models: new Set(), efforts: new Set(), cwd: null, subagents: 0, app: null, reply: null, writes: [] });
 
 function claudeMetrics(side) {
   const m = empty(), f = findSession(side);
@@ -69,7 +69,7 @@ function claudeMetrics(side) {
         seen.add(key); m.calls++;
         if (msg.model && msg.model !== '<synthetic>') m.models.add(msg.model);
         if (o.effort) m.efforts.add(o.effort);
-        m.input += u.input_tokens || 0; m.cacheWrite += u.cache_creation_input_tokens || 0; m.cacheRead += u.cache_read_input_tokens || 0; m.output += u.output_tokens || 0;
+        m.input += u.input_tokens || 0; m.cacheWrite += u.cache_creation_input_tokens || 0; m.cacheWrite1h += u.cache_creation?.ephemeral_1h_input_tokens || 0; m.cacheRead += u.cache_read_input_tokens || 0; m.output += u.output_tokens || 0;
         m.contextPeak = Math.max(m.contextPeak, (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0));
       }
     } else if (o.type === 'user' && Array.isArray(o.message?.content)) {
@@ -124,6 +124,8 @@ function codexMetrics(side) {
 // ---------- the working folder ----------
 const MAX_FILES = 5000; // a big project copied in: measure the first 5,000 files, not every file every second
 const SKIP = new Set(['.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build', '.next', '.cache']);
+// the block ClaudeOS writes into every chat folder's CLAUDE.md (chat.mjs writeFoundations)
+const FOUNDATIONS = /\r?\n?<!-- ClaudeOS foundations: begin -->[\s\S]*?<!-- ClaudeOS foundations: end -->\r?\n?/;
 export function snapshotDir(dir) {
   const files = {};
   let count = 0;
@@ -136,11 +138,27 @@ export function snapshotDir(dir) {
       if (e.isDirectory()) { go(p); continue; }
       count++;
       let buf; try { const st = fs.statSync(p); if (st.size > 2e6) { files[path.relative(dir, p)] = null; continue; } buf = fs.readFileSync(p); } catch { continue; }
-      files[path.relative(dir, p)] = buf.includes(0) ? null : buf.toString('utf8').split(/\r?\n/).filter((l, i, a) => i < a.length - 1 || l !== '');
+      if (buf.includes(0)) { files[path.relative(dir, p)] = null; continue; }
+      let text = buf.toString('utf8');
+      // ClaudeOS's own note in a chat folder's CLAUDE.md is not the contestant's work
+      if (e.name === 'CLAUDE.md') { text = text.replace(FOUNDATIONS, ''); if (!text.trim()) continue; }
+      files[path.relative(dir, p)] = text.split(/\r?\n/).filter((l, i, a) => i < a.length - 1 || l !== '');
     }
   };
   go(dir);
   return files;
+}
+// which files a side made, changed or deleted, shallowest first (for the results view)
+export function changedFiles(base, now) {
+  const out = [];
+  const same = (a, b) => a === b || (!!a && !!b && a.length === b.length && a.every((l, i) => l === b[i]));
+  for (const [f, cur] of Object.entries(now)) {
+    if (!(f in base)) out.push({ file: f, kind: 'created', lines: cur ? cur.length : null });
+    else if (!same(base[f], cur)) out.push({ file: f, kind: 'changed', lines: cur ? cur.length : null });
+  }
+  for (const f of Object.keys(base)) if (!(f in now)) out.push({ file: f, kind: 'deleted', lines: null });
+  const depth = f => f.split(/[\\/]/).length;
+  return out.sort((a, b) => depth(a.file) - depth(b.file) || a.file.localeCompare(b.file));
 }
 // lines added/removed per file as a multiset difference (order-insensitive, cheap, good enough for a live view)
 export function diffDirs(base, now) {
@@ -164,6 +182,9 @@ export function measure(side, now = Date.now()) {
   const start = m.promptAt || side.startedAt;
   const end = m.done ? (m.doneAt || m.lastAt || now) : now;
   const fresh = m.input + m.cacheWrite, totalIn = fresh + m.cacheRead;
+  // what the tokens cost, counted in fresh input tokens (Anthropic price ratios: a 5-minute cache write 1.25x,
+  // a 1-hour one 2x, a cache read 0.1x, output 5x), so two Claude sides compare in one number
+  const cost = side.engine === "codex" || !m.found ? null : Math.round(m.input + 1.25 * (m.cacheWrite - m.cacheWrite1h) + 2 * m.cacheWrite1h + 0.1 * m.cacheRead + 5 * m.output);
   const disk = side.baseline ? diffDirs(side.baseline, snapshotDir(side.dir)) : null;
   const minutes = Math.max(1e-6, (end - start) / 60e3);
   return {
@@ -171,7 +192,7 @@ export function measure(side, now = Date.now()) {
     elapsedMs: side.startedAt ? end - start : 0,
     firstMs: m.firstAt && m.promptAt ? m.firstAt - m.promptAt : null,
     calls: m.calls, tools: m.tools, toolErrors: m.toolErrors, toolNames: m.toolNames, subagents: m.subagents,
-    tokens: { input: m.input, cacheWrite: m.cacheWrite, fresh, cacheRead: m.cacheRead, output: m.output, reasoning: m.reasoning, total: totalIn + m.output },
+    tokens: { input: m.input, cacheWrite: m.cacheWrite, cacheWrite1h: m.cacheWrite1h, cost, fresh, cacheRead: m.cacheRead, output: m.output, reasoning: m.reasoning, total: totalIn + m.output },
     cacheHit: totalIn ? m.cacheRead / totalIn : null,
     contextPeak: m.contextPeak || null,
     outPerMin: m.found && m.output ? m.output / minutes : null,
