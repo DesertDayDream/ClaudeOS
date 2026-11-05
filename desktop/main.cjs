@@ -269,7 +269,7 @@ async function runSmoke() {
     const api = async (url, body) => (await fetch(url, { method: body === undefined ? 'GET' : 'POST', headers: { 'content-type': 'application/json', 'x-claudeos-token': token }, body: body === undefined ? undefined : JSON.stringify(body) })).json();
     const benchState = await api('/benchmark/api/state');
     const benchHtml = await (await fetch('/benchmark/')).text();
-    const benchmarkVerified = Array.isArray(benchState.tasks) && benchState.tasks.includes('bill-splitter') && benchHtml.includes('Compare ClaudeOS');
+    const benchmarkVerified = Array.isArray(benchState.tasks) && benchState.tasks.includes('bill-splitter') && Array.isArray(benchState.contestants) && benchState.contestants.some(c => c.via === 'claudeos') && benchHtml.includes('Compare two of your real setups');
     const settings = await api('/api/settings');
     const update = await api('/api/update');
     const terminal = await api('/api/terminal/run', { command: 'echo CLAUDEOS_DESKTOP_SMOKE_OK' });
