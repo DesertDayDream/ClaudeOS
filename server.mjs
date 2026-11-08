@@ -328,6 +328,9 @@ function ensureHome() {
 }
 try { ensureHome(); } catch (e) { console.error('Could not set up the Home brain:', e.message); }
 
+// Compact brain (Memory tab and the top bar): oversized memory entries rewritten short, with a backup and Undo
+const compactor = createCompactor({ dataDir: DATA });
+const memorySize = brain => { try { return { ...memorySizeOf(memoryFileOf(brain)), busy: compactor.busy(brain.id), canUndo: compactor.canUndo(brain) }; } catch { return null; } };
 // The quality of each finished run: Haiku's grade and the user's thumbs (grades.mjs)
 const grades = createGrades({ file: path.join(DATA, 'grades.json'), onChange: () => refresh(), onCorrection: event => {
   const b = brains.active();
@@ -638,9 +641,6 @@ const schedules = createSchedules({ file: path.join(DATA, 'schedules.json'), bro
 const brainOfChat = owner => [...chats.entries()].find(([, c]) => c === owner)?.[0] || '';
 const anyBusy = () => [...chats.values()].some(c => c.anyBusy()) || [...managers.values()].some(m => m.busy());
 const memoryEditor = createMemoryEditor({ claudeDir: CLAUDE, dataDir: DATA, memoryFileOf });
-// Compact brain (Memory tab and the top bar): oversized memory entries rewritten short, with a backup and Undo
-const compactor = createCompactor({ dataDir: DATA });
-const memorySize = brain => { try { return { ...memorySizeOf(memoryFileOf(brain)), busy: compactor.busy(brain.id), canUndo: compactor.canUndo(brain) }; } catch { return null; } };
 // only memories the active brain is showing right now can be opened, so an id can't reach other files
 function memoryById(brain, id) {
   return [...collectBrain(brain), ...collectMemories(brain)].find(m => m.id === id);

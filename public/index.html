@@ -789,6 +789,9 @@
   .ops-panel h2, #opsStream h2 { margin: 0 0 12px; font-size: 11px; color: #00f3ff; letter-spacing: .12em; text-transform: uppercase; }
   .ops-panel h3 { font-size: 13px; margin: 22px 0 10px; }
   .ops-muted { color: var(--dim); font-size: 12px; }
+  .ops-memory { font-size: 12px; color: var(--dim); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
+  .ops-memory .btn { padding: 3px 10px; font-size: 12px; }
+  .ops-memory .warn { color: #f2c46d; flex-basis: 100%; }
   #opsFoundations { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.6 ui-monospace, monospace; max-height: 32vh; overflow: auto; }
   .ops-card { border-top: 1px solid var(--line); padding: 12px 0; overflow-wrap: anywhere; }
   .ops-card b { display: block; } .ops-card ul { padding-left: 16px; font-size: 11px; color: #c1c8dd; }
@@ -836,7 +839,7 @@
     <span><i style="color:var(--reference);background:var(--reference)"></i>reference</span>
   </div>
 </div>
-<section class="ops-panel" id="opsLeft" aria-label="Master operations"><h2>Master operations</h2><h3>CLAUDE.md foundations</h3><p id="opsFoundationStatus" class="ops-muted">Loading foundations...</p><details><summary>Read master instructions</summary><pre id="opsFoundations"></pre></details><h3>Active brief queue</h3><div id="opsQueue" aria-live="polite">Loading queue...</div></section>
+<section class="ops-panel" id="opsLeft" aria-label="Master operations"><h2>Master operations</h2><h3>Brain memory</h3><div id="opsMemory" class="ops-memory"></div><h3>CLAUDE.md foundations</h3><p id="opsFoundationStatus" class="ops-muted">Loading foundations...</p><details><summary>Read master instructions</summary><pre id="opsFoundations"></pre></details><h3>Active brief queue</h3><div id="opsQueue" aria-live="polite">Loading queue...</div></section>
 <section class="ops-panel" id="opsRight" aria-label="Skill roster"><h2>Skill roster</h2><p class="ops-muted">Rank from rated work / live SKILL.md constraints</p><div id="opsRoster"></div></section>
 <section id="opsStream" aria-label="Headless stdout stream"><h2>Headless stdout / live <span id="opsStreamState"></span></h2><div id="opsTicker" role="log" aria-live="off">Waiting for headless work...</div></section>
 <aside>

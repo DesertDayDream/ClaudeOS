@@ -1874,8 +1874,8 @@ addEventListener('keydown', e => {
 // Every search or read of memory puts its notes into the chat, so an oversized entry costs tokens in every chat.
 const kb = n => n >= 10240 ? Math.round(n / 1024) + ' KB' : (n / 1024).toFixed(1) + ' KB';
 function drawCompact(m) {
-  const top = document.getElementById('compactTop'), bar = document.getElementById('memSize');
-  if (!m) { top.hidden = true; bar.hidden = true; return; }
+  const top = document.getElementById('compactTop'), bar = document.getElementById('memSize'), ops = document.getElementById('opsMemory');
+  if (!m) { top.hidden = true; bar.hidden = true; if (ops) ops.innerHTML = ''; return; }
   top.hidden = false; bar.hidden = false;
   top.disabled = !!m.busy; top.textContent = m.busy ? 'Compacting…' : 'Compact';
   top.classList.toggle('suggest', !!m.suggest && !m.busy);
@@ -1884,6 +1884,8 @@ function drawCompact(m) {
     + `<button type="button" class="btn${m.suggest ? ' primary' : ''}" data-compact ${m.busy ? 'disabled' : ''}>${m.busy ? 'Compacting…' : 'Compact brain'}</button>`
     + (m.canUndo && !m.busy ? '<button type="button" class="btn" data-compact-undo>Undo last compact</button>' : '')
     + (m.suggest ? `<span class="warn">${esc(big.name)} is large (${big.notes} notes, ${kb(big.chars)})${m.large.length > 1 ? ` and ${m.large.length - 1} more entr${m.large.length === 2 ? 'y is' : 'ies are'} too` : ''}: every chat that searches memory pays for it.</span>` : '');
+  // the dashboard's Master operations panel (always on screen): the same size and button
+  if (ops) ops.innerHTML = `<span>${kb(m.chars)} · ${m.entries} entries</span><button type="button" class="btn${m.suggest ? ' primary' : ''}" data-compact ${m.busy ? 'disabled' : ''}>${m.busy ? 'Compacting…' : 'Compact brain'}</button>` + (m.canUndo && !m.busy ? '<button type="button" class="btn" data-compact-undo>Undo</button>' : '') + (m.suggest ? `<span class="warn">${m.large.length} large entr${m.large.length === 1 ? 'y' : 'ies'}: chats that search memory pay for ${m.large.length === 1 ? 'it' : 'them'}.</span>` : '');
 }
 async function compactBrain() {
   const m = state.memorySize;
