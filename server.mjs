@@ -25,6 +25,7 @@ import { createArtifacts } from './artifacts.mjs';
 import { createPreviews } from './previews.mjs';
 import { openFile } from './openfile.mjs';
 import { createMemoryEditor, observationId } from './memory-edit.mjs';
+import { createCompactor, sizeOf as memorySizeOf } from './memory-compact.mjs';
 import { createSkillEditor } from './skill-edit.mjs';
 import { createOrg } from './org.mjs';
 import { createGrades, finishedRuns } from './grades.mjs';
@@ -349,7 +350,7 @@ function snapshot() {
       try { const st = fs.statSync(file); return { file, modified: st.mtimeMs, text: fs.readFileSync(file, 'utf8').slice(0, 60000), truncated: st.size > 60000 }; }
       catch { return { file, text: '', missing: true }; }
     })(),
-    memories: [...collectBrain(brain), ...collectMemories(brain)], skills, names: { ...nameSkills(skills) },
+    memories: [...collectBrain(brain), ...collectMemories(brain)], memorySize: memorySize(brain), skills, names: { ...nameSkills(skills) },
     minds: mindsOf(brain, skills),
     // linked brains: their shared brain (read-only here), their own team, and whether they're working for us
     linked: brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, path: b.path, busy: handoffs.has(b.id),
@@ -412,7 +413,7 @@ let last = snapshot();
 let lastKey = keyOf(last);
 const clients = new Set();
 function keyOf(s) {
-  return JSON.stringify([s.brain?.id, s.foundations, s.skills.map(x => x.constraints), s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id + s.craft?.score), s.minds, s.activity.length && s.activity[s.activity.length - 1], s.grades, s.coaching, s.org]);
+  return JSON.stringify([s.brain?.id, s.memorySize, s.foundations, s.skills.map(x => x.constraints), s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id + s.craft?.score), s.minds, s.activity.length && s.activity[s.activity.length - 1], s.grades, s.coaching, s.org]);
 }
 function refresh() {
   checkIntegrations(brains.active());
@@ -529,7 +530,7 @@ function setLimits(info) {
 const chats = new Map();
 function chatFor(brain) {
   if (!chats.has(brain.id)) {
-    chats.set(brain.id, createChat({ cwd: brain.path, memoryFile: memoryFileOf(brain), helper, memoryServer, browserServer,
+    chats.set(brain.id, createChat({ cwd: brain.path, memoryFile: memoryFileOf(brain), globalClaudeDir: CLAUDE, helper, memoryServer, browserServer,
       dir: path.join(DATA, 'chats', brain.id), legacyFile: path.join(DATA, 'chats', `${brain.id}.json`), activityFile: ACTIVITY, port: PORT,
       links: () => brains.linksOf(brain).map(b => ({ id: b.id, name: b.name, memoryFile: memoryFileOf(b) })), token: TOKEN,
       // a brain you switched away from keeps working, out of sight
@@ -637,6 +638,9 @@ const schedules = createSchedules({ file: path.join(DATA, 'schedules.json'), bro
 const brainOfChat = owner => [...chats.entries()].find(([, c]) => c === owner)?.[0] || '';
 const anyBusy = () => [...chats.values()].some(c => c.anyBusy()) || [...managers.values()].some(m => m.busy());
 const memoryEditor = createMemoryEditor({ claudeDir: CLAUDE, dataDir: DATA, memoryFileOf });
+// Compact brain (Memory tab and the top bar): oversized memory entries rewritten short, with a backup and Undo
+const compactor = createCompactor({ dataDir: DATA });
+const memorySize = brain => { try { return { ...memorySizeOf(memoryFileOf(brain)), busy: compactor.busy(brain.id), canUndo: compactor.canUndo(brain) }; } catch { return null; } };
 // only memories the active brain is showing right now can be opened, so an id can't reach other files
 function memoryById(brain, id) {
   return [...collectBrain(brain), ...collectMemories(brain)].find(m => m.id === id);
@@ -928,6 +932,18 @@ async function handleApi(req, res, url) {
         return json(res, 200, { ok: true });
       }
     } catch (err) { return json(res, 200, { error: err.message }); }
+  }
+  if (url.pathname === '/api/memory/compact' || url.pathname === '/api/memory/compact-undo') {
+    if (!active) return json(res, 200, { error: 'Set up a brain first.' });
+    const file = memoryFileOf(active);
+    if (url.pathname === '/api/memory/compact-undo') {
+      if (anyBusy()) return json(res, 200, { error: 'Claude is still answering. Wait for it, or press Stop, before undoing.' });
+      const r = compactor.undo(active, file); refresh(); return json(res, 200, r);
+    }
+    // compacting takes a minute or two; an entry a chat changes meanwhile keeps its new notes
+    const started = compactor.compact(active, file).then(r => { refresh(); broadcast('memory-compacted', { brain: active.id, ...r }); return r; });
+    refresh();
+    return json(res, 200, body.wait ? await started : { ok: true, started: true });
   }
   if (url.pathname.startsWith('/api/memory/')) {
     if (!active) return json(res, 200, { error: 'Set up a brain first.' });

@@ -1020,6 +1020,7 @@ function pushFeed(ev) { liveFeed.push(ev); }
 const SOURCE_TITLES = { personal: 'Your skills', project: 'ClaudeOS team', plugin: 'Plugin skills', contractor: 'Contractors (built-in)' };
 function renderPanel() {
   document.getElementById('nMem').textContent = memories.size;
+  drawCompact(state.memorySize);
   document.getElementById('nEmp').textContent = state.skills.filter(s => s.source !== 'contractor').length;
   document.getElementById('nBusy').textContent = work.busy.size;
 
@@ -1867,6 +1868,52 @@ addEventListener('keydown', e => {
   if (inspect.mode !== 'view' && memories.has(selected)) return setMode('view');
   selected = null;
   renderPanel();
+});
+
+// ---------- Compact brain ----------
+// Every search or read of memory puts its notes into the chat, so an oversized entry costs tokens in every chat.
+const kb = n => n >= 10240 ? Math.round(n / 1024) + ' KB' : (n / 1024).toFixed(1) + ' KB';
+function drawCompact(m) {
+  const top = document.getElementById('compactTop'), bar = document.getElementById('memSize');
+  if (!m) { top.hidden = true; bar.hidden = true; return; }
+  top.hidden = false; bar.hidden = false;
+  top.disabled = !!m.busy; top.textContent = m.busy ? 'Compacting…' : 'Compact';
+  top.classList.toggle('suggest', !!m.suggest && !m.busy);
+  const big = m.large[0];
+  bar.innerHTML = `<span>Brain memory: <b>${kb(m.chars)}</b> · ${m.entries} entries · ${m.notes} notes</span>`
+    + `<button type="button" class="btn${m.suggest ? ' primary' : ''}" data-compact ${m.busy ? 'disabled' : ''}>${m.busy ? 'Compacting…' : 'Compact brain'}</button>`
+    + (m.canUndo && !m.busy ? '<button type="button" class="btn" data-compact-undo>Undo last compact</button>' : '')
+    + (m.suggest ? `<span class="warn">${esc(big.name)} is large (${big.notes} notes, ${kb(big.chars)})${m.large.length > 1 ? ` and ${m.large.length - 1} more entr${m.large.length === 2 ? 'y is' : 'ies are'} too` : ''}: every chat that searches memory pays for it.</span>` : '');
+}
+async function compactBrain() {
+  const m = state.memorySize;
+  if (!m?.large.length) { toast('Nothing to compact: every memory entry is already short.'); return; }
+  const names = m.large.map(e => e.name).join(', ');
+  if (!confirm(`Compact this brain's memory?
+
+Claude (Sonnet) rewrites ${m.large.length} large entr${m.large.length === 1 ? 'y' : 'ies'} (${names}) into a few short, dated notes: current preferences, decisions and facts, plus a short history. Other entries stay as they are.
+
+A backup is kept first, and Undo puts it back. It takes a minute or two.`)) return;
+  const r = await api('/api/memory/compact', {});
+  if (r.error) toast(r.error); else toast('Compacting the brain…', null, null, 'You can keep working; it tells you when it is done.');
+}
+async function undoCompact() {
+  if (!confirm("Put the brain's memory back the way it was before the last compact?")) return;
+  const r = await api('/api/memory/compact-undo', {});
+  toast(r.error || 'Memory restored from before the last compact.');
+}
+document.addEventListener('click', e => {
+  if (e.target.closest('#compactTop, [data-compact]')) compactBrain();
+  else if (e.target.closest('[data-compact-undo]')) undoCompact();
+});
+events.addEventListener('memory-compacted', event => {
+  const r = JSON.parse(event.data);
+  if (r.brain && r.brain !== brainId) return;
+  if (r.error) return toast('Compacting stopped: ' + r.error);
+  if (r.nothing) return toast('Nothing to compact: every memory entry is already short.');
+  const kept = r.entries.filter(e => e.kept);
+  toast(`Brain compacted: ${kb(r.before.chars)} → ${kb(r.after.chars)}`, 'Undo', undoCompact,
+    kept.length ? `Left as they were: ${kept.map(e => `${e.name} (${e.kept})`).join('; ')}` : '');
 });
 
 function toast(title, action, onAction, detail) {

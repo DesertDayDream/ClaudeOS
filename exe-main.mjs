@@ -25,8 +25,9 @@ async function run() {
   } else if (sub === 'memory-server') {
     // inside the exe its own "am I the program?" check always says yes; make it say no, and start it here once
     process.argv[1] = '';
-    const { main } = await import('@modelcontextprotocol/server-memory/dist/index.js');
-    await main();
+    // the official server with ClaudeOS's lean search (memory-mcp.mjs)
+    const { start } = await import('./memory-mcp.mjs');
+    await start();
   } else {
     // the app: no console window, so keep a log next to the user's data
     const data = path.resolve(process.env.CLAUDEOS_HOME || path.join(os.homedir(), '.claudeos'));

@@ -2,10 +2,11 @@
 
 Claude Code with what ClaudeOS gives a benchmark chat on top of it, exported from the running app
 (chat.mjs harness()) into a bundle folder:
-  foundations.md  the ClaudeOS foundations block ClaudeOS writes into the chat folder's CLAUDE.md
-  runtime.md      the runtime context file the chat is told to read before its first message
+  foundations.md  the instructions every ClaudeOS chat gets as an appended system prompt (the same text each time)
+  runtime.md      this chat's own context, which ClaudeOS puts at the top of its first message
   brain/          the brain's CLAUDE.md, AGENTS.md and .claude/skills (added with --add-dir, as ClaudeOS does)
-  memory.jsonl    a copy of the brain's shared memory, served by the same memory MCP server
+  memory.jsonl    a copy of the brain's shared memory
+  memory-mcp.mjs  ClaudeOS's memory server: the official one with its lean search
   mcp.json        the MCP servers (memory) in Claude Code's --mcp-config format
 
 Everything else (install, sign-in, model, effort, trajectory and token accounting) is Harbor's own
@@ -56,20 +57,20 @@ class ClaudeOS(ClaudeCode):
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
         await environment.upload_dir(self._bundle, REMOTE)
-        # the foundations block goes into the working folder's CLAUDE.md, exactly as ClaudeOS writes it
-        await self.exec_as_agent(
-            environment,
-            command=(
-                "touch /app/CLAUDE.md && "
-                "printf '\\n<!-- ClaudeOS foundations: begin -->\\n' >> /app/CLAUDE.md && "
-                f"cat {REMOTE}/foundations.md >> /app/CLAUDE.md && "
-                "printf '\\n<!-- ClaudeOS foundations: end -->\\n' >> /app/CLAUDE.md"
-            ),
-        )
+        # the official memory server package, which ClaudeOS's memory-mcp.mjs wraps
+        if (self._bundle / "memory-mcp.mjs").is_file():
+            await self.exec_as_agent(
+                environment,
+                command=f"cd {REMOTE} && npm install --silent --no-audit --no-fund @modelcontextprotocol/server-memory@2.0.1",
+            )
+        # the instructions, once, as ClaudeOS sends them: an appended system prompt
+        self.options.append_system_prompt = (self._bundle / "foundations.md").read_text(encoding="utf-8")
         skills = f"{REMOTE}/brain/.claude/skills"
         if (self._bundle / "brain" / ".claude" / "skills").is_dir():
             self.skills_dir = skills
         # a project-folder chat in ClaudeOS loads the brain's CLAUDE.md beside the project's
         self._resolved_env_vars["CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"] = "1"
-        first = f"Read {REMOTE}/runtime.md for this chat's runtime context before proceeding.\n\n"
+        # this chat's own context at the top of its first message, as ClaudeOS sends it
+        runtime = (self._bundle / "runtime.md").read_text(encoding="utf-8").strip()
+        first = f"<claudeos-context>\n{runtime}\n</claudeos-context>\n\n" if runtime else ""
         await super().run(first + instruction, environment, context)

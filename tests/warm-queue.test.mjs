@@ -13,7 +13,7 @@ test('brief queue retains one process, session, stable prompt and persisted hist
   const processes = [], writes = [], launches = [];
   fs.writeFileSync(path.join(lab, 'CLAUDE.md'), 'Company foundations: master Medieval FPS rules.');
   let crew = [{ name: 'First', skill: 'first' }];
-  const chat = createChat({ cwd: lab, dir: path.join(lab, 'chats'), memoryFile: path.join(lab, 'memory.jsonl'),
+  const chat = createChat({ cwd: lab, dir: path.join(lab, 'chats'), memoryFile: path.join(lab, 'memory.jsonl'), globalClaudeDir: path.join(lab, 'home-claude'),
     activityFile: path.join(lab, 'activity.jsonl'), helper: () => ({ command: 'test' }), memoryServer: () => ({ command: 'test' }),
     broadcast() {}, team: () => crew, spawnProcess: (command, args) => {
       launches.push(args); const proc = new EventEmitter();
@@ -41,14 +41,16 @@ test('brief queue retains one process, session, stable prompt and persisted hist
     assert.equal(processes.length, 1);
     assert.match(writes[0].message.content, /Manager turn$/);
     assert.deepEqual(writes.slice(1).map(w => w.message.content), ['Sphere one', 'Sphere two'].map(s => `=== SPHERE EXECUTION BOUNDARY: assignment ===\n${s}\n===`));
-    assert.ok(!launches[0].includes('--append-system-prompt'));
+    // ClaudeOS's instructions go in once, as an appended system prompt; the brain's CLAUDE.md is left as the user wrote it
+    const appended = l => l[l.indexOf('--append-system-prompt') + 1];
+    assert.match(appended(launches[0]), /ClaudeOS desk tools/);
     const foundations = fs.readFileSync(path.join(lab, 'CLAUDE.md'), 'utf8');
-    assert.match(foundations, /master Medieval FPS rules/);
+    assert.equal(foundations, 'Company foundations: master Medieval FPS rules.');
     // A team/project refresh must not replace the process or mutate the stable prefix.
     crew = [{ name: 'Changed', skill: 'changed' }];
     const third = chat.runInline({ chat: id, prompt: 'Sphere three' }); await turn();
     assert.equal(processes.length, 2); // MCP tool inventory changes legitimately restart the runtime.
-    assert.ok(!launches[1].includes('--append-system-prompt'));
+    assert.equal(appended(launches[1]), appended(launches[0]), 'the same instructions every launch, so the cached prefix stays the same');
     assert.equal(fs.readFileSync(path.join(lab, 'CLAUDE.md'), 'utf8'), foundations);
     assert.ok(launches[1].includes('--resume'));
     emit('Third report'); await third.done;
@@ -101,7 +103,7 @@ test('headless turns validate split completion tokens, flush final JSON, and rel
   const processes = [], launches = [], writes = [], telemetry=[];
   const skill = path.join(lab, '.claude', 'skills', 'builder', 'SKILL.md');
   fs.mkdirSync(path.dirname(skill), { recursive: true }); fs.writeFileSync(skill, 'Original rules');
-  const chat = createChat({ cwd: lab, dir: path.join(lab, 'chats'), memoryFile: path.join(lab, 'memory.jsonl'),
+  const chat = createChat({ cwd: lab, dir: path.join(lab, 'chats'), memoryFile: path.join(lab, 'memory.jsonl'), globalClaudeDir: path.join(lab, 'home-claude'),
     activityFile: path.join(lab, 'activity.jsonl'), helper: () => ({ command: 'test' }), memoryServer: () => ({ command: 'test' }),
     broadcast(_event, data) { telemetry.push(data); }, team: () => [], spawnProcess: (command, args) => {
       launches.push(args); const proc = new EventEmitter(); proc.stdout = new PassThrough(); proc.stderr = new PassThrough();

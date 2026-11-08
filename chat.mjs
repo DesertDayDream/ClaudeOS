@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { runCodexTurn, codexModels, shortCommand, CODEX_EFFORTS } from './codex.mjs';
 import { defaultEngine } from './agents.mjs';
+import os from 'node:os';
 import { MODEL_GUIDANCE } from './model-routing.mjs';
 const MODEL_GUIDANCE_VERSION = 2;
 
@@ -77,6 +78,19 @@ const DESK_PROMPT = `ClaudeOS desk tools (mcp__claudeos__*):
 - start_session / message_session: only when the user asks for a side session or for work to run in parallel: a side session works on its own and its report comes back here. Otherwise do the work here.
 The chat renders markdown: a link to a file ([report](out/report.html)) opens it rendered in a preview panel (HTML, SVG, PDF, images, Markdown, CSV, code), ![alt](path/to/image.png) shows an image inline, and \`\`\`html / \`\`\`svg / \`\`\`mermaid blocks get a Preview button. Link the files you make.`;
 // the plan the user watches beside the chat, as Claude Desktop shows it
+// what every ClaudeOS chat is told on top of Claude Code's own instructions (the same text in every chat)
+const foundationsText = () => [DESK_PROMPT, planPrompt('claude'), MODEL_GUIDANCE].join('\n\n');
+const FOUNDATIONS_BEGIN = '<!-- ClaudeOS foundations: begin -->', FOUNDATIONS_END = '<!-- ClaudeOS foundations: end -->';
+// Remove the block ClaudeOS once wrote into a CLAUDE.md, and nothing else; a file that held only that goes.
+export function removeFoundationsBlock(file) {
+  let before;
+  try { before = fs.readFileSync(file, 'utf8'); } catch (err) { if (err.code === 'ENOENT') return false; throw err; }
+  const start = before.indexOf(FOUNDATIONS_BEGIN), stop = before.indexOf(FOUNDATIONS_END, start);
+  if (start < 0 || stop < 0) return false;
+  const after = (before.slice(0, start).trimEnd() + '\n' + before.slice(stop + FOUNDATIONS_END.length).replace(/^\s*\n/, '')).trim();
+  if (!after) fs.rmSync(file, { force: true }); else fs.writeFileSync(file, after + '\n');
+  return true;
+}
 const planPrompt = engine => `Plan: the user follows your progress through a plan beside the chat, as in Claude Desktop. For any task with three or more steps (several files to make, things to build and then test, an employee's multi-part job), make the plan before your first other tool call: ${engine === 'claude'
   ? 'add each step with TaskCreate (a short subject and an activeForm such as "Building the menu"). Mark a step in_progress with TaskUpdate when you start it and completed as soon as it is done. Add steps you discover, and delete ones that no longer apply'
   : 'write the steps with your plan tool (update_plan) and update it as each step starts and finishes'}. Keep one step in progress at a time. Skip the plan for quick questions and one-step jobs.`;
@@ -178,7 +192,9 @@ export function mentionedFiles(text, folder) {
   return out;
 }
 
-export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, helper, memoryServer, browserServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], projects = () => [], onIdle = () => {}, notify = () => {}, onLimits = () => {}, onCodexTurn = () => {}, spawnProcess = spawn, scope = () => ({ disallowed: [], settings: null }) }) {
+export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, helper, memoryServer, browserServer, port, token, broadcast, links = () => [], othersWorking = () => false, team = () => [], projects = () => [], onIdle = () => {}, notify = () => {}, onLimits = () => {}, onCodexTurn = () => {}, spawnProcess = spawn, scope = () => ({ disallowed: [], settings: null }),
+  // the user's own Claude Code folder (its CLAUDE.md is global); tests point this elsewhere
+  globalClaudeDir = path.join(os.homedir(), '.claude') }) {
   // the brain's chats: which one the page shows, the model/effort picked, and a row per saved chat
   const indexFile = path.join(dir, 'index.json');
   let index = { current: null, options: {}, chats: {} };
@@ -387,21 +403,13 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     // context file it reads first, and its MCP servers and tool rules (the benchmark runs these in a container)
     function harness() {
       const setup = servers();
-      return { foundations: [DESK_PROMPT, planPrompt('claude'), MODEL_GUIDANCE].join('\n\n'),
+      return { foundations: foundationsText(),
         context: instructions(setup).slice(3).join('\n\n'), allowed: setup.allowed, denied: [...setup.denied, ...scope().disallowed], options: options(), mode: state.mode || '' };
     }
-    function writeFoundations(folder) {
-      const file = path.join(folder, 'CLAUDE.md');
-      const begin = '<!-- ClaudeOS foundations: begin -->', end = '<!-- ClaudeOS foundations: end -->';
-      let before = '';
-      try { before = fs.readFileSync(file, 'utf8'); } catch (err) { if (err.code !== 'ENOENT') throw err; }
-      const block = `${begin}\n${[DESK_PROMPT, planPrompt('claude'), MODEL_GUIDANCE].join('\n\n')}\n${end}`;
-      const start = before.indexOf(begin), stop = before.indexOf(end, start);
-      if (start >= 0 && stop < 0) throw new Error('Incomplete ClaudeOS foundations block');
-      const after = start >= 0 ? before.slice(0, start) + block + before.slice(stop + end.length)
-        : before.trimEnd() + (before.trim() ? '\n\n' : '') + block + '\n';
-      if (after !== before) fs.writeFileSync(file, after);
-    }
+    // Earlier versions wrote the foundations into CLAUDE.md files: the chat folder's, the brain's and (for
+    // Home, whose folder is ~/.claude) the global one every Claude Code session loads. A chat could then carry
+    // three copies, and plain Claude Code sessions paid for one. They now go in once, with the chat itself.
+    function stripFoundations(folder) { removeFoundationsBlock(path.join(folder, 'CLAUDE.md')); }
     function skillRevision() {
       const files = [];
       function walk(dir) {
@@ -427,7 +435,9 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       // and Claude Code memory), with the brain added beside it for its skills and instructions
       if (state.folder) args.push('--add-dir', cwd);
       if (tools.chrome) args.push('--chrome');
-      writeFoundations(state.folder || cwd);
+      for (const folder of new Set([state.folder || cwd, cwd, globalClaudeDir])) stripFoundations(folder);
+      // the same text in every chat, so the prompt cache reuses it from one chat to the next
+      args.push('--append-system-prompt', foundationsText());
       const opts = options();
       if (opts.model) args.push('--model', opts.model);
       if (opts.effort) args.push('--effort', opts.effort);
@@ -583,11 +593,10 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       if (!me) { finish("Could not start Claude Code. If it isn't installed yet, install it from Apps → Accounts (Install)."); return { ok: true }; }
       try {
         if (me.needsContext) {
-          const contextDir = path.join(cwd, '.claude', 'runtime');
-          fs.mkdirSync(contextDir, { recursive: true });
-          const contextFile = path.join(contextDir, `${id}.md`);
-          fs.writeFileSync(contextFile, instructions(servers()).slice(3).join('\n\n'));
-          text = `Read ${contextFile} for this chat's runtime context before proceeding.\n\n${text}`;
+          // this chat's own context (its folder, team, linked brains, handover) in the first message itself:
+          // a file to read would cost a whole extra model call
+          const context = instructions(servers()).slice(3).join('\n\n');
+          if (context.trim()) text = `<claudeos-context>\n${context}\n</claudeos-context>\n\n${text}`;
           me.needsContext = false;
         }
         me.proc.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: content(text, attached) } }) + '\n', err => { if (err && run?.live === me) finish(`Could not reach Claude: ${err.message}`); });

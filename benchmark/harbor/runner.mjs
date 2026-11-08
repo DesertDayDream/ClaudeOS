@@ -9,6 +9,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, execFile } from 'node:child_process';
 import { buildHarborTask } from './task.mjs';
+import { trimSearch, SEARCH_NOTES } from '../../memory-mcp.mjs';
 
 // any of these would let a run bill an API account instead of the subscription
 const STRIP = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_API_KEY', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENROUTER_API_KEY'];
@@ -190,7 +191,14 @@ export function createHarbor({ kit, home, loadPty, harness, loadTask, gradeWeb, 
     if (fs.existsSync(skills)) fs.cpSync(skills, path.join(dir, 'brain', '.claude', 'skills'), { recursive: true, filter: s => !/node_modules/.test(s) });
     if (h.memoryFile && fs.existsSync(h.memoryFile)) {
       fs.copyFileSync(h.memoryFile, path.join(dir, 'memory.jsonl'));
-      fs.writeFileSync(path.join(dir, 'mcp.json'), JSON.stringify({ mcpServers: { memory: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-memory'], env: { MEMORY_FILE_PATH: '/claudeos/memory.jsonl' } } } }));
+      // ClaudeOS's own memory server (the official one with its lean search), as a ClaudeOS chat gets it
+      fs.writeFileSync(path.join(dir, 'memory-mcp.mjs'), `import { KnowledgeGraphManager, main } from '@modelcontextprotocol/server-memory/dist/index.js';
+const trimSearch = ${trimSearch.toString()};
+const original = KnowledgeGraphManager.prototype.searchNodes;
+KnowledgeGraphManager.prototype.searchNodes = async function (query) { return trimSearch(await original.call(this, query), query, ${SEARCH_NOTES}); };
+main();
+`);
+      fs.writeFileSync(path.join(dir, 'mcp.json'), JSON.stringify({ mcpServers: { memory: { command: 'node', args: ['/claudeos/memory-mcp.mjs'], env: { MEMORY_FILE_PATH: '/claudeos/memory.jsonl' } } } }));
     }
     return { options: h.options || {}, brainName: h.brainName || '' };
   }

@@ -28,6 +28,14 @@
   .hud h1 span { color: var(--accent); }
   .stats { display: flex; gap: 18px; margin-top: 8px; color: var(--dim); }
   .stats b { display: block; color: var(--text); font-size: 18px; font-variant-numeric: tabular-nums; }
+  .compact-top { font: inherit; font-size: 11px; color: var(--dim); background: none; border: 1px solid var(--line, #3a3f55); border-radius: 10px; padding: 0 7px; margin-left: 4px; cursor: pointer; }
+  .compact-top:hover { color: var(--text); border-color: var(--accent, #96b3ff); }
+  .compact-top.suggest { color: #f2c46d; border-color: #f2c46d; }
+  .compact-top:disabled { opacity: .6; cursor: default; }
+  .memsize { padding: 8px 10px; margin: 0 0 8px; border: 1px solid var(--line, #3a3f55); border-radius: 8px; font-size: 12px; color: var(--dim); display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+  .memsize b { color: var(--text); font-weight: 600; }
+  .memsize .warn { color: #f2c46d; flex-basis: 100%; }
+  .memsize .btn { padding: 3px 10px; font-size: 12px; }
   .legend { display: flex; gap: 12px; margin-top: 10px; color: var(--dim); flex-wrap: wrap; }
   .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; box-shadow: 0 0 8px currentColor; }
   aside { position: fixed; top: 16px; right: 16px; bottom: 16px; width: var(--aside-w, 380px); max-width: calc(100vw - 32px); background: var(--panel);
@@ -816,7 +824,7 @@
   </div>
   <div id="opsControls"><button class="btn" id="opsChatToggle" aria-expanded="false">Open chat & tools</button></div>
   <div class="stats">
-    <div><b id="nMem">0</b>memories</div>
+    <div><b id="nMem">0</b>memories <button type="button" class="compact-top" id="compactTop" title="Compact brain: rewrite oversized memory entries into short notes, so chats that read memory cost less. A backup is kept; Undo puts it back.">Compact</button></div>
     <div><b id="nEmp">0</b>employees</div>
     <div><b id="nBusy">0</b>working</div>
   </div>
@@ -893,6 +901,7 @@
     </form>
   </div>
   <div class="tab" id="memory">
+    <div class="memsize" id="memSize"></div>
     <div class="search"><input type="search" id="memSearch" placeholder="Search memories…" autocomplete="off" spellcheck="false"></div>
     <div id="memList"></div>
   </div>

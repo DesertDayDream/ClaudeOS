@@ -25,10 +25,11 @@ export function helper(name) {
   return IS_EXE ? { command: EXE, args: [name] } : { command: process.execPath, args: [path.join(ROOT, `${name}.mjs`)] };
 }
 
-// The official memory MCP server for one brain file. The exe has it built in, so no Node is needed.
+// The memory MCP server for one brain file: the official one with a lean search (memory-mcp.mjs).
+// The exe has it built in, so no Node is needed.
 export function memoryServer(file) {
   const env = { MEMORY_FILE_PATH: file.replace(/\\/g, '/') };
-  return IS_EXE ? { command: EXE, args: ['memory-server'], env } : { command: 'npx', args: ['-y', '@modelcontextprotocol/server-memory'], env };
+  return IS_EXE ? { command: EXE, args: ['memory-server'], env } : { command: process.execPath, args: [path.join(ROOT, 'memory-mcp.mjs')], env };
 }
 export const isOurMemoryServer = cfg => cfg?.args?.[0] === 'memory-server' && /claudeos[^\\/]*\.exe$/i.test(cfg.command || '');
 
