@@ -11,7 +11,7 @@ import { measure, snapshotDir, changedFiles } from './metrics.mjs';
 const graders = {};
 import { createTasks } from '../grader/tasks.mjs';
 import { scoreSide, verdict, replyRule } from '../grader/scoring.mjs';
-import { createHarbor } from '../harbor/runner.mjs';
+import { createHarbor, SUITES } from '../harbor/runner.mjs';
 
 export function createBenchmark({ kit, dataDir, port, token, context, start, stop, environments, launcher, watch, harbor: harborDeps = {} }) {
 const { listTasks, loadTask } = createTasks(path.join(kit, 'tasks'));
@@ -461,7 +461,7 @@ return { async handle(req, res, url) {
       if (route === '/harbor') return page(res, 'harbor.html');
       if (route === '/watch') return page(res, 'watch.html');
       if (route === '/api/watch') { const sd = round?.sides.find(x => x.id === url.searchParams.get('side')); if (!sd) return send(res, 404, {error: 'No such contestant in this round.'}); const v = sd.chatId && watch ? watch(sd) : { ok: true, messages: [] }; return send(res, 200, { name: sd.name, side: sd.id, waiting: !!sd.waiting, failed: !!sd.failed, error: sd.error || null, runId: round.runId, ...v }); }
-      if (route === '/api/harbor') return send(res, 200, { ...(await harbor.status()), jobs: harbor.listJobs(), tasks: listTasks() });
+      if (route === '/api/harbor') return send(res, 200, { ...(await harbor.status()), jobs: harbor.listJobs(), tasks: listTasks(), suites: Object.entries(SUITES).map(([id, s]) => ({ id, name: s.name })) });
       if (route === '/report') return report(res, url.searchParams.get('run'));
       if (route === '/api/state') return send(res, 200, state());
       if (route === '/api/history') return send(res, 200, readResults().reverse());

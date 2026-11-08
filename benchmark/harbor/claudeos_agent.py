@@ -30,6 +30,7 @@ REMOTE = "/claudeos"
 
 class ClaudeOSOptions(ClaudeCodeOptions):
     bundle: str | None = Field(default=None, description="Host folder with the ClaudeOS bundle.")
+    advisor: str | None = Field(default=None, description="Model that advises on hard steps (Claude Code's --advisor), as ClaudeOS sets it.")
 
 
 class ClaudeOS(ClaudeCode):
@@ -51,6 +52,8 @@ class ClaudeOS(ClaudeCode):
         extra = f"--add-dir {REMOTE}/brain"
         if (self._bundle / "mcp.json").is_file():
             extra += f" --mcp-config {REMOTE}/mcp.json"
+        if self.options.advisor:
+            extra += f" --advisor {self.options.advisor}"
         return f"{flags} {extra}".strip()
 
     async def run(

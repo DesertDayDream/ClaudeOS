@@ -10,13 +10,14 @@ import path from 'node:path';
 import { workFolder, logFile } from './cabinets.mjs';
 import { MODEL_GUIDANCE, cleanSelection } from './model-routing.mjs';
 import { runModelTask } from './model-runner.mjs';
+import { checkTask, fixPrompt } from './task-check.mjs';
 
 const MAX_PARALLEL = 1;
 const MAX_TASKS = 12;
 const MAX_BRIEFS = 30;
 const clip = (s, n) => (s = String(s || '').trim()).length > n ? s.slice(0, n - 1) + '…' : s;
 
-export function createManager({ cwd, dataFile, activityFile, memoryFile, helper, memoryServer, port, token, broadcast, team, project = () => null, logWork = () => {}, cabinet = () => null, chatBusy = () => false, onBriefDone = () => {}, scope = () => ({ disallowed: [], settings: null }), optionsFor = () => ({}), onApproval, taskRunner = runModelTask, inlineRunner, taskCatalog }) {
+export function createManager({ cwd, dataFile, activityFile, memoryFile, helper, memoryServer, port, token, broadcast, team, project = () => null, logWork = () => {}, cabinet = () => null, chatBusy = () => false, onBriefDone = () => {}, scope = () => ({ disallowed: [], settings: null }), optionsFor = () => ({}), onApproval, taskRunner = runModelTask, inlineRunner, taskCatalog, checker = checkTask }) {
   let state = { inbox: [], briefs: [] };
   try { state = { ...state, ...JSON.parse(fs.readFileSync(dataFile, 'utf8')) }; } catch { /* first run */ }
   // runs from before a restart are gone
@@ -284,7 +285,32 @@ ${MODEL_GUIDANCE}`;
     } catch (err) { run = { done: Promise.resolve({ error: err.message }), stop() {} }; }
     procs.set(key, run);
     t.session = session;
-    Promise.resolve(run.done).catch(err => ({ error: err.message || String(err) })).then(r => {
+    const settle = p => Promise.resolve(p).catch(err => ({ error: err.message || String(err) }));
+    settle(run.done).then(async r => {
+      // checked before it counts: a reviewer with a clean context, and one fix turn if it finds problems
+      if (!r.stopped && !r.error && checker) {
+        t.phase = 'checking'; changed();
+        let check = await settle(checker({ task: t.task, report: r.result, folder: t.folder, projectFolder: proj?.p.folder, since: t.start }));
+        if (check && !check.skipped && !check.pass && check.issues?.length && inlineRunner && brief.status !== 'stopped') {
+          note({ ts: Date.now(), kind: 'error', text: 'Reviewer found: ' + check.issues.join(' | ') });
+          t.phase = 'fixing'; changed();
+          const fix = inlineRunner({ chat: brief.chat, skillId: me.skill, headless: true, prompt: `${fixPrompt(check.issues)}\nEnd with [TASK_COMPLETE].`, onLog: note });
+          procs.set(key, fix);
+          const fixed = await settle(fix.done);
+          if (fixed.stopped || fixed.error) r = { ...fixed, usage: r.usage };
+          else {
+            const again = await settle(checker({ task: t.task, report: fixed.result, folder: t.folder, projectFolder: proj?.p.folder, since: t.start }));
+            r = { ...r, result: fixed.result };
+            check = { ...again, fixed: true, first: check.issues };
+          }
+        }
+        t.check = check && !check.error ? check : { skipped: true, issues: [] };
+        delete t.phase;
+        if (t.logFile && !t.check.skipped) {
+          const lines = [...(t.check.first || []).map(i => '- first: ' + i), ...(t.check.issues.length ? t.check.issues.map(i => '- ' + i) : ['No problems found.'])];
+          try { fs.appendFileSync(t.logFile, `\n## Review (${t.check.pass ? 'passed' : 'problems remain'}${t.check.fixed ? ' after one fix' : ''})\n\n${lines.join('\n')}\n`); } catch { /* fine */ }
+        }
+      }
       procs.delete(key);
       t.end = Date.now();
       t.usage = r.usage || null;

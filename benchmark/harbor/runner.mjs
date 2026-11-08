@@ -17,9 +17,18 @@ const TOKEN_RE = /sk-ant-oat01-[A-Za-z0-9_-]{20,}/;
 const LIMIT_RE = /usage limit|limit reached|rate[_ ]limit|\b429\b|out of (?:extra )?usage/i;
 const AGENTS = {
   'claude-code': { name: 'Claude Code (as in Claude Desktop)', args: () => ['-a', 'claude-code'] },
-  claudeos: { name: 'ClaudeOS', args: bundle => ['-a', 'claudeos_agent:ClaudeOS', '--ak', `bundle=${bundle}`] },
+  claudeos: { name: 'ClaudeOS', args: (bundle, advisor) => ['-a', 'claudeos_agent:ClaudeOS', '--ak', `bundle=${bundle}`, ...(advisor ? ['--ak', `advisor=${advisor}`] : [])] },
 };
 const win = process.platform === 'win32';
+// Terminal-Bench 2.0 (the Harbor registry's industry-standard agent benchmark): every task is checked by its
+// own tests in its own container. "Quick 10" is a fixed, varied set that fits a laptop and a 30-minute limit
+// per task, so runs compare like with like; "Full" is all 89 tasks (hours, and much of a plan's usage).
+export const TB2 = 'terminal-bench@2.0';
+export const TB2_QUICK = ['fix-git', 'prove-plus-comm', 'cobol-modernization', 'openssl-selfsigned-cert', 'nginx-request-logging',
+  'polyglot-c-py', 'regex-log', 'git-leak-recovery', 'multi-source-data-merger', 'constraints-scheduling'];
+export const SUITES = { 'tb2-quick': { name: 'Terminal-Bench 2.0 · Quick 10', tasks: TB2_QUICK }, 'tb2-full': { name: 'Terminal-Bench 2.0 · Full (89 tasks, hours)', tasks: null } };
+// the model that advises a ClaudeOS chat on hard steps, as the app decides it (chat.mjs advisorFor)
+const advisorOf = o => o.advisor === 'off' ? '' : o.advisor || (o.model === 'sonnet' || o.model === 'haiku' ? 'opus' : '');
 const ansi = s => String(s).replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\x1b[=>()][0-9A-Za-z]?/g, '');
 const median = a => { const s = [...a].sort((x, y) => x - y); return s.length ? (s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2) : null; };
 
@@ -214,12 +223,14 @@ main();
   }
   const secs = t => t?.started_at && t?.finished_at ? (Date.parse(t.finished_at) - Date.parse(t.started_at)) / 1000 : null;
 
-  async function runOne(job, agent, n, env, taskDir, bundle, task) {
-    const name = `${job.id}-${agent}-${n}`;
-    const args = ['run', '-p', taskDir, ...AGENTS[agent].args(bundle), '-k', '1', '-n', '1', '-o', path.join(jobsRoot, job.id), '--job-name', name, '-y', '-q'];
+  // one attempt: one contestant on one task
+  async function runOne(job, agent, n, env, item, bundle) {
+    const name = `${job.id}-${agent}-${item.name}-${n}`;
+    const args = ['run', ...item.source, ...AGENTS[agent].args(bundle, agent === 'claudeos' ? job.advisor : ''), '-k', '1', '-n', '1', '-o', path.join(jobsRoot, job.id), '--job-name', name, '-y', '-q'];
     if (job.model) args.push('-m', `anthropic/${job.model}`);
     if (job.effort) args.push('--ak', `reasoning_effort=${job.effort}`);
-    const trial = { agent, n, status: 'running', started: Date.now() };
+    const task = item.task;
+    const trial = { agent, n, task: item.name, status: 'running', started: Date.now() };
     job.trials.push(trial); saveJobs(); changed();
     const out = await new Promise(resolve => {
       const p = spawn(harborExe, args, { windowsHide: true, env, cwd: home });
@@ -245,7 +256,9 @@ main();
     if (LIMIT_RE.test(trial.error) || (LIMIT_RE.test(agentLog) && /"is_error":\s*true/.test(agentLog))) { trial.status = 'limit'; return trial; }
     // the full behaviour tests, in a real browser on this PC, on the files the agent left
     const site = path.join(dir, 'artifacts', 'app');
-    if (gradeWeb && task.checks.behaviour) {
+    // a Terminal-Bench task is solved when its own tests pass (reward 1)
+    if (!task) { trial.solved = trial.reward === 1; trial.score = trial.reward == null ? null : Math.round(trial.reward * 100); }
+    else if (gradeWeb && task.checks.behaviour) {
       try {
         const g = await gradeWeb(site, task, path.join(dir, 'shots'));
         const gates = g.gates.every(x => x.ok);
@@ -287,13 +300,14 @@ main();
 
   function runJob({ task: taskId, trials = 3, contestants = ['claudeos', 'claude-code'] }) {
     if (current) return { error: 'A benchmark is already running.' };
-    const task = loadTask(String(taskId || ''));
-    if (!task) return { error: 'Unknown task.' };
+    taskId = String(taskId || '');
+    const suite = SUITES[taskId], task = suite ? null : loadTask(taskId);
+    if (!suite && !task) return { error: 'Unknown task.' };
     trials = Math.max(1, Math.min(10, Number(trials) || 3));
     contestants = [...new Set(contestants)].filter(c => AGENTS[c]);
     if (!contestants.length) return { error: 'Pick at least one contestant.' };
     const job = { id: new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14) + '-' + crypto.randomBytes(2).toString('hex'),
-      task: task.id, trials: [], perAgent: trials, contestants, started: Date.now(), status: 'running', note: '' };
+      task: suite ? suite.name : task.id, suite: suite ? taskId : null, trials: [], perAgent: trials, contestants, started: Date.now(), status: 'running', note: '' };
     current = { job, proc: null, stopped: false };
     jobs.push(job); saveJobs(); changed();
     (async () => {
@@ -306,26 +320,45 @@ main();
         PYTHONPATH: path.join(kit, 'harbor') + (process.env.PYTHONPATH ? path.delimiter + process.env.PYTHONPATH : '') };
       for (const k of STRIP) delete env[k];
       const work = path.join(jobsRoot, job.id);
-      const taskDir = buildHarborTask(task, path.join(work, 'tasks'), kit);
+      // the tasks: an AI Bench task built for Harbor, or Terminal-Bench tasks from the Harbor registry
+      const items = task
+        ? [{ name: task.id, task, source: ['-p', buildHarborTask(task, path.join(work, 'tasks'), kit)] }]
+        : (suite.tasks || await registryTasks()).map(name => ({ name, task: null, source: ['-d', TB2, '-i', name] }));
       const bundle = path.join(work, 'claudeos-bundle');
       const b = writeBundle(bundle);
-      // the same model and effort as the brain's ClaudeOS chats, for every contestant
-      job.model = b.options.model || ''; job.effort = b.options.effort || ''; job.brain = b.brainName;
+      // the same model and effort as the brain's ClaudeOS chats, for every contestant; ClaudeOS also gets its advisor
+      job.model = b.options.model || ''; job.effort = b.options.effort || ''; job.advisor = advisorOf(b.options); job.brain = b.brainName;
+      job.tasks = items.map(i => i.name);
       saveJobs(); changed();
       for (let n = 1; n <= trials && !current.stopped; n++) {
-        // alternate who goes first, so neither side always gets the warmer cache or quieter servers
-        const order = n % 2 ? contestants : [...contestants].reverse();
-        for (const agent of order) {
+        for (const [i, item] of items.entries()) {
+          // alternate who goes first, so neither side always gets the warmer cache or quieter servers
+          const order = (n + i) % 2 ? contestants : [...contestants].reverse();
+          for (const agent of order) {
+            if (current.stopped) break;
+            const t = await runOne(job, agent, n, env, item, bundle);
+            summarize(job); saveJobs(); changed();
+            if (t.status === 'limit') { job.note = 'Stopped: your Claude usage limit was reached. Run the rest after it resets.'; current.stopped = true; }
+          }
           if (current.stopped) break;
-          const t = await runOne(job, agent, n, env, taskDir, bundle, task);
-          summarize(job); saveJobs(); changed();
-          if (t.status === 'limit') { job.note = 'Stopped: your Claude usage limit was reached. Run the rest after it resets.'; current.stopped = true; }
         }
       }
     })().then(() => { job.status = current.stopped ? (job.note ? 'paused' : 'stopped') : 'done'; },
       err => { job.status = 'failed'; job.note = err.message; log('harbor job', err.stack || err); })
       .finally(() => { job.ended = Date.now(); summarize(job); current = null; saveJobs(); changed(); });
     return { ok: true, id: job.id };
+  }
+  // every task in Terminal-Bench 2.0, as the registry lists it
+  async function registryTasks() {
+    const dir = path.join(home, 'registry', 'tb2');
+    if (!fs.existsSync(dir)) {
+      const r = await run(harborExe, ['download', TB2, '-o', dir], { timeout: 20 * 60e3, env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' } });
+      if (!r.ok) throw new Error('Could not download Terminal-Bench 2.0: ' + ansi(r.out).trim().split('\n').pop().slice(0, 200));
+    }
+    const names = [];
+    (function walk(d) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) { if (fs.existsSync(path.join(p, 'task.toml'))) names.push(e.name); else walk(p); } } })(dir);
+    if (!names.length) throw new Error('Terminal-Bench 2.0 has no tasks in ' + dir);
+    return names.sort();
   }
   function stopJob() {
     if (!current) return { ok: true };

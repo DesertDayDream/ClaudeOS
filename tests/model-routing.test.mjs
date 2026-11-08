@@ -86,7 +86,7 @@ test('manager dispatch and nested specialist selections use the shared runner in
   const calls = [], reports = [];
   let resolveReport;
   const finished = new Promise(r => { resolveReport = r; });
-  const m = createManager({ cwd: lab, dataFile: path.join(lab, 'manager.json'), activityFile: path.join(lab, 'activity.jsonl'), memoryFile: path.join(lab, 'memory.jsonl'),
+  const m = createManager({ checker: null, cwd: lab, dataFile: path.join(lab, 'manager.json'), activityFile: path.join(lab, 'activity.jsonl'), memoryFile: path.join(lab, 'memory.jsonl'),
     helper: () => ({ command: 'node', args: [] }), memoryServer: () => ({ command: 'node', args: [] }), port: 4800, token: 'lab', broadcast() {},
     team: () => [{ name: 'Kai', skill: 'engineer' }], optionsFor: () => base.caller, taskCatalog: catalog,
     inlineRunner: o => { calls.push(o); return { done: Promise.resolve({ result: 'Done.', model: { engine: 'codex', effort: 'high' } }), stop() {} }; },

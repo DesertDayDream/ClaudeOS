@@ -69,7 +69,7 @@ import { runHandoff } from '../handoff.mjs';
 test('all briefs serialize and save full cabinet reports before advancing', async () => {
   const lab = fs.mkdtempSync(path.join(os.tmpdir(), 'warm-manager-'));
   const calls = [], reports = [];
-  const m = createManager({ cwd: lab, dataFile: path.join(lab, 'manager.json'), activityFile: path.join(lab, 'activity.jsonl'),
+  const m = createManager({ checker: null, cwd: lab, dataFile: path.join(lab, 'manager.json'), activityFile: path.join(lab, 'activity.jsonl'),
     broadcast() {}, team: () => [{ name: 'One', skill: 'one' }], cabinet: () => path.join(lab, 'Office'),
     onBriefDone: b => reports.push(b), inlineRunner: args => {
       let resolve; const done = new Promise(r => { resolve = r; });
@@ -129,4 +129,35 @@ test('headless turns validate split completion tokens, flush final JSON, and rel
     processes[1].stdout.write(JSON.stringify({type:'result',result:'Forgot marker'}) + '\n');
     assert.match((await second.done).error, /without \[TASK_COMPLETE\]/);
   } finally { chat.stopAll(); fs.rmSync(lab, {recursive:true,force:true}); }
+});
+
+test('a Sonnet chat gets an Opus advisor, and a side session in a git project works in its own worktree', async () => {
+  const lab = fs.mkdtempSync(path.join(os.tmpdir(), 'roles-'));
+  const project = path.join(lab, 'game'); fs.mkdirSync(path.join(project, '.git'), { recursive: true });
+  const launches = [];
+  const chat = createChat({ cwd: lab, dir: path.join(lab, 'chats'), memoryFile: path.join(lab, 'memory.jsonl'), globalClaudeDir: path.join(lab, 'home-claude'),
+    activityFile: path.join(lab, 'activity.jsonl'), helper: () => ({ command: 'test' }), memoryServer: () => ({ command: 'test' }),
+    broadcast() {}, spawnProcess: (command, args) => {
+      launches.push(args); const proc = new EventEmitter();
+      proc.stdout = new PassThrough(); proc.stderr = new PassThrough();
+      proc.stdin = new Writable({ write(chunk, enc, cb) { cb(); } });
+      return proc;
+    } });
+  const flag = (args, name) => args.includes(name) ? args[args.indexOf(name) + 1] : null;
+  try {
+    chat.setOptions({ model: 'sonnet' });
+    const parent = chat.currentId();
+    chat.send('Hello'); await turn();
+    assert.equal(flag(launches[0], '--advisor'), 'opus');
+    assert.equal(flag(launches[0], '--worktree'), null, 'the main chat never works in a worktree');
+    assert.match(chat.startSession({ chat: parent, title: 'Part A', prompt: 'Build part A', folder: project }).text, /Started side session/);
+    await turn();
+    const side = launches.at(-1);
+    assert.match(flag(side, '--worktree'), /^claudeos-/);
+    assert.match(flag(side, '--append-system-prompt'), /Work efficiently/);
+    // in the brain folder itself (not a project), no worktree: git leaves out the brain's own files
+    chat.startSession({ chat: parent, title: 'Part B', prompt: 'Note something' }); await turn();
+    assert.equal(flag(launches.at(-1), '--worktree'), null);
+    chat.setOptions({ model: 'opus' });
+  } finally { chat.stopAll?.(); fs.rmSync(lab, { recursive: true, force: true }); }
 });

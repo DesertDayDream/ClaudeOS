@@ -75,7 +75,7 @@ async function refresh(){
   try{s=await api('/api/harbor');}catch(e){say(e.message,true);return;}
   const focus=document.activeElement?.id==='code';
   if(!focus)checks();
-  const sel=$('#task');if(!sel.options.length)sel.innerHTML=s.tasks.map(t=>`<option>${esc(t)}</option>`).join('');
+  const sel=$('#task');if(!sel.options.length)sel.innerHTML=(s.suites||[]).map(t=>`<option value="${esc(t.id)}">${esc(t.name)}</option>`).join('')+s.tasks.map(t=>`<option value="${esc(t)}">AI Bench · ${esc(t)}</option>`).join('');
   $('#run').disabled=!s.ready||!!s.running;$('#stop').disabled=!s.running;
   if(!s.ready&&!s.running&&!$('#msg').textContent)say('Finish the setup above to run a benchmark.');
   if(s.ready&&$('#msg').textContent==='Finish the setup above to run a benchmark.')say('');

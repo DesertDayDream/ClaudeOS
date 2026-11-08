@@ -75,11 +75,18 @@ const DESK_PROMPT = `ClaudeOS desk tools (mcp__claudeos__*):
 - publish_artifact: when a page would be clearer than chat text (a report, dashboard, comparison, mock-up, small tool), write one self-contained .html file and publish it; give the user the link it returns.
 - show_preview: after starting a dev server, show it live in the preview panel beside the chat.
 - schedule_task / list_scheduled / delete_scheduled: run a prompt later or on repeat (reminders, daily reports); each run is a new chat in this brain.
-- start_session / message_session: only when the user asks for a side session or for work to run in parallel: a side session works on its own and its report comes back here. Otherwise do the work here.
+- start_session / message_session: only when the user asks for a side session or for work to run in parallel: a side session works on its own and its report comes back here. Otherwise do the work here. In a project that uses git, each side session works on its own branch (worktree-claudeos-…) in its own worktree; when its report comes back, review and merge that branch. Use parallel sessions only for parts that touch different files.
 The chat renders markdown: a link to a file ([report](out/report.html)) opens it rendered in a preview panel (HTML, SVG, PDF, images, Markdown, CSV, code), ![alt](path/to/image.png) shows an image inline, and \`\`\`html / \`\`\`svg / \`\`\`mermaid blocks get a Preview button. Link the files you make.`;
 // the plan the user watches beside the chat, as Claude Desktop shows it
 // what every ClaudeOS chat is told on top of Claude Code's own instructions (the same text in every chat)
-const foundationsText = () => [DESK_PROMPT, planPrompt('claude'), MODEL_GUIDANCE].join('\n\n');
+// how to spend tokens well (effort scaling, read-only helpers, lean reading: research/agentic-workflows.md)
+const WORK_PROMPT = `Work efficiently; every token is paid for:
+- Match effort to the request. A question or a small change: answer or do it directly, with no plan, brief or hand-off. A normal job: done here, by one employee. Only wide work (research across many sources, searching a large codebase) uses helpers.
+- For wide searches or research, use a read-only subagent (the Agent tool: Explore, or a general-purpose agent told not to change files) and ask for a short summary with paths and lines, so raw search output stays out of this chat. Subagents never write files; writing stays here.
+- Read only what you need: search before opening, read the relevant part of a big file, and don't re-read what is already in this chat.
+- Search memory with specific words; open an entry with open_nodes only when you need all of it.
+- Before you say something is done, check it with the project's own checks (build, tests, run it).`;
+const foundationsText = () => [DESK_PROMPT, WORK_PROMPT, planPrompt('claude'), MODEL_GUIDANCE].join('\n\n');
 const FOUNDATIONS_BEGIN = '<!-- ClaudeOS foundations: begin -->', FOUNDATIONS_END = '<!-- ClaudeOS foundations: end -->';
 // Remove the block ClaudeOS once wrote into a CLAUDE.md, and nothing else; a file that held only that goes.
 export function removeFoundationsBlock(file) {
@@ -141,13 +148,21 @@ const clip = (s, n) => (s = String(s || '').replace(/\s+/g, ' ').trim()).length 
 
 // The model/effort options a chat runs with, checked: { engine, model, effort, codexModel, codexEffort }.
 // Claude's and Codex's picks are kept apart, so switching engine brings the other's back.
-export function cleanOptions({ engine = '', model = '', effort = '', codexModel = '', codexEffort = '' } = {}) {
+// advisor: '' (auto: Opus advises a Sonnet or Haiku chat on hard steps), 'off', or a model to advise
+export const ADVISORS = ['off', 'opus', 'fable'];
+export function advisorFor({ model = '', advisor = '' } = {}) {
+  if (advisor === 'off') return '';
+  if (advisor) return advisor;
+  return model === 'sonnet' || model === 'haiku' ? 'opus' : '';
+}
+export function cleanOptions({ engine = '', model = '', effort = '', codexModel = '', codexEffort = '', advisor = '' } = {}) {
   if (engine && engine !== 'codex') return { error: `Unknown engine "${engine}".` };
   if (model && !MODELS.includes(model)) return { error: `Unknown model "${model}".` };
   if (effort && !EFFORTS.includes(effort)) return { error: `Unknown effort "${effort}".` };
   if (codexModel && !/^[\w.:-]{1,80}$/.test(codexModel)) return { error: `Unknown Codex model "${codexModel}".` };
   if (codexEffort && !CODEX_EFFORTS.includes(codexEffort)) return { error: `Unknown Codex effort "${codexEffort}".` };
-  return { options: Object.fromEntries(Object.entries({ engine, model, effort, codexModel, codexEffort }).filter(([, v]) => v)) };
+  if (advisor && !ADVISORS.includes(advisor)) return { error: `Unknown advisor "${advisor}".` };
+  return { options: Object.fromEntries(Object.entries({ engine, model, effort, codexModel, codexEffort, advisor }).filter(([, v]) => v)) };
 }
 
 // No engine picked: Claude, unless this PC has only Codex (then the page shows Codex picked too).
@@ -385,6 +400,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       if (tools.chrome && engine === 'claude') extra.push('Claude in Chrome is on: the mcp__claude-in-chrome__* tools act in the user\'s real Chrome with their sign-ins. Use them only when the task needs the user\'s own browser.');
       if (tools.computer) extra.push('Computer use is on: mcp__computer__screenshot / zoom / click / move / drag / type / key / scroll control this PC\'s screen. Take a screenshot before and after acting. Never enter passwords or payment details, never move money, and ask in chat before anything hard to undo.');
       if (state.parent) extra.push('This chat is a side session another chat started. Do the task in the first message and end with a short report of what you did and what is left: that report goes back to the chat that started you.');
+      if (state.worktree) extra.push(`You work in your own git worktree on the branch worktree-${state.worktree}, so other sessions working at the same time never touch your files. Commit your work on that branch, and name the branch in your report: the chat that started you merges it.`);
       if (state.folder) extra.push(engine === 'claude'
         ? `This chat works in the project folder ${state.folder}. Its CLAUDE.md, settings and Claude Code memory (MEMORY.md) apply exactly as in Claude Desktop: keep knowledge about this project there, as that memory says. The brain (${cwd}) is added beside it; use the brain's shared memory for facts that matter across projects.`
         : `This chat works in the project folder ${state.folder}. Follow its AGENTS.md or CLAUDE.md if it has one. The brain (${cwd}) is added beside it; use the brain's shared memory (the memory MCP tools) for facts that matter across projects.`);
@@ -441,6 +457,10 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       const opts = options();
       if (opts.model) args.push('--model', opts.model);
       if (opts.effort) args.push('--effort', opts.effort);
+      if (state.worktree) args.push('--worktree', state.worktree);
+      // models by role: the chat's own model does the work, a stronger one advises on hard steps (research/agentic-workflows.md)
+      const advisor = advisorFor(opts);
+      if (advisor && advisor !== opts.model) args.push('--advisor', advisor);
       if (inlineActive?.headless) args.push('--permission-mode', 'bypassPermissions');
       else if (state.mode) args.push('--permission-mode', state.mode);
       // each message comes back with its id, which rewinding to it needs
@@ -1107,6 +1127,9 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       state.parent = parent;
       state.folder = folder || null;
       state.tools = tools || {};
+      // a side session in a project that uses git works in a worktree of its own (Claude Code's --worktree), so
+      // parallel work never collides; not in the brain folder, whose own files (skills, memory) git leaves out
+      if (parent && state.folder && !benchmark && fs.existsSync(path.join(state.folder, '.git'))) state.worktree = 'claudeos-' + id;
     }
     const parentOf = () => state.parent || null;
     // a chat with one employee: who they are and where their cabinet is now (a move restarts its process)

@@ -40,11 +40,19 @@ Give Claude a brain you can see.
 - **Linked brains:** from the brain menu, choose *Link brains…* to let this brain use another one. Claude here can read the linked brain's memory (never change it) and hand its team tasks, which run in that brain and send back the answer. Its skills show in the Team tab with a *Copy* button. Linked brains float beside the cloud.
 - **Brains** are folders. Make as many as you like (one per project, client or idea) and switch between them from the name under the title.
 
+## Efficient by design
+
+- **Every brief task is checked before it counts.** A cheap reviewer (Haiku) with a fresh context reads the task, the employee's report and what changed (new files in the task folder, the project's git diff). If it finds concrete problems, the employee gets one fix turn in the same warm chat; the review goes into the task's log.
+- **Models by role.** The chat's model does the work; with **Auto advisor** (the default), a Sonnet or Haiku chat consults Opus on hard steps (Claude Code's advisor), usually cheaper than running everything on Opus. Pick another advisor or turn it off beside the effort setting.
+- **Effort to match the request.** Every chat is told to answer small things directly, keep a normal job in one employee, and send wide searches to a read-only helper that returns a short summary.
+- **Parallel only where it helps.** Side sessions in a project that uses git each work in their own worktree and branch, so they never collide; the chat that started them merges the branch.
+- **Lean context.** ClaudeOS's instructions are sent once per chat (cached), memory searches return only matching notes, and **Compact brain** (Master operations, the top bar and the Memory tab) shrinks oversized memory with a backup and Undo.
+
 ## Lab benchmark (Harbor)
 
 The Benchmark tab's **Lab benchmark** page measures ClaudeOS the way AI labs measure agents: with
 [Harbor](https://harborframework.com) (the Terminal-Bench harness). ClaudeOS and plain Claude Code (what Claude Desktop runs)
-each do the same task several times. Every attempt runs in a fresh container with the same model and effort, and is checked automatically.
+each do the same task several times. Every attempt runs in a fresh container with the same model and effort, and is checked automatically. Pick **Terminal-Bench 2.0 · Quick 10** (a fixed, varied set of ten tasks from the industry-standard agent benchmark, each scored by its own tests), the full 89 tasks, or an AI Bench task.
 
 - **No terminal:** a setup checklist installs and starts Docker Desktop, installs Harbor (with ClaudeOS's own copy of uv, so no
   Python is needed) and connects Claude. Every step is a button.

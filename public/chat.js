@@ -17,6 +17,7 @@ const nudge = document.getElementById('nudge');
 const engineSel = document.getElementById('chatEngine');
 const modelSel = document.getElementById('chatModel');
 const effortSel = document.getElementById('chatEffort');
+const advisorSel = document.getElementById('chatAdvisor');
 const modeSel = document.getElementById('chatMode');
 
 // Every message resends the whole conversation. Past BIG tokens, or once the cache has expired on a
@@ -516,9 +517,12 @@ function showOptions(o = {}) {
   const cx = opts.engine === 'codex';
   engineSel.value = cx ? 'codex' : '';
   engineSel.classList.toggle('set', cx);
+  advisorSel.hidden = cx; // Codex has no advisor
   if (!cx) {
     fill(modelSel, 'Default model', CLAUDE_MODELS, opts.model);
     fill(effortSel, 'Default effort', CLAUDE_EFFORTS, opts.effort);
+    advisorSel.value = opts.advisor || '';
+    advisorSel.classList.toggle('set', !!opts.advisor);
   } else {
     const models = codex?.models || [];
     const m = models.find(x => x.id === opts.codexModel);
@@ -559,6 +563,7 @@ engineSel.addEventListener('change', async () => {
 });
 modelSel.addEventListener('change', () => saveOptions(opts.engine === 'codex' ? { codexModel: modelSel.value } : { model: modelSel.value }));
 effortSel.addEventListener('change', () => saveOptions(opts.engine === 'codex' ? { codexEffort: effortSel.value } : { effort: effortSel.value }));
+advisorSel.addEventListener('change', () => saveOptions({ advisor: advisorSel.value }));
 
 // how much this chat asks first (Claude Code's permission mode)
 function showMode(m = '') {

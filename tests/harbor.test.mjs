@@ -102,3 +102,21 @@ test('the sign-in token is kept with Windows data protection and reads back', { 
   assert.ok(enc.ok && enc.out.trim() && !enc.out.includes(secret));
   assert.equal((await unprotect(enc.out.trim())).out.trim(), secret);
 });
+
+test('Terminal-Bench 2.0 suites are offered, with a fixed Quick 10 so runs compare like with like', async () => {
+  const { SUITES, TB2_QUICK } = await import('../benchmark/harbor/runner.mjs');
+  assert.equal(TB2_QUICK.length, 10);
+  assert.equal(new Set(TB2_QUICK).size, 10);
+  assert.deepEqual(Object.keys(SUITES), ['tb2-quick', 'tb2-full']);
+  const dir = tmp();
+  try {
+    const h = createHarbor({ kit, home: dir, loadTask: () => null, harness: () => ({}) });
+    assert.equal(h.runJob({ task: 'nope' }).error, 'Unknown task.');
+    const r = h.runJob({ task: 'tb2-quick', trials: 3 });
+    assert.equal(r.ok, true);
+    for (let i = 0; i < 100 && h.busy(); i++) await new Promise(ok => setTimeout(ok, 50));
+    const job = h.listJobs()[0];
+    assert.equal(job.task, 'Terminal-Bench 2.0 · Quick 10'); assert.equal(job.suite, 'tb2-quick');
+    assert.equal(job.status, 'failed'); assert.match(job.note, /setup checklist/, 'nothing runs before setup is done');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
