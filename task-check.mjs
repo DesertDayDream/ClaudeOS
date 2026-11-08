@@ -48,7 +48,7 @@ export function collectWork({ folder, projectFolder, since = 0, max = MAX_WORK }
 export function checkPrompt({ task, report, work }) {
   return `You review an AI employee's finished task before it counts as done. You did not do the work; judge only what is here.
 
-Fail it only for concrete problems that matter: something the task asked for is missing or wrong, the work clearly does not run or would break, the report claims something the work does not show, or it touched what it was told not to. Do not fail for style, taste or wording. If the work is not visible below (for example it lives in an app or editor), judge the report against the task and pass unless something is clearly wrong.
+Fail it only for concrete problems that matter: something the task asked for is missing or wrong, the work clearly does not run or would break, the report claims something the work does not show, it touched what it was told not to, or it left stray files the task did not ask for (test binaries, scratch scripts) where they could break the result. Do not fail for style, taste or wording. If the work is not visible below (for example it lives in an app or editor), judge the report against the task and pass unless something is clearly wrong.
 
 Reply with only JSON: {"pass": true|false, "issues": ["short, specific problem and where", ...]} (at most 5 issues; [] when it passes).
 

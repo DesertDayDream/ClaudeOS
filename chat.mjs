@@ -85,7 +85,7 @@ const WORK_PROMPT = `Work efficiently; every token is paid for:
 - For wide searches or research, use a read-only subagent (the Agent tool: Explore, or a general-purpose agent told not to change files) and ask for a short summary with paths and lines, so raw search output stays out of this chat. Subagents never write files; writing stays here.
 - Read only what you need: search before opening, read the relevant part of a big file, and don't re-read what is already in this chat.
 - Search memory with specific words; open an entry with open_nodes only when you need all of it.
-- Before you say something is done, check it with the project's own checks (build, tests, run it).`;
+- Before you say something is done, check it with the project's own checks (build, tests, run it), then remove what you made only to test (compiled binaries, scratch scripts, temp files) unless the task asked for it.`;
 const foundationsText = () => [DESK_PROMPT, WORK_PROMPT, planPrompt('claude'), MODEL_GUIDANCE].join('\n\n');
 const FOUNDATIONS_BEGIN = '<!-- ClaudeOS foundations: begin -->', FOUNDATIONS_END = '<!-- ClaudeOS foundations: end -->';
 // Remove the block ClaudeOS once wrote into a CLAUDE.md, and nothing else; a file that held only that goes.
