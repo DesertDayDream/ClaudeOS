@@ -16,6 +16,7 @@ import { runCodexTurn, codexModels, shortCommand, CODEX_EFFORTS } from './codex.
 import { defaultEngine } from './agents.mjs';
 import os from 'node:os';
 import { MODEL_GUIDANCE } from './model-routing.mjs';
+import { TOOL_TIMEOUT_MS, LONG_TOOL_TIMEOUT_MS } from './tool-timeouts.mjs';
 const MODEL_GUIDANCE_VERSION = 2;
 
 const MAX_MESSAGES = 300;
@@ -370,7 +371,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         // the memory server is passed here too, so a brain's memory works before its folder is trusted
         memory: memoryServer(memoryFile),
         claudeos: {
-          ...helper('approval-mcp'),
+          ...helper('approval-mcp'), timeout: LONG_TOOL_TIMEOUT_MS,
           env: { CLAUDEOS_PORT: String(port), CLAUDEOS_TOKEN: token, CLAUDEOS_CHAT: id, CLAUDEOS_LINKS: linked.map(b => b.name).join('\n'),
             // terminal, artifacts and (unless this is a side session) side sessions
             CLAUDEOS_DESK: '1', CLAUDEOS_SESSIONS: state.parent || emp ? '0' : '1',
@@ -506,7 +507,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       if (live) { idleTimer(); return live; }
       const proc = spawnProcess('claude', [...args, ...resumeArgs()], {
         cwd: state.folder || cwd,
-        env: { ...process.env, ...CHECKPOINTS, ...TODO_ENV, MCP_TOOL_TIMEOUT: String(24 * 3600 * 1000),
+        env: { ...process.env, ...CHECKPOINTS, ...TODO_ENV, MCP_TOOL_TIMEOUT: String(TOOL_TIMEOUT_MS),
           // in the brain, memories go to the brain, never Claude Code's own auto-memory (also off in each
           // brain's settings); a project chat keeps the project's memory, like Claude Desktop
           ...(state.folder ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1' } : { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' }) },

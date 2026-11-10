@@ -10,6 +10,7 @@ import path from 'node:path';
 import { workFolder, logFile } from './cabinets.mjs';
 import { MODEL_GUIDANCE, cleanSelection } from './model-routing.mjs';
 import { runModelTask } from './model-runner.mjs';
+import { LONG_TOOL_TIMEOUT_MS } from './tool-timeouts.mjs';
 import { checkTask, fixPrompt } from './task-check.mjs';
 
 const MAX_PARALLEL = 1;
@@ -346,7 +347,7 @@ ${MODEL_GUIDANCE}`;
       const file = path.join(cwd, '.mcp.json');
       if (fs.existsSync(file)) project = JSON.parse(fs.readFileSync(file, 'utf8')).mcpServers || {};
     } catch { throw new Error('This brain’s .mcp.json could not be read. Fix it before delegating model tasks.'); }
-    return { ...project, memory: memoryServer(memoryFile), claudeos: { ...helper('approval-mcp'), env: {
+    return { ...project, memory: memoryServer(memoryFile), claudeos: { ...helper('approval-mcp'), timeout: LONG_TOOL_TIMEOUT_MS, env: {
       CLAUDEOS_PORT: String(port), CLAUDEOS_TOKEN: token, CLAUDEOS_WHO: who, CLAUDEOS_CHAT: chat || '',
       ...(nested ? { CLAUDEOS_MODEL_TASK: '1', CLAUDEOS_MODEL_CALLER: JSON.stringify(caller || {}), CLAUDEOS_MODEL_SELECTION: JSON.stringify(selection || {}) } : {}) } } };
   }

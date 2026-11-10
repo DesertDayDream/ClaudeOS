@@ -2203,9 +2203,31 @@ function animate() {
 
   controls.update();
   composer.render();
-  requestAnimationFrame(animate);
 }
-animate();
+
+// Draw only as often as it shows: every frame while you move the view, 30 fps while the team works,
+// a calm 20 fps when the office is just breathing, and nothing while the window is hidden. Drawing every
+// frame all the time kept the window and the GPU at ~40% of a core each, even with nothing happening.
+let lastInput = 0, lastFrame = 0, frameReq = 0;
+for (const type of ['pointermove', 'pointerdown', 'wheel', 'keydown']) addEventListener(type, () => { lastInput = performance.now(); }, { passive: true });
+function frameGap(now) {
+  if (now - lastInput < 2000) return 0;
+  return work.busy.size || managerState.chatting || [...employees.values()].some(e => e.visit) ? 1000 / 30 - 2 : 1000 / 20 - 2;
+}
+function frame(now) {
+  frameReq = 0;
+  if (document.hidden) return;
+  frameReq = requestAnimationFrame(frame);
+  if (now - lastFrame < frameGap(now)) return;
+  lastFrame = now;
+  animate();
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || frameReq) return;
+  clock.getDelta(); // no jump after a long pause
+  frameReq = requestAnimationFrame(frame);
+});
+frameReq = requestAnimationFrame(frame);
 
 // ---------- live connection ----------
 const conn = document.getElementById('conn');

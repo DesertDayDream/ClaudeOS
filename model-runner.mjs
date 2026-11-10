@@ -1,5 +1,6 @@
 import { spawn, execFile } from 'node:child_process';
 import { runCodexTurn } from './codex.mjs';
+import { TOOL_TIMEOUT_MS } from './tool-timeouts.mjs';
 import { selectModel, fallbackModel, usageLimited, modelCatalog } from './model-routing.mjs';
 
 // Both attempts keep the same permissions and tools. Injectable adapters make failure/stop tests deterministic.
@@ -39,7 +40,7 @@ export function runClaudeTask({ prompt, model, effort, cwd, mcpServers, allowed,
     '--permission-prompt-tool', 'mcp__claudeos__approve', '--allowedTools', allowed.join(','),
     ...(scope.disallowed?.length ? ['--disallowedTools', scope.disallowed.join(',')] : []),
     ...(scope.settings ? ['--settings', JSON.stringify(scope.settings)] : []), ...(mode ? ['--permission-mode', mode] : []), ...addDirs.flatMap(d => ['--add-dir', d])];
-  const proc = spawn('claude', args, { cwd, windowsHide: true, env: { ...process.env, MCP_TOOL_TIMEOUT: String(86400000), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } });
+  const proc = spawn('claude', args, { cwd, windowsHide: true, env: { ...process.env, MCP_TOOL_TIMEOUT: String(TOOL_TIMEOUT_MS), CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } });
   proc.stdin.on('error', () => {}); // startup/quota failures can close stdin before the prompt is consumed
   proc.stdin.end(prompt);
   let buffer = '', stderr = '', last, stopped = false;
