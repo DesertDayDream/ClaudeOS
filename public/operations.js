@@ -45,3 +45,26 @@ events.addEventListener('chat', e=>{
   if(!pending) { pending=true; requestAnimationFrame(()=>{ pending=false; const el=$('opsTicker'); const stick=el.scrollHeight-el.scrollTop-el.clientHeight<32; el.textContent=lines.join('\n'); if(stick) el.scrollTop=el.scrollHeight; }); }
 });
 loadQueue();
+
+// ---------- Chat height ----------
+// The edge between the chat and the stdout panel drags up or down; remembered on this PC.
+const STREAM_KEY = 'claudeos.opsStreamHeight';
+const setStream = h => { if (h) document.body.style.setProperty('--ops-stream-h', `${h}px`); else document.body.style.removeProperty('--ops-stream-h'); };
+setStream(Number(localStorage.getItem(STREAM_KEY)) || 0);
+const opsGrip = $('opsGrip');
+opsGrip.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  opsGrip.setPointerCapture(e.pointerId);
+  opsGrip.classList.add('drag');
+  // stream keeps at least its title (44px); the chat keeps at least 220px
+  const move = ev => setStream(Math.round(Math.max(44, Math.min(innerHeight - 86 - 30 - 220, innerHeight - 20 - ev.clientY))));
+  const up = () => {
+    opsGrip.classList.remove('drag');
+    opsGrip.removeEventListener('pointermove', move);
+    const h = parseInt(document.body.style.getPropertyValue('--ops-stream-h'));
+    if (h) localStorage.setItem(STREAM_KEY, h); else localStorage.removeItem(STREAM_KEY);
+  };
+  opsGrip.addEventListener('pointermove', move);
+  opsGrip.addEventListener('pointerup', up, { once: true });
+});
+opsGrip.addEventListener('dblclick', () => { setStream(0); localStorage.removeItem(STREAM_KEY); });
