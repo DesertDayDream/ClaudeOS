@@ -63,6 +63,16 @@ const DESK_TOOLS = [
   ] : []),
 ];
 
+// Claude Code's own AskUserQuestion can't reach the page in a headless chat (it returns "The user did
+// not answer" at once), so a chat asks with this instead: a card in the chat that waits for the answer.
+const ASK_TOOL = { name: 'ask_user', description: 'Ask the user one to four multiple-choice questions and wait for the answers. A card opens in the ClaudeOS chat with each question\'s options and a box for their own answer; this returns what they picked. Use it only when you are blocked on a decision that is genuinely the user\'s to make, not for things you can settle from the request, the code or sensible defaults. Each question must stand on its own (the user may see only the card). Put a recommended option first with " (Recommended)" at the end of its label. Do not add an "Other" option: the card always has one.',
+  inputSchema: { type: 'object', required: ['questions'], properties: { questions: { type: 'array', minItems: 1, maxItems: 4, items: { type: 'object', required: ['question', 'options'], properties: {
+    question: { type: 'string', description: 'The full question, ending with a question mark.' },
+    header: { type: 'string', description: 'A very short label (max 12 characters).' },
+    options: { type: 'array', minItems: 2, maxItems: 4, items: { type: 'object', required: ['label'], properties: { label: { type: 'string', description: '1 to 5 words.' }, description: { type: 'string', description: 'What this choice means or implies.' } } } },
+    multiSelect: { type: 'boolean', description: 'Let the user pick more than one option.' } } } } } } };
+const ASKS = DESK && !MODEL_TASK;
+
 function ask(args, where = '/api/approval') {
   return new Promise(resolve => {
     const body = JSON.stringify(args);
@@ -118,7 +128,7 @@ rl.on('line', async line => {
         skipped: { type: 'array', items: { type: 'object', properties: { request: { type: 'string' }, reason: { type: 'string' } } }, description: 'Requests nobody on the team can do, or too unclear to act on.' },
         notes: { type: 'string', description: 'Anything the user should know.' },
       } },
-    }] : []), ...(DESK ? DESK_TOOLS : []), ...(DESK || MODEL_TASK ? MODEL_TOOLS : [])] });
+    }] : []), ...(ASKS ? [ASK_TOOL] : []), ...(DESK ? DESK_TOOLS : []),...(DESK || MODEL_TASK ? MODEL_TOOLS : [])] });
   }
   if (method === 'tools/call' && ((DESK && DESK_TOOLS.some(t => t.name === params?.name)) || ((DESK || MODEL_TASK) && MODEL_TOOLS.some(t => t.name === params?.name)))) {
     let modelCaller, parentSelection;
@@ -135,6 +145,14 @@ rl.on('line', async line => {
   if (method === 'tools/call' && params?.name === 'post_brief' && TEAM.length) {
     const r = await ask({ ...(params.arguments || {}), chat: CHAT }, '/api/brief');
     return reply(id, { content: [{ type: 'text', text: r.error || r.text || 'Brief accepted.' }], isError: !!r.error });
+  }
+  if (method === 'tools/call' && params?.name === 'ask_user' && ASKS) {
+    const input = params.arguments || {};
+    const r = await ask({ tool_name: 'ask_user', input, question: true, ...(WHO ? { who: WHO } : { chat: CHAT }) });
+    if (r.behavior !== 'allow') return reply(id, { content: [{ type: 'text', text: r.message || r.error || 'The user did not answer.' }], isError: true });
+    const answers = r.answers || {};
+    const text = (input.questions || []).map(q => `"${q.question}" = "${answers[q.question] || '(no answer)'}"`).join('\n');
+    return reply(id, { content: [{ type: 'text', text: `The user answered:\n${text}\nCarry on with these answers in mind.` }] });
   }
   if (method === 'tools/call' && params?.name === 'approve') {
     const decision = await ask({ ...(params.arguments || {}), ...(WHO ? { who: WHO } : { chat: CHAT }) });

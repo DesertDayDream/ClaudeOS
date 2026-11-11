@@ -70,8 +70,9 @@ const MAX_IMAGE = 3.7 * 1024 * 1024; // the API takes images up to 5 MB once bas
 const MAX_UPLOAD = 500 * 1024 * 1024;
 const newId = () => crypto.randomBytes(6).toString('hex');
 // what every chat can do besides Claude Code's own tools (approval-mcp.mjs serves these)
-const DESK_ALLOWED = ['terminal_read', 'terminal_list', 'terminal_stop', 'publish_artifact', 'start_session', 'message_session', 'show_preview', 'list_scheduled', 'model_catalog', 'run_model_task'];
+const DESK_ALLOWED = ['ask_user', 'terminal_read', 'terminal_list', 'terminal_stop', 'publish_artifact', 'start_session', 'message_session', 'show_preview', 'list_scheduled', 'model_catalog', 'run_model_task'];
 const DESK_PROMPT = `ClaudeOS desk tools (mcp__claudeos__*):
+- ask_user: when you are blocked on a decision that is genuinely the user's, ask it here (multiple choice, they can also type their own answer); it waits for the answer. AskUserQuestion doesn't work in ClaudeOS.
 - terminal_run / terminal_read / terminal_stop: long-running commands (dev servers, watchers, builds) in the user's Terminal tab, where they can watch and stop them. Short commands stay in Bash.
 - publish_artifact: when a page would be clearer than chat text (a report, dashboard, comparison, mock-up, small tool), write one self-contained .html file and publish it; give the user the link it returns.
 - show_preview: after starting a dev server, show it live in the preview panel beside the chat.
@@ -379,7 +380,8 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
         },
       };
       // terminal_run asks first, like Bash; reading tabs, artifacts and sessions don't
-      const allowed = ['mcp__memory', ...DESK_ALLOWED.map(t => `mcp__claudeos__${t}`)], denied = [];
+      // Claude Code's AskUserQuestion answers itself in a headless chat; ask_user puts the question in the page
+      const allowed = ['mcp__memory', ...DESK_ALLOWED.map(t => `mcp__claudeos__${t}`)], denied = ['AskUserQuestion'];
       // the tools the user turned on for this chat: a browser Claude drives, the computer itself
       const tools = state.tools || {};
       if (tools.browser) { mcpServers.browser = browserServer(); allowed.push('mcp__browser'); }
@@ -1340,15 +1342,17 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
   // Called (long-poll) by approval-mcp.mjs; resolves when the user clicks Allow or Deny.
   // Each card says which chat asked; employees working a brief ask here too (`who` says which one),
   // and their cards stay until answered, even after the chat's own answer ends.
-  function requestApproval({ tool_name, input, who, chat }) {
+  function requestApproval({ tool_name, input, who, chat, question }) {
     return new Promise(resolve => {
       const asker = chat ? convs.get(chat) : current();
       if (who ? !othersWorking() : !asker?.busy()) return resolve({ behavior: 'deny', message: 'No chat request is running.' });
       const id = crypto.randomUUID();
-      const card = { id, tool: tool_name, summary: toolSummary(tool_name, input), input, ...(who ? { who: String(who).slice(0, 60) } : { chat: asker.id }) };
+      const card = question
+        ? { id, question: true, questions: cleanQuestions(input?.questions), ...(who ? { who: String(who).slice(0, 60) } : { chat: asker.id }) }
+        : { id, tool: tool_name, summary: toolSummary(tool_name, input), input, ...(who ? { who: String(who).slice(0, 60) } : { chat: asker.id }) };
       approvals.set(id, { resolve: allow => resolve(allow), card, input });
       emit({ kind: 'approval', card });
-      notify({ chat: card.chat || null, title: `${card.who || 'Claude'} needs your OK`, body: card.summary || tool_name });
+      notify({ chat: card.chat || null, title: question ? `${card.who || 'Claude'} has a question` : `${card.who || 'Claude'} needs your OK`, body: question ? card.questions[0]?.question || '' : card.summary || tool_name });
     });
   }
   function requestCodexApproval(chatId, request, who) {
@@ -1378,9 +1382,24 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       notify({ chat: chatId, title: 'Codex needs your OK', body: summary });
     });
   }
-  function answerApproval(id, allow, decision) {
+  // what the page shows of a question card (whatever Claude sent, kept to the tool's shape)
+  function cleanQuestions(list) {
+    return (Array.isArray(list) ? list : []).slice(0, 4).map(q => ({
+      question: String(q?.question || '').slice(0, 1000), header: String(q?.header || '').slice(0, 40), multiSelect: !!q?.multiSelect,
+      options: (Array.isArray(q?.options) ? q.options : []).slice(0, 8).map(o => ({ label: String(o?.label ?? o).slice(0, 200), description: String(o?.description || '').slice(0, 500) })),
+    })).filter(q => q.question);
+  }
+  function answerApproval(id, allow, decision, answers) {
     const a = approvals.get(id);
     if (!a) return { error: 'That request is no longer waiting.' };
+    if (a.card.question) {
+      approvals.delete(id);
+      const picked = {};
+      if (allow) for (const q of a.card.questions) picked[q.question] = String(answers?.[q.question] ?? '').slice(0, 4000);
+      a.resolve(allow ? { behavior: 'allow', answers: picked } : { behavior: 'deny', message: 'The user skipped the questions. Carry on with your best judgment, or ask in chat.' });
+      emit({ kind: 'approval-done', id, allowed: !!allow, answers: allow ? picked : null });
+      return { ok: true };
+    }
     if (a.card.engine === 'codex') {
       if (!a.card.choices.includes(decision)) return { error: 'That decision is not available for this request.' };
       approvals.delete(id); a.resolve(decision);

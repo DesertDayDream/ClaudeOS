@@ -1048,7 +1048,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/chat/options') return json(res, 200, chat.setOptions(body));
   if (url.pathname === '/api/chat/wrap') return json(res, 200, chat.wrapUp());
   if (url.pathname === '/api/approval') return json(res, 200, await chat.requestApproval(body));
-  if (url.pathname === '/api/approval/answer') return json(res, 200, chat.answerApproval(body.id, body.allow, body.decision));
+  if (url.pathname === '/api/approval/answer') return json(res, 200, chat.answerApproval(body.id, body.allow, body.decision, body.answers));
   return json(res, 404, { error: 'not found' });
 }
 

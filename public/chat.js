@@ -307,6 +307,7 @@ function editMessage(id) {
 
 function renderApproval(card) {
   if (document.getElementById('ap-' + card.id)) return;
+  if (card.question) return renderQuestion(card);
   const el = document.createElement('div');
   el.className = 'approve';
   el.id = 'ap-' + card.id;
@@ -331,9 +332,59 @@ function renderApproval(card) {
 }
 document.querySelector('aside header [data-tab="chat"]').addEventListener('click', e => e.currentTarget.classList.remove('ping'));
 
-function approvalDone(id, allowed) {
+// Claude asks you something (mcp__claudeos__ask_user): pick an option per question, or type your own
+function renderQuestion(card) {
+  const el = document.createElement('div');
+  el.className = 'approve ask';
+  el.id = 'ap-' + card.id;
+  const elsewhere = card.chat && card.chat !== currentId ? `<span class="in">From the chat “${esc(chatList.find(c => c.id === card.chat)?.title || 'another chat')}”</span>` : '';
+  el.innerHTML = `${elsewhere}<b>${esc(card.who || 'Claude')} asks:</b>` + card.questions.map((q, i) => `
+    <fieldset class="ask-q" data-q="${i}"><legend>${q.header ? `<span class="ask-h">${esc(q.header)}</span> ` : ''}${esc(q.question)}</legend>
+      ${q.options.map(o => `<label class="ask-o"><input type="${q.multiSelect ? 'checkbox' : 'radio'}" name="q${card.id}-${i}" value="${esc(o.label)}"><span><b>${esc(o.label)}</b>${o.description ? `<small>${esc(o.description)}</small>` : ''}</span></label>`).join('')}
+      <label class="ask-o"><input type="${q.multiSelect ? 'checkbox' : 'radio'}" name="q${card.id}-${i}" value="" data-other><span><b>Other</b><input type="text" class="ask-other" placeholder="Your own answer"></span></label>
+    </fieldset>`).join('') + '<div class="ask-acts"><button class="btn primary" data-ask="send">Send answers</button> <button class="btn" data-ask="skip">Skip</button></div>';
+  // typing an answer of your own picks Other
+  el.addEventListener('input', e => {
+    if (!e.target.matches('.ask-other')) return;
+    const other = e.target.closest('.ask-o').querySelector('[data-other]');
+    if (e.target.value.trim()) other.checked = true;
+  });
+  el.addEventListener('click', e => {
+    const b = e.target.closest('[data-ask]');
+    if (!b) return;
+    const send = b.dataset.ask === 'send', answers = {};
+    if (send) {
+      for (const [i, q] of card.questions.entries()) {
+        const fs = el.querySelector(`[data-q="${i}"]`);
+        const picked = [...fs.querySelectorAll('input:checked')].map(x => x.dataset.other !== undefined ? fs.querySelector('.ask-other').value.trim() : x.value).filter(Boolean);
+        if (!picked.length) { fs.classList.add('need'); fs.querySelector('input').focus(); return; }
+        fs.classList.remove('need');
+        answers[q.question] = picked.join(', ');
+      }
+    }
+    for (const x of el.querySelectorAll('button')) x.disabled = true;
+    const again = () => { for (const x of el.querySelectorAll('button')) x.disabled = false; };
+    api('/api/approval/answer', { id: card.id, allow: send, ...(send ? { answers } : {}) })
+      .then(result => { if (result.error) { alert(result.error); again(); } })
+      .catch(again);
+  });
+  log.appendChild(el);
+  scrollDown(true);
+  el.querySelector('input')?.focus({ preventScroll: true });
+  const tab = document.querySelector('aside header [data-tab="chat"]');
+  if (tab.getAttribute('aria-selected') !== 'true') tab.classList.add('ping');
+}
+
+function approvalDone(id, allowed, answers) {
   const el = document.getElementById('ap-' + id);
   if (!el) return;
+  if (el.classList.contains('ask')) {
+    el.classList.add('done');
+    el.querySelector('.ask-acts')?.remove();
+    for (const x of el.querySelectorAll('input')) x.disabled = true;
+    el.insertAdjacentHTML('beforeend', `<span class="note">${answers ? 'Answered: ' + esc(Object.values(answers).join(' · ')) : 'Skipped'}</span>`);
+    return;
+  }
   el.classList.add('done');
   for (const x of el.querySelectorAll('button')) x.remove();
   el.insertAdjacentHTML('beforeend', `<span class="note">${allowed ? 'Allowed' : 'Denied'}</span>`);
@@ -414,7 +465,7 @@ function onEvent(ev) {
   else if (ev.kind === 'update') { const e = messages.get(ev.id); if (e) render({ ...e.msg, ...ev.fields }); }
   else if (ev.kind === 'busy') setBusy(ev.busy);
   else if (ev.kind === 'approval') renderApproval(ev.card);
-  else if (ev.kind === 'approval-done') approvalDone(ev.id, ev.allowed);
+  else if (ev.kind === 'approval-done') approvalDone(ev.id, ev.allowed, ev.answers);
   else if (ev.kind === 'open') { listEl.hidden = true; load(); }
   else if (ev.kind === 'list') showList(ev);
   else if (ev.kind === 'context') { context = ev.context; showContext(); }
