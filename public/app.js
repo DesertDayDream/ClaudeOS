@@ -1027,6 +1027,7 @@ function renderPanel() {
   const team = document.getElementById('teamList'); // the briefs (queue.js) are on the Activity tab
   const groups = ['project', 'personal', 'plugin', 'contractor'];
   let html = state.brain ? `<div class="team-acts"><button class="btn" data-hire title="Write a new SKILL.md in ${esc(state.brain.name)}/.claude/skills">+ Hire</button><button class="btn" data-newdept title="A room in the building for a group of employees and their projects">+ Department</button></div>` : '';
+  html += learningHtml();
   const byWork = (a, b) => (work.busy.has(b.id) - work.busy.has(a.id)) || ((work.load.get(b.id) || 0) - (work.load.get(a.id) || 0)) || a.name.localeCompare(b.name);
   const row = s => {
     const n = work.load.get(s.id) || 0;
@@ -1200,7 +1201,10 @@ function coachButton(s) {
 function coachedHtml(s) {
   const c = state.coaching?.[s.id];
   if (!c) return '';
-  return `<div class="coached ${c.undone ? 'undone' : ''}"><b>${c.undone ? 'Coaching undone' : 'Coached'}</b> ${ago(c.at)}${c.why === 'auto' ? ' (automatically)' : ''}${c.weak ? ` from ${c.weak} weak run${c.weak > 1 ? 's' : ''}` : ''}: ${esc(c.summary)}${c.undone ? '' : ' <button class="btn mini" data-skill="uncoach">Undo</button>'}</div>`;
+  const exam = c.exam?.tasks ? ` Practice exam: ${Math.round(c.exam.score * 100)}/100 against the old instructions (${c.exam.wins} better, ${c.exam.ties} even, ${c.exam.losses} worse).` : c.untested ? ' No practice tasks yet, so it went in untested.' : '';
+  if (c.rejected) return `<div class="coached undone"><b>Coaching not used</b> ${ago(c.at)}: the new instructions did worse on the practice exam, so they kept their current ones.${esc(exam)}</div>`;
+  if (c.rolledBack) return `<div class="coached undone"><b>Coaching rolled back</b> ${ago(c.at)}: their real work got worse after it, so the old instructions are back.</div>`;
+  return `<div class="coached ${c.undone ? 'undone' : ''}"><b>${c.undone ? 'Coaching undone' : c.settled ? 'Coached, and it held up' : 'Coached'}</b> ${ago(c.at)}${c.why === 'auto' ? ' (automatically)' : ''}${c.weak ? ` from ${c.weak} weak run${c.weak > 1 ? 's' : ''}` : ''}: ${esc(c.summary)}${esc(exam)}${c.undone ? '' : ' <button class="btn mini" data-skill="uncoach">Undo</button>'}</div>`;
 }
 async function uncoach(id) {
   const r = await api('/api/skills/uncoach', { id });
@@ -1208,8 +1212,25 @@ async function uncoach(id) {
 }
 events.addEventListener('coached', e => {
   const c = JSON.parse(e.data);
+  if (c.outcome === 'rejected') return toast(`${c.employee}'s new instructions failed the practice exam, so they weren't used.`);
+  if (c.outcome === 'rolledBack') return toast(`${c.employee}'s last coaching made real work worse, so it was rolled back.`);
   toast(`Coached ${c.employee}: ${c.summary}`, 'Undo', () => uncoach(c.id));
 });
+// The CEO report (learning.mjs): one plain line per employee on how they're doing and learning
+const LEARN_ICONS = { good: '🟢', improving: '📈', steady: '🟡', slipping: '📉', attention: '🔴', new: '⚪' };
+let learningOpen = localStorage.getItem('learningOpen') !== '0';
+function learningHtml() {
+  const L = state.learning;
+  if (!L?.people?.length) return '';
+  const g = L.grader;
+  const grader = !g.enough ? `You've rated ${g.n} job${g.n === 1 ? '' : 's'} the AI grader also graded; after ${5 - g.n} more we can check that it judges like you.`
+    : g.trusted ? `The AI grader agrees with your ratings ${g.agree} of ${g.n} times, so the coach trusts it.`
+    : `The AI grader agrees with you only ${g.agree} of ${g.n} times, so the coach learns only from jobs you rated yourself.`;
+  const rows = L.people.map(p => `<div class="lr-row" data-id="${esc(p.id)}"><span>${LEARN_ICONS[p.status] || '⚪'}</span><b>${esc(p.name)}</b> ${esc(p.says)}${p.lesson ? `<small>Last lesson ${ago(p.lesson.at)}: ${esc(p.lesson.outcome)}.${p.rules ? ` ${p.rules} learned rule${p.rules > 1 ? 's' : ''}.` : ''}</small>` : p.rules ? `<small>${p.rules} learned rule${p.rules > 1 ? 's' : ''}.</small>` : ''}</div>`).join('');
+  return `<div class="learning ${learningOpen ? '' : 'closed'}"><div class="lr-h" data-learning-toggle>Learning report <em>${learningOpen ? '▾' : '▸'}</em></div>${learningOpen ? `${rows}
+    <div class="lr-note">${L.toRate ? `<b>Your part:</b> ${L.toRate} recent job${L.toRate > 1 ? 's are' : ' is'} waiting for your 👍/👎 on the Activity tab. Your ratings teach them fastest.` : '<b>Your part:</b> nothing to rate right now.'}</div>
+    <div class="lr-note">${esc(grader)}</div>` : ''}</div>`;
+}
 // Their brain explained: what each part of it shows, and what would raise it
 function mindHtml(s) {
   const i = mindOf(s), r = i.record;
@@ -1219,16 +1240,16 @@ function mindHtml(s) {
     ${bar('Effort', i.brightness, `${i.effortText} · how bright it is`, 'More effort makes a brighter brain; high and up glow. Pick it in their own chat box.')}
     ${bar('SKILL.md', i.meter, `${skillText(s.craft)} · how full it is`, 'Clear instructions, a description that says when to use it, sections, steps, examples and bundled scripts fill the brain.')}
     ${bar('Finishing', r.runs ? r.finish : null, r.runs ? `${r.done} of ${r.runs} runs done${r.failed ? `, ${r.failed} failed` : ''}` : 'no runs yet', 'How often their runs finish. 40% of the rating once their work is graded.')}
-    ${bar('Quality', r.quality, r.graded ? `${r.graded} run${r.graded > 1 ? 's' : ''} graded (Haiku's 1–5, or your 👍/👎)` : 'not graded yet: Haiku grades each finished run', "How good the finished work was. 60% of the rating. Your 👍/👎 on a run replaces Haiku's grade.")}
+    ${bar('Quality', r.quality, r.graded ? `${r.graded} run${r.graded > 1 ? 's' : ''} graded (the AI grader's 1–5, or your 👍/👎)` : 'not graded yet: Claude Sonnet grades each finished run', "How good the finished work was. 60% of the rating. Your 👍/👎 on a run replaces the AI grade.")}
     ${needsWork(i.fresh) ? `<div class="needs-note">${NEEDS_BADGE}Quality ${Math.round(i.fresh.quality * 100)}/100 over ${i.fresh.graded} graded runs${state.coaching?.[s.id] ? ' since the last coaching' : ''}. The coach rewrites their instructions automatically within a minute, once no chat is working.</div>` : ''}
     ${bar('Rating', r.runs ? r.score : null, r.runs ? 'finishing and quality, counting more the more runs there are · the number' : 'no runs yet: shows "new" until they finish work', 'Good, finished work raises their rating; it counts more the more runs there are.')}
   </div>`;
 }
-// How good a finished run's work was: Haiku's grade and why, and the user's thumbs that override it
+// How good a finished run's work was: the AI grader's grade and why, and the user's thumbs that override it
 function gradeHtml(r) {
   const g = r.grade || {}, q = runQuality(g);
-  const label = g.user ? `You rated it ${g.user === 'up' ? 'good' : 'poor'}${g.ai ? ` · Haiku gave ${g.ai}/5` : ''}`
-    : g.ai ? `Haiku: ${g.ai}/5${g.why ? ` · ${g.why}` : ''}` : 'Waiting for a grade…';
+  const label = g.user ? `You rated it ${g.user === 'up' ? 'good' : 'poor'}${g.ai ? ` · AI grader gave ${g.ai}/5` : ''}`
+    : g.ai ? `AI grade: ${g.ai}/5${g.why ? ` · ${g.why}` : ''}` : 'Waiting for a grade…';
   const color = q == null ? '#9aa3c7' : q >= 0.75 ? '#7ee0a8' : q >= 0.5 ? '#f2c14e' : '#f08a7e';
   return `<div class="grade"><span style="color:${color}" title="${esc(g.why || '')}">${esc(label)}</span>
     <button class="vote ${g.user === 'up' ? 'on' : ''}" data-vote="up" title="Good work">👍</button><button class="vote ${g.user === 'down' ? 'on' : ''}" data-vote="down" title="Poor work">👎</button></div>`;
@@ -1982,6 +2003,7 @@ function showTab(name) {
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.id === name);
 }
 document.getElementById('team').addEventListener('click', async e => {
+  if (e.target.closest('[data-learning-toggle]')) { learningOpen = !learningOpen; localStorage.setItem('learningOpen', learningOpen ? '1' : '0'); return renderPanel(); }
   if (e.target.closest('[data-newdept]')) return openDept(NEW_DEPT);
   const dh = e.target.closest('[data-dept]');
   if (dh) return openDept(dh.dataset.dept);
@@ -1997,7 +2019,7 @@ document.getElementById('team').addEventListener('click', async e => {
     if (r.error) { copy.disabled = false; return toast(r.error); }
     return toast(`Hired: ${copy.dataset.copy}`, null, null, `Copied into .claude/skills/${r.folder}`);
   }
-  const row = e.target.closest('.emp');
+  const row = e.target.closest('.emp, .lr-row');
   if (!row) return;
   selected = row.dataset.id;
   deskView = 'chat';

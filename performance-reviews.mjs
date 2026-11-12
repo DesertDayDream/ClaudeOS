@@ -32,7 +32,25 @@ export function reviewBody(body, task, corrections) {
   const rest = body.slice(at + REVIEW_HEADING.length);
   const next = rest.search(/\r?\n## /);
   const end = next < 0 ? body.length : at + REVIEW_HEADING.length + next;
-  return body.slice(0, end).trimEnd() + '\n' + fresh.join('\n') + '\n' + body.slice(end);
+  return pruneRules(body.slice(0, end).trimEnd() + '\n' + fresh.join('\n') + '\n' + body.slice(end));
+}
+
+// Keep the rules short and current: the same rule learned twice is kept once (the newest), and past
+// MAX_RULES the oldest retire, so the instructions don't fill up with stale or clashing rules.
+export const MAX_RULES = 12;
+const ruleOf = line => (line.split('NEW RULE:')[1] || line).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+export function pruneRules(body) {
+  const at = body.indexOf(REVIEW_HEADING);
+  if (at < 0) return body;
+  const next = body.slice(at + REVIEW_HEADING.length).search(/\r?\n## /);
+  const end = next < 0 ? body.length : at + REVIEW_HEADING.length + next;
+  const lines = body.slice(at + REVIEW_HEADING.length, end).split(/\r?\n/);
+  const rules = lines.filter(l => l.startsWith('- From Task'));
+  const seen = new Set();
+  const keep = [...rules].reverse().filter(l => { const k = ruleOf(l); if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, MAX_RULES).reverse();
+  if (keep.length === rules.length) return body;
+  const other = lines.filter(l => !l.startsWith('- From Task') && l.trim());
+  return body.slice(0, at) + REVIEW_HEADING + '\n\n' + [...other, ...keep].join('\n') + '\n' + body.slice(end);
 }
 
 export function applyReview(employee, task, corrections) {

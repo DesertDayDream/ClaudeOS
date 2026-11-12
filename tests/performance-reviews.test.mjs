@@ -42,7 +42,7 @@ test('coaching preserves learned corrections and adds only findings from this em
     const file = path.join(dir, 'SKILL.md');
     fs.writeFileSync(file, reviewBody('Original body.', 'old:1', [finding]));
     const employee = {id:'builder', name:'builder', file, read:()=>({name:'builder', body:fs.readFileSync(file,'utf8')}), write:({body})=>fs.writeFileSync(file,body)};
-    const c = createCoaching({file:path.join(dir,'history.json'), backupDir:path.join(dir,'backups'), coach:async()=>({body:'Rewritten.',summary:'Corrected technical mistake.',weak:1,corrections:[{...finding,task:'new:1'},{...finding,task:'wrong:1'}]})});
+    const c = createCoaching({file:path.join(dir,'history.json'), backupDir:path.join(dir,'backups'), coach:async()=>({body:'Rewritten.',summary:'Corrected technical mistake.',weak:1,corrections:[{...finding,task:'new:1',rule:'You must not skip the build check; instead run the build before handing back.'},{...finding,task:'wrong:1'}]})});
     const result = await c.run(employee, [{key:'new:1',skillNames:['builder']}], {});
     assert.equal(result.ok,true);
     const text = fs.readFileSync(file,'utf8');

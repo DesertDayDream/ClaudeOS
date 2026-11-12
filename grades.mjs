@@ -1,4 +1,4 @@
-// How good each run's work was. When a run an employee worked on finishes, Claude Haiku grades the
+// How good each run's work was. When a run an employee worked on finishes, Claude Sonnet grades the
 // result against the task (1-5, with a one-line reason); the user's thumbs up or down replaces that grade.
 // Grades live in <data>/grades.json, keyed by the task key the page uses (`${session}:${task ts}`).
 import fs from 'node:fs';
@@ -65,7 +65,7 @@ export function parseGrade(text) {
 }
 
 // Ask Claude a one-off question: no tools, no MCP servers, no hooks, run outside any brain so it never
-// shows up as activity itself. Haiku grades; the coach uses a stronger model. Resolves the reply text, or null.
+// shows up as activity itself. Sonnet grades and coaches (a grader at least as strong as most workers). Resolves the reply text, or null.
 export function askClaude(prompt, { model = 'haiku', timeout = TIMEOUT_MS } = {}) {
   return new Promise(resolve => {
     const args = ['-p', '--model', model, '--output-format', 'json', '--tools', '', '--strict-mcp-config',
@@ -89,8 +89,9 @@ export function askClaude(prompt, { model = 'haiku', timeout = TIMEOUT_MS } = {}
     proc.stdin.end(prompt);
   });
 }
-const askHaiku = async prompt => {
-  const review = await askClaude(prompt);
+export const GRADER_MODEL = 'sonnet';
+const askGrader = async prompt => {
+  const review = await askClaude(prompt, { model: GRADER_MODEL });
   const grade = parseGrade(review);
   return grade ? { ...grade, review } : null;
 };
@@ -162,7 +163,7 @@ export async function coach(skill, runs, grades, ask = askClaude, since = 0) {
   return { ...r, weak: lessons.weak.length, strong: lessons.strong.length };
 }
 
-export function createGrades({ file, ask = askHaiku, onChange = () => {}, onCorrection = () => {} }) {
+export function createGrades({ file, ask = askGrader, onChange = () => {}, onCorrection = () => {} }) {
   let grades = {};
   try { grades = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* none yet */ }
   const failed = new Set(); // tried this session and couldn't grade: don't loop on it

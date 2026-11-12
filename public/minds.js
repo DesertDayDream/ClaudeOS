@@ -24,7 +24,7 @@ export function effortLevel(effort) {
   return EFFORT_LEVEL[String(effort || '').toLowerCase()] ?? 0.6; // unknown: Claude Code's default
 }
 
-// How good one run's work was, 0..1, or null if nobody has graded it: the user's thumbs win over Haiku's 1-5.
+// How good one run's work was, 0..1, or null if nobody has graded it: the user's thumbs win over the AI grader's 1-5.
 export function runQuality(grade) {
   if (!grade) return null;
   if (grade.user === 'up') return 1;
@@ -32,12 +32,14 @@ export function runQuality(grade) {
   return grade.ai >= 1 && grade.ai <= 5 ? (grade.ai - 1) / 4 : null;
 }
 
-// A run worth learning from: graded below "good" (Haiku 1-3, or your 👎). A top run (5/5 or 👍) shows what to keep.
+// A run worth learning from: graded below "good" (AI grade 1-3, or your 👎). A top run (5/5 or 👍) shows what to keep.
 export const weakRun = grade => { const q = runQuality(grade); return q != null && q < 0.75; };
 export const strongRun = grade => runQuality(grade) === 1;
 
-// Flag an employee whose finished work keeps coming back weak: quality under 50 over at least 3 graded runs.
-export function needsWork(r) { return !!r && r.graded >= 3 && r.quality != null && r.quality < 0.5; }
+// Flag an employee whose finished work keeps coming back weak: quality under 50 over at least 5 graded runs
+// (a pattern, not one or two bad days). The coach steps in on the same rule.
+export const PATTERN_RUNS = 5;
+export function needsWork(r) { return !!r && r.graded >= PATTERN_RUNS && r.quality != null && r.quality < 0.5; }
 
 // runs: [{ status: done | error | stopped | unfinished | working, grade?: { ai: 1-5, user: up | down } }] -> their rating, 0..1
 // Two halves: how often they finish (40%) and how good the finished work is (60%, once any run is graded).

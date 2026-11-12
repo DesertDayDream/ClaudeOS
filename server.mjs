@@ -30,6 +30,7 @@ import { createSkillEditor } from './skill-edit.mjs';
 import { createOrg } from './org.mjs';
 import { createGrades, finishedRuns } from './grades.mjs';
 import { createCoaching } from './coaching.mjs';
+import { runExam, learningReport } from './learning.mjs';
 import { ensureCabinet, findCabinet, cabinetTree } from './cabinets.mjs';
 import { appsInText, appForServer } from './public/apps.js';
 import { CATALOG, CONNECTORS_URL, KEY_HELP, addIntegration, removeIntegration, loginIntegration, isSigningIn, signInLink, cancelLogin, sendLoginRedirect, logoutIntegration, keysFor, saveKey, setPtyLoader } from './integrations.mjs';
@@ -331,12 +332,12 @@ try { ensureHome(); } catch (e) { console.error('Could not set up the Home brain
 // Compact brain (Memory tab and the top bar): oversized memory entries rewritten short, with a backup and Undo
 const compactor = createCompactor({ dataDir: DATA });
 const memorySize = brain => { try { return { ...memorySizeOf(memoryFileOf(brain)), busy: compactor.busy(brain.id), canUndo: compactor.canUndo(brain) }; } catch { return null; } };
-// The quality of each finished run: Haiku's grade and the user's thumbs (grades.mjs)
+// The quality of each finished run: the AI grader's grade and the user's thumbs (grades.mjs)
 const grades = createGrades({ file: path.join(DATA, 'grades.json'), onChange: () => refresh(), onCorrection: event => {
   const b = brains.active();
   if (b && b.id === event.brain) broadcast('skill-correction', { ...event, brain: b.id });
 } });
-const coaching = createCoaching({ file: path.join(DATA, 'coaching.json'), backupDir: path.join(DATA, 'coaching'), onChange: () => refresh() });
+const coaching = createCoaching({ file: path.join(DATA, 'coaching.json'), backupDir: path.join(DATA, 'coaching'), examine: runExam, onChange: () => refresh() });
 function withGrades(activity) { return { activity, grades: grades.for(finishedRuns(activity).map(r => r.key)) }; }
 setInterval(() => { const b = brains.active(); if (b) grades.tick(collectActivity(b), coachable(b)).catch(() => {}); }, 15000);
 
@@ -360,7 +361,7 @@ function snapshot() {
       memories: collectBrain(b), skills: teamSkills(b) })),
     // a clean brain hires from Home: the user's personal skills, copied into this brain's team
     home: brain.home || !brains.home() ? null : { id: brains.home().id, name: brains.home().name, skills: teamSkills(brains.home()) },
-    ...withGrades(collectActivity(brain)), coaching: coaching.view(skills.map(s => s.id)), at: Date.now(), org: org.snapshot(brain.id),
+    ...withGrades(collectActivity(brain)), coaching: coaching.view(skills.map(s => s.id)), learning: learningOf(brain), at: Date.now(), org: org.snapshot(brain.id),
     integrations: integrations.brainId === brain.id ? integrations.list : [],
   };
 }
@@ -416,7 +417,7 @@ let last = snapshot();
 let lastKey = keyOf(last);
 const clients = new Set();
 function keyOf(s) {
-  return JSON.stringify([s.brain?.id, s.memorySize, s.foundations, s.skills.map(x => x.constraints), s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id + s.craft?.score), s.minds, s.activity.length && s.activity[s.activity.length - 1], s.grades, s.coaching, s.org]);
+  return JSON.stringify([s.brain?.id, s.memorySize, s.foundations, s.skills.map(x => x.constraints), s.brains, s.integrations?.map(i => i.server + i.status), s.skills.map(x => x.apps?.map(a => a.key).join()), s.linked?.map(l => [l.id, l.busy, l.memories.length, l.skills.length]), s.memories.map(m => m.id + m.description), s.skills.map(s => s.id + s.craft?.score), s.minds, s.activity.length && s.activity[s.activity.length - 1], s.grades, s.coaching, s.learning, s.org]);
 }
 function refresh() {
   checkIntegrations(brains.active());
@@ -749,8 +750,21 @@ function coachable(brain) {
     read: () => skillEditor.read(team, s.folder), write: fields => skillEditor.save(team, s.folder, fields) }));
 }
 function announceCoached(e, r) {
-  if (r.ok && e.brain === brains.active()?.id) broadcast('skill-correction', { id: e.id, name: e.name, at: r.at, brain: e.brain });
-  if (r.ok) broadcast('coached', { id: e.id, name: e.name, employee: names[e.id] || e.name, summary: r.summary });
+  if ((r.ok || r.rolledBack) && e.brain === brains.active()?.id) broadcast('skill-correction', { id: e.id, name: e.name, at: r.at, brain: e.brain });
+  if (r.ok || r.rejected || r.rolledBack) broadcast('coached', { id: e.id, name: e.name, employee: names[e.id] || e.name, summary: r.summary,
+    outcome: r.rolledBack ? 'rolledBack' : r.rejected ? 'rejected' : 'saved', exam: r.exam || null });
+}
+// The CEO report on the Team tab (learning.mjs): how each of this brain's employees is doing and learning
+let learningCache = { key: '', value: null };
+function learningOf(brain) {
+  try {
+    const runs = finishedRuns(collectActivity(brain)), all = grades.all(), history = coaching.history();
+    const key = JSON.stringify([Math.floor(Date.now() / 60000), brain.id, runs.length, runs[runs.length - 1]?.end, Object.keys(all).length, Object.values(all).filter(g => g.user).length, JSON.stringify(history).length]);
+    if (learningCache.key === key) return learningCache.value;
+    const employees = coachable(brain).map(e => { let body = ''; try { body = e.read().body; } catch { /* unreadable */ } return { id: e.id, name: e.name, label: names[e.id], body }; });
+    learningCache = { key, value: learningReport({ employees, runs, grades: all, history }) };
+    return learningCache.value;
+  } catch { return null; }
 }
 setInterval(() => {
   const b = brains.active();

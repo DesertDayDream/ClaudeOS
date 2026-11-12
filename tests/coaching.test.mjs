@@ -10,9 +10,10 @@ const runsOf = (start, n) => Array.from({ length: n }, (_, i) => ({ key: `s:${st
 const down = runs => Object.fromEntries(runs.map(r => [r.key, { user: 'down' }]));
 
 test('an employee is due for coaching when their work since the last coaching needs work', () => {
-  const runs = runsOf(100, 3);
+  const runs = runsOf(100, 5);
   assert.equal(isDue(runs, down(runs), 'writer'), true);
-  assert.equal(isDue(runs, down(runs), 'writer', 101), false); // only one run after the last coaching
+  assert.equal(isDue(runs, down(runs), "writer", 101), false); // only three runs after the last coaching
+  assert.equal(isDue(runs.slice(0, 3), down(runs), "writer"), false); // 3 bad runs are not a pattern yet
   assert.equal(isDue(runs, down(runs), 'someone-else'), false);
   assert.equal(isDue(runs, Object.fromEntries(runs.map(r => [r.key, { ai: 5 }])), 'writer'), false);
 });
@@ -31,7 +32,7 @@ test('the coach saves new instructions right away, once per batch of runs, and U
     let changed = 0;
     const c = createCoaching({ file: path.join(dir, 'coaching.json'), backupDir: path.join(dir, 'backups'), coach, onChange: () => changed++ });
 
-    const runs = runsOf(Date.now() - 10000, 3);
+    const runs = runsOf(Date.now() - 10000, 5);
     const t = await c.tick([employee], runs, down(runs));
     assert.equal(t.result.ok, true);
     assert.match(fs.readFileSync(skill, 'utf8'), /New steps\./);
@@ -50,8 +51,8 @@ test('the coach saves new instructions right away, once per batch of runs, and U
     // undone still counts as coached: the same runs don't trigger it again
     assert.equal(await c.tick([employee], runs, down(runs)), null);
 
-    // three new weak runs: coached again, learning only from those
-    const later = runsOf(Date.now() + 1000, 3);
+    // five new weak runs: coached again, learning only from those
+    const later = runsOf(Date.now() + 1000, 5);
     const all = [...runs, ...later];
     const t2 = await c.tick([employee], all, down(all));
     assert.equal(t2.result.ok, true);
