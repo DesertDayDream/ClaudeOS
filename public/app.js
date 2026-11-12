@@ -1226,9 +1226,12 @@ function learningHtml() {
   const grader = !g.enough ? `You've rated ${g.n} job${g.n === 1 ? '' : 's'} the AI grader also graded; after ${5 - g.n} more we can check that it judges like you.`
     : g.trusted ? `The AI grader agrees with your ratings ${g.agree} of ${g.n} times, so the coach trusts it.`
     : `The AI grader agrees with you only ${g.agree} of ${g.n} times, so the coach learns only from jobs you rated yourself.`;
-  const rows = L.people.map(p => `<div class="lr-row" data-id="${esc(p.id)}"><span>${LEARN_ICONS[p.status] || '⚪'}</span><b>${esc(p.name)}</b> ${esc(p.says)}${p.lesson ? `<small>Last lesson ${ago(p.lesson.at)}: ${esc(p.lesson.outcome)}.${p.rules ? ` ${p.rules} learned rule${p.rules > 1 ? 's' : ''}.` : ''}</small>` : p.rules ? `<small>${p.rules} learned rule${p.rules > 1 ? 's' : ''}.</small>` : ''}</div>`).join('');
+  const job = j => `<div class="lr-job" data-job="${esc(j.key)}"><span class="lr-task" title="${esc(j.why ? `AI grader: ${j.why}` : '')}">${esc(j.task)} <i>${ago(j.end)}${j.ai ? ` · AI ${j.ai}/5` : ''}</i></span>
+    <button class="vote ${j.user === 'up' ? 'on' : ''}" data-lr-vote="up" title="Good work">👍</button><button class="vote ${j.user === 'down' ? 'on' : ''}" data-lr-vote="down" title="Poor work">👎</button></div>`;
+  const rows = L.people.map(p => `<div class="lr-person"><div class="lr-row" data-id="${esc(p.id)}"><span>${LEARN_ICONS[p.status] || '⚪'}</span><b>${esc(p.name)}</b> ${esc(p.says)}${p.lesson ? `<small>Last lesson ${ago(p.lesson.at)}: ${esc(p.lesson.outcome)}.${p.rules ? ` ${p.rules} learned rule${p.rules > 1 ? 's' : ''}.` : ''}</small>` : p.rules ? `<small>${p.rules} learned rule${p.rules > 1 ? 's' : ''}.</small>` : ''}</div>
+    ${p.recentJobs?.length ? p.recentJobs.map(job).join('') : '<div class="lr-job none">No finished jobs yet.</div>'}</div>`).join('');
   return `<div class="learning ${learningOpen ? '' : 'closed'}"><div class="lr-h" data-learning-toggle>Learning report <em>${learningOpen ? '▾' : '▸'}</em></div>${learningOpen ? `${rows}
-    <div class="lr-note">${L.toRate ? `<b>Your part:</b> ${L.toRate} recent job${L.toRate > 1 ? 's are' : ' is'} waiting for your 👍/👎 on the Activity tab. Your ratings teach them fastest.` : '<b>Your part:</b> nothing to rate right now.'}</div>
+    <div class="lr-note">${L.toRate ? `<b>Your part:</b> ${L.toRate} recent job${L.toRate > 1 ? 's are' : ' is'} waiting for your 👍/👎. Rate them right here; your ratings teach them fastest.` : '<b>Your part:</b> nothing to rate right now.'}</div>
     <div class="lr-note">${esc(grader)}</div>` : ''}</div>`;
 }
 // Their brain explained: what each part of it shows, and what would raise it
@@ -2004,6 +2007,15 @@ function showTab(name) {
 }
 document.getElementById('team').addEventListener('click', async e => {
   if (e.target.closest('[data-learning-toggle]')) { learningOpen = !learningOpen; localStorage.setItem('learningOpen', learningOpen ? '1' : '0'); return renderPanel(); }
+  // rating a job in the Learning report; a second click on the same thumb takes the vote back
+  const lrVote = e.target.closest('[data-lr-vote]');
+  if (lrVote) {
+    const r = await api('/api/grade', { key: lrVote.closest('[data-job]').dataset.job, vote: lrVote.classList.contains('on') ? '' : lrVote.dataset.lrVote });
+    if (r.error) return toast(r.error);
+    for (const b of lrVote.parentElement.querySelectorAll('.vote')) b.classList.toggle('on', b === lrVote && !lrVote.classList.contains('on'));
+    return;
+  }
+  if (e.target.closest('.lr-job')) return;
   if (e.target.closest('[data-newdept]')) return openDept(NEW_DEPT);
   const dh = e.target.closest('[data-dept]');
   if (dh) return openDept(dh.dataset.dept);

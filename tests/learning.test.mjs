@@ -113,6 +113,19 @@ test('the CEO report says in one line how each employee is doing', () => {
   assert.equal(rep.people[0].name, 'Wren');
   assert.equal(rep.people[0].lesson.outcome, 'kept: real work held up');
   assert.equal(rep.people[1].status, 'new');
-  assert.equal(rep.toRate, 10);
+  assert.equal(rep.toRate, 3); // only the unrated jobs the report lists
   assert.equal(rep.grader.enough, false);
+});
+
+test('the report lists each employee\'s latest jobs, newest first, to rate in place', () => {
+  const runs = Array.from({ length: 5 }, (_, i) => ({ ...run('s:' + i, 1000 + i), prompt: `Task number ${i}\n<system-reminder>noise</system-reminder>` }));
+  const grades = { 's:4': { ai: 4, why: 'fine', user: 'up' } };
+  const rep = learningReport({ employees: [{ id: 'w', name: 'writer', body: '' }, { id: 'n', name: 'newbie', body: '' }], runs, grades });
+  const jobs = rep.people[0].recentJobs;
+  assert.equal(jobs.length, 3);
+  assert.deepEqual(jobs.map(j => j.key), ['s:4', 's:3', 's:2']);
+  assert.equal(jobs[0].task, 'Task number 4');
+  assert.equal(jobs[0].user, 'up');
+  assert.equal(jobs[0].ai, 4);
+  assert.deepEqual(rep.people[1].recentJobs, []);
 });

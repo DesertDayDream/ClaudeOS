@@ -122,11 +122,13 @@ const countRules = body => {
   return body.slice(at).split(/\r?\n(?=## )/)[0].split(/\r?\n/).filter(l => l.startsWith('- From Task')).length;
 };
 const pct = q => Math.round(q * 100);
+export const RECENT_JOBS = 3;
+// a task's first line, short enough to read at a glance
+const brief = p => { const s = String(p || '').replace(/<[^>]+>[\s\S]*?<\/[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); return s ? (s.length > 90 ? s.slice(0, 87) + '…' : s) : 'A job from the Manager'; };
 
 // employees: [{ id, name, label (what the user calls them), body (their SKILL.md) }]; history: coaching history by id
 export function learningReport({ employees, runs, grades, history = {}, now = Date.now() }) {
   const agreement = graderAgreement(grades);
-  const toRate = runs.filter(r => r.outcome === 'done' && now - r.end < 14 * 24 * 3600 * 1000 && grades[r.key]?.ai && !grades[r.key]?.user).length;
   const people = employees.map(e => {
     const mine = runs.filter(r => r.outcome === 'done' && ranAs(r, e.name)).map(r => ({ end: r.end, q: runQuality(grades[r.key]) })).filter(r => r.q != null);
     const recent = mean(mine.slice(-5).map(r => r.q)), earlier = mean(mine.slice(-10, -5).map(r => r.q));
@@ -147,9 +149,14 @@ export function learningReport({ employees, runs, grades, history = {}, now = Da
         : last.undone ? 'undone by you' : last.settled ? 'kept: real work held up' : last.untested ? 'in use (no practice tasks yet), being watched'
         : 'passed the practice exam, being watched',
     };
-    return { id: e.id, name: e.label || e.name, status, says, jobs: mine.length, rules: countRules(e.body), lessons: coachings.filter(c => !c.rejected && !c.undone && !c.rolledBack).length, lesson };
+    // their last few finished jobs, newest first, to rate right here
+    const recentJobs = runs.filter(r => r.outcome === 'done' && ranAs(r, e.name)).slice(-RECENT_JOBS).reverse().map(r => {
+      const g = grades[r.key] || {};
+      return { key: r.key, end: r.end, task: brief(r.prompt), ai: g.ai || null, why: g.why || '', user: g.user || null };
+    });
+    return { id: e.id, name: e.label || e.name, status, says, jobs: mine.length, rules: countRules(e.body), lessons: coachings.filter(c => !c.rejected && !c.undone && !c.rolledBack).length, lesson, recentJobs };
   });
   return {
-    people, toRate, grader: { ...agreement, trusted: graderTrusted(agreement), enough: agreement.n >= MIN_CHECKS },
+    people, toRate: people.reduce((n, p) => n + p.recentJobs.filter(j => !j.user).length, 0), grader: { ...agreement, trusted: graderTrusted(agreement), enough: agreement.n >= MIN_CHECKS },
   };
 }

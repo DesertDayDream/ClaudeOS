@@ -759,7 +759,7 @@ let learningCache = { key: '', value: null };
 function learningOf(brain) {
   try {
     const runs = finishedRuns(collectActivity(brain)), all = grades.all(), history = coaching.history();
-    const key = JSON.stringify([Math.floor(Date.now() / 60000), brain.id, runs.length, runs[runs.length - 1]?.end, Object.keys(all).length, Object.values(all).filter(g => g.user).length, JSON.stringify(history).length]);
+    const key = JSON.stringify([Math.floor(Date.now() / 60000), brain.id, runs.length, runs[runs.length - 1]?.end, Object.keys(all).length, Object.values(all).map(g => g.user || '-').join(''), JSON.stringify(history).length]);
     if (learningCache.key === key) return learningCache.value;
     const employees = coachable(brain).map(e => { let body = ''; try { body = e.read().body; } catch { /* unreadable */ } return { id: e.id, name: e.name, label: names[e.id], body }; });
     learningCache = { key, value: learningReport({ employees, runs, grades: all, history }) };
