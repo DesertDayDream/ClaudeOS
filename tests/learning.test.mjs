@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { graderAgreement, graderTrusted, trustedGrades, updateExam, runExam, parseVerdict, afterCoaching, learningReport, EXAM_SIZE } from '../learning.mjs';
+import { graderAgreement, graderTrusted, trustedGrades, updateExam, runExam, parseVerdict, afterCoaching, learningReport, EXAM_SIZE, askedText, deliveredText } from '../learning.mjs';
 import { createCoaching } from '../coaching.mjs';
 import { reviewBody, MAX_RULES, REVIEW_HEADING } from '../performance-reviews.mjs';
 
@@ -124,8 +124,16 @@ test('the report lists each employee\'s latest jobs, newest first, to rate in pl
   const jobs = rep.people[0].recentJobs;
   assert.equal(jobs.length, 3);
   assert.deepEqual(jobs.map(j => j.key), ['s:4', 's:3', 's:2']);
-  assert.equal(jobs[0].task, 'Task number 4');
+  assert.equal(jobs[0].asked, 'Task number 4');
+  assert.equal(jobs[0].delivered, 'reply s:4');
   assert.equal(jobs[0].user, 'up');
   assert.equal(jobs[0].ai, 4);
   assert.deepEqual(rep.people[1].recentJobs, []);
+});
+
+test('jobs read plainly: the user\'s own words and the first lines of the reply', () => {
+  assert.equal(askedText('<claudeos-context> You are the Manager of this brain\'s team, and this chat is how the u…'), null);
+  assert.equal(askedText('<claudeos-context>x</claudeos-context> Make the report easier to read. Attached (saved in the brain folder; …): a.png'), 'Make the report easier to read.');
+  assert.equal(deliveredText('**Done.** I moved rating into the [Learning report](x). It\'s tested.\n\n- more'), 'Done. I moved rating into the Learning report.');
+  assert.equal(deliveredText(''), null);
 });

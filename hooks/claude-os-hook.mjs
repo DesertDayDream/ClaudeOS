@@ -9,6 +9,8 @@ import path from 'node:path';
 const DATA = process.argv[2] || process.env.CLAUDEOS_HOME || path.join(os.homedir(), '.claudeos');
 const LOG = path.join(DATA, 'activity.jsonl');
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+// the user's own words: drop the context ClaudeOS and Claude Code wrap around a message, and the attachment list
+const ask = p => String(p || '').replace(/<(claudeos-context|system-reminder|command-[a-z-]+)>[\s\S]*?<\/\1>/g, ' ').replace(/\n\s*Attached \(saved in the brain folder[\s\S]*$/, '');
 const clip = (s, n) => { s = String(s || '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 
 function tail(file, bytes) {
@@ -76,7 +78,7 @@ process.stdin.on('end', () => {
     const base = { ts: Date.now(), session: h.session_id, cwd: h.cwd };
     let ev = null;
     if (h.hook_event_name === 'UserPromptSubmit') {
-      ev = { ...base, type: 'task', prompt: clip(h.prompt, 140) };
+      ev = { ...base, type: 'task', prompt: clip(ask(h.prompt), 160) };
     } else if (h.hook_event_name === 'PreToolUse' && h.tool_name === 'Skill') {
       ev = { ...base, type: 'skill', skill: h.tool_input?.skill || h.tool_input?.command || 'unknown' };
     } else if (h.hook_event_name === 'Stop') {

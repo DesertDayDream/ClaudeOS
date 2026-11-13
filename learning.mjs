@@ -124,7 +124,19 @@ const countRules = body => {
 const pct = q => Math.round(q * 100);
 export const RECENT_JOBS = 3;
 // a task's first line, short enough to read at a glance
-const brief = p => { const s = String(p || '').replace(/<[^>]+>[\s\S]*?<\/[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); return s ? (s.length > 90 ? s.slice(0, 87) + '…' : s) : 'A job from the Manager'; };
+const short = (s, n) => s.length > n ? s.slice(0, n - 1).replace(/\s+\S*$/, '') + '…' : s;
+// what was asked, in the user's words; null when only the wrapped-around context was saved (older jobs)
+export function askedText(p) {
+  const s = String(p || '').replace(/<([a-z-]+)>[\s\S]*?<\/\1>/g, ' ').replace(/Attached \(saved in the brain folder[\s\S]*$/, '').replace(/\s+/g, ' ').trim();
+  return !s || s.startsWith('<') ? null : short(s, 140);
+}
+// what they delivered: the first sentences of their final reply, as plain text
+export function deliveredText(r) {
+  const s = String(r || '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/[*_`#>|]+/g, '').replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  const firstTwo = s.match(/^(.+?[.!?])(\s+.+?[.!?])?(\s|$)/);
+  return short(firstTwo ? firstTwo[1] + (firstTwo[2] && firstTwo[1].length < 80 ? firstTwo[2] : '') : s, 200);
+}
 
 // employees: [{ id, name, label (what the user calls them), body (their SKILL.md) }]; history: coaching history by id
 export function learningReport({ employees, runs, grades, history = {}, now = Date.now() }) {
@@ -152,7 +164,7 @@ export function learningReport({ employees, runs, grades, history = {}, now = Da
     // their last few finished jobs, newest first, to rate right here
     const recentJobs = runs.filter(r => r.outcome === 'done' && ranAs(r, e.name)).slice(-RECENT_JOBS).reverse().map(r => {
       const g = grades[r.key] || {};
-      return { key: r.key, end: r.end, task: brief(r.prompt), ai: g.ai || null, why: g.why || '', user: g.user || null };
+      return { key: r.key, end: r.end, asked: askedText(r.prompt), delivered: deliveredText(r.result), ai: g.ai || null, why: g.why || '', user: g.user || null };
     });
     return { id: e.id, name: e.label || e.name, status, says, jobs: mine.length, rules: countRules(e.body), lessons: coachings.filter(c => !c.rejected && !c.undone && !c.rolledBack).length, lesson, recentJobs };
   });

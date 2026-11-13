@@ -1226,10 +1226,15 @@ function learningHtml() {
   const grader = !g.enough ? `You've rated ${g.n} job${g.n === 1 ? '' : 's'} the AI grader also graded; after ${5 - g.n} more we can check that it judges like you.`
     : g.trusted ? `The AI grader agrees with your ratings ${g.agree} of ${g.n} times, so the coach trusts it.`
     : `The AI grader agrees with you only ${g.agree} of ${g.n} times, so the coach learns only from jobs you rated yourself.`;
-  const job = j => `<div class="lr-job" data-job="${esc(j.key)}"><span class="lr-task" title="${esc(j.why ? `AI grader: ${j.why}` : '')}">${esc(j.task)} <i>${ago(j.end)}${j.ai ? ` · AI ${j.ai}/5` : ''}</i></span>
-    <button class="vote ${j.user === 'up' ? 'on' : ''}" data-lr-vote="up" title="Good work">👍</button><button class="vote ${j.user === 'down' ? 'on' : ''}" data-lr-vote="down" title="Poor work">👎</button></div>`;
-  const rows = L.people.map(p => `<div class="lr-person"><div class="lr-row" data-id="${esc(p.id)}"><span>${LEARN_ICONS[p.status] || '⚪'}</span><b>${esc(p.name)}</b> ${esc(p.says)}${p.lesson ? `<small>Last lesson ${ago(p.lesson.at)}: ${esc(p.lesson.outcome)}.${p.rules ? ` ${p.rules} learned rule${p.rules > 1 ? 's' : ''}.` : ''}</small>` : p.rules ? `<small>${p.rules} learned rule${p.rules > 1 ? 's' : ''}.</small>` : ''}</div>
-    ${p.recentJobs?.length ? p.recentJobs.map(job).join('') : '<div class="lr-job none">No finished jobs yet.</div>'}</div>`).join('');
+  // each job: what was asked, what they delivered, then when, the AI grade and your thumbs
+  const job = j => `<div class="lr-job" data-job="${esc(j.key)}">
+    ${j.asked ? `<div><em>Asked</em> ${esc(j.asked)}</div>` : ''}<div><em>Delivered</em> ${esc(j.delivered || 'No reply was saved for this job.')}</div>
+    <div class="lr-meta">${ago(j.end)}${j.ai ? ` · <span title="${esc(j.why || '')}">AI grade ${j.ai}/5</span>` : ''}
+      <button class="vote ${j.user === 'up' ? 'on' : ''}" data-lr-vote="up" title="Good work">👍</button><button class="vote ${j.user === 'down' ? 'on' : ''}" data-lr-vote="down" title="Poor work">👎</button></div></div>`;
+  const working = L.people.filter(p => p.recentJobs?.length), idle = L.people.filter(p => !p.recentJobs?.length);
+  const rows = working.map(p => `<div class="lr-person"><div class="lr-row" data-id="${esc(p.id)}"><span>${LEARN_ICONS[p.status] || '⚪'}</span><b>${esc(p.name)}</b> ${esc(p.says)}${p.lesson ? `<small>Last lesson ${ago(p.lesson.at)}: ${esc(p.lesson.outcome)}.${p.rules ? ` ${p.rules} learned rule${p.rules > 1 ? 's' : ''}.` : ''}</small>` : p.rules ? `<small>${p.rules} learned rule${p.rules > 1 ? 's' : ''}.</small>` : ''}</div>
+    ${p.recentJobs.map(job).join('')}</div>`).join('')
+    + (idle.length ? `<div class="lr-note">No jobs yet: ${idle.map(p => esc(p.name)).join(', ')}.</div>` : '');
   return `<div class="learning ${learningOpen ? '' : 'closed'}"><div class="lr-h" data-learning-toggle>Learning report <em>${learningOpen ? '▾' : '▸'}</em></div>${learningOpen ? `${rows}
     <div class="lr-note">${L.toRate ? `<b>Your part:</b> ${L.toRate} recent job${L.toRate > 1 ? 's are' : ' is'} waiting for your 👍/👎. Rate them right here; your ratings teach them fastest.` : '<b>Your part:</b> nothing to rate right now.'}</div>
     <div class="lr-note">${esc(grader)}</div>` : ''}</div>`;
