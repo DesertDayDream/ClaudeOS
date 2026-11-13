@@ -2,6 +2,7 @@ import { events } from '/events.js';
 import { markdown, highlight, langOf } from '/markdown.js';
 import { preview, previewUrl, loadLocalImages } from '/preview.js';
 import { enableReview } from '/review.js';
+import { openWhiteboard } from '/whiteboard.js';
 // ClaudeOS chat panel: send requests to Claude in the active brain's folder, stream replies,
 // and answer tool approvals with Allow/Deny.
 const TOKEN = window.CLAUDEOS_TOKEN;
@@ -702,6 +703,7 @@ async function attach(files) {
   }
   warm();
 }
+document.getElementById('boardBtn').addEventListener('click', () => openWhiteboard(file => { attach([file]); input.focus(); }));
 attachInput.addEventListener('change', () => { attach([...attachInput.files]); attachInput.value = ''; });
 input.addEventListener('paste', e => {
   const files = [...(e.clipboardData?.files || [])];
