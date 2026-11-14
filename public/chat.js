@@ -439,6 +439,7 @@ async function load() {
   for (const c of s.approvals || []) renderApproval(c);
   context = s.context || null;
   folder = s.folder || null;
+  project = s.project || null;
   started = (s.messages || []).some(m => m.role === 'user');
   showFolder();
   tools = s.tools || {};
@@ -461,6 +462,7 @@ function onEvent(ev) {
     if (ev.message.role === 'user' && !started) { started = true; showFolder(); }
   }
   else if (ev.kind === 'folder') { folder = ev.folder; showFolder(); }
+  else if (ev.kind === 'project') { project = ev.project; showFolder(); }
   else if (ev.kind === 'tools') { tools = ev.tools || {}; showTools(); }
   else if (ev.kind === 'delta') { const e = messages.get(ev.id); if (e) { e.msg.text += ev.text; render(e.msg); } }
   else if (ev.kind === 'update') { const e = messages.get(ev.id); if (e) render({ ...e.msg, ...ev.fields }); }
@@ -504,7 +506,7 @@ function showList(l) {
 function drawRows(rows) {
   const mark = s => query ? esc(s).replace(new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])), 'gi'), m => `<mark>${m}</mark>`) : esc(s);
   rowsEl.innerHTML = rows.length ? rows.map(c => `<div class="crow ${c.id === currentId ? 'on' : ''}" data-id="${c.id}">
-      <div class="ct"><b>${mark(c.title)}</b><span>${c.parent ? '<span class="sub">↳ side session · </span>' : ''}${c.schedule ? '<span class="sched">⏰ scheduled · </span>' : ''}${c.busy ? '<span class="busy">● working · </span>' : ''}${ago(c.updated)} · ${c.count} messages</span>${c.snippet ? `<em>${mark(c.snippet)}</em>` : ''}</div>
+      <div class="ct"><b>${mark(c.title)}</b><span>${c.project ? `<span class="sub">🎮 ${esc(c.project)} · </span>` : ''}${c.parent ? '<span class="sub">↳ side session · </span>' : ''}${c.schedule ? '<span class="sched">⏰ scheduled · </span>' : ''}${c.busy ? '<span class="busy">● working · </span>' : ''}${ago(c.updated)} · ${c.count} messages</span>${c.snippet ? `<em>${mark(c.snippet)}</em>` : ''}</div>
       <div class="acts"><button type="button" class="btn mini" data-act="rename" title="Rename">✎</button><button type="button" class="btn mini" data-act="delete" title="Delete">×</button></div>
     </div>`).join('')
     : `<div class="empty">${query ? 'No chat mentions that.' : 'No saved chats yet. Your chats show up here once you send a message.'}</div>`;
@@ -727,14 +729,22 @@ chatPane.addEventListener('drop', e => {
 
 // ---------- the folder a chat works in ----------
 const folderBtn = document.getElementById('chatFolder');
-let folder = null, started = false;
+let folder = null, started = false, project = null;
 function showFolder() {
+  folderBtn.classList.toggle('project', !!project);
+  if (project) {
+    folderBtn.textContent = `🎮 ${project}`;
+    folderBtn.classList.remove('set');
+    folderBtn.title = `This chat works on the ${project} project: its project sheet and folder are part of the chat. Use a project button beside the team to start another project's chat.`;
+    return;
+  }
   folderBtn.textContent = folder ? `📁 ${folder.split(/[\\/]/).filter(Boolean).pop()}` : 'Brain folder';
   folderBtn.classList.toggle('set', !!folder);
   folderBtn.title = (folder ? `This chat works in ${folder}, like a Claude Desktop session there.` : 'This chat works in the brain\'s own folder.') +
     (started ? ' Start a new chat to work in another folder.' : ' Click to pick a project folder (its CLAUDE.md, settings, MCP servers and Claude Code memory apply). Set it before the first message.');
 }
 folderBtn.addEventListener('click', async () => {
+  if (project) return alert(`This chat works on ${project}. Pick another project from the Projects buttons beside the team.`);
   if (started) return alert(`This chat works in ${folder || 'the brain folder'}. Start a new chat to work in another folder.`);
   let recent = [];
   try { recent = JSON.parse(localStorage.getItem('claudeos.folders') || '[]'); } catch { /* none yet */ }

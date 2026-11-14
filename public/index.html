@@ -833,12 +833,33 @@
   body.ops-chat > aside { top: 86px; bottom: calc(var(--ops-stream-h) + 30px); left: calc(var(--ops-left) + 8px); right: calc(var(--ops-right) + 8px); width: auto !important; border-radius: 12px; background: #0c101cf5; z-index: 12; }
   body.ops-chat #asideGrip { display: none; }
   #conn { bottom: 3px; }
+  /* the brain's projects, beside the team in the 3D view: one click opens a chat on that project */
+  #projectBar { position: fixed; top: 96px; left: calc(var(--ops-left) + 14px); max-width: calc(100% - var(--ops-left) - var(--ops-right) - 28px); z-index: 6;
+    display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; pointer-events: auto; }
+  #projectBar[hidden] { display: none; }
+  .pj-h { width: 100%; font-size: 11px; color: #00f3ff; letter-spacing: .12em; text-transform: uppercase; }
+  .pj { position: relative; display: flex; border: 1px solid hsl(var(--h) 60% 55% / .55); border-radius: 10px; background: #0c101ce6; box-shadow: 0 0 14px hsl(var(--h) 80% 55% / .18); }
+  .pj:hover { border-color: hsl(var(--h) 70% 62%); }
+  .pj button { background: none; border: 0; color: var(--text); font: inherit; cursor: pointer; }
+  .pj-go { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; align-items: center; text-align: left; padding: 7px 12px 7px 10px; }
+  .pj-go i { grid-row: span 2; width: 10px; height: 10px; border-radius: 50%; background: hsl(var(--h) 80% 60%); box-shadow: 0 0 8px hsl(var(--h) 80% 60%); }
+  .pj.busy .pj-go i { animation: pjpulse 1.2s ease-in-out infinite; }
+  @keyframes pjpulse { 50% { opacity: .35; } }
+  .pj-go b { font-size: 13px; } .pj-go small { color: var(--dim); font-size: 11px; white-space: nowrap; }
+  .pj-more { padding: 0 9px; border-left: 1px solid var(--line) !important; color: var(--dim) !important; }
+  .pj-menu { position: absolute; top: calc(100% + 6px); left: 0; min-width: 240px; max-width: 340px; background: #0c101cf8; border: 1px solid var(--line); border-radius: 10px; padding: 4px; z-index: 7; }
+  .pj-menu button { display: flex; justify-content: space-between; gap: 10px; width: 100%; text-align: left; padding: 7px 9px; border-radius: 6px; font-size: 12px; }
+  .pj-menu button:hover { background: rgba(255,255,255,.06); }
+  .pj-menu small { color: var(--dim); white-space: nowrap; }
+  .pj-menu [data-new] { color: var(--accent) !important; border-top: 1px solid var(--line) !important; border-radius: 0 0 6px 6px; }
+  .chatbar .folder.project { border-color: rgba(127,194,155,.6); color: var(--text); }
   @media (max-width: 1100px) { body { --ops-left: 215px; --ops-right: 230px; } .hud .stats { display:none; } .ops-panel { padding: 12px; } }
   @media (max-width: 760px) {
     html { overflow: auto; } body { height: auto; min-height: 100%; overflow: visible; } .hud { position: absolute; top: 0; left: 0; right: 0; padding: 8px 12px; gap: 10px; height: 76px; } .hud h1 { display:none; }
     #scene { position: relative; left: 0; top: 0; width: 100%; height: 45vh; margin-top: 76px; display:block; }
     #opsLeft, #opsRight, #opsStream { position: relative; inset: auto; width: auto; margin: 12px; }
     #opsGrip { display: none; } body.ops-chat > aside { position: fixed; top: 76px; left: 8px; right: 8px; bottom: 8px; }
+    #projectBar { position: relative; top: auto; left: auto; max-width: none; margin: 12px; }
   }
 
 </style>
@@ -869,6 +890,7 @@
     <span><i style="color:var(--reference);background:var(--reference)"></i>reference</span>
   </div>
 </div>
+<nav id="projectBar" aria-label="Projects" hidden></nav>
 <section class="ops-panel" id="opsLeft" aria-label="Master operations"><h2>Master operations</h2><h3>Brain memory</h3><div id="opsMemory" class="ops-memory"></div><h3>CLAUDE.md foundations</h3><p id="opsFoundationStatus" class="ops-muted">Loading foundations...</p><details><summary>Read master instructions</summary><pre id="opsFoundations"></pre></details><h3>Active brief queue</h3><div id="opsQueue" aria-live="polite">Loading queue...</div></section>
 <section class="ops-panel" id="opsRight" aria-label="Skill roster"><h2>Skill roster</h2><p class="ops-muted">Rank from rated work / live SKILL.md constraints</p><div id="opsRoster"></div></section>
 <section id="opsStream" aria-label="Headless stdout stream"><div id="opsGrip" title="Drag to make the chat taller or shorter (double-click: back to normal)"></div><h2>Headless stdout / live <span id="opsStreamState"></span></h2><div id="opsTicker" role="log" aria-live="off">Waiting for headless work...</div></section>
@@ -968,6 +990,7 @@
 <script type="module" src="/chat.js"></script>
 <script type="module" src="/queue.js"></script>
 <script type="module" src="/operations.js"></script>
+<script type="module" src="/projects.js"></script>
 <script type="module" src="/brains.js"></script>
 <script type="module" src="/desk.js"></script>
 <script type="module" src="/git.js"></script>

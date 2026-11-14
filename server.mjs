@@ -851,6 +851,7 @@ async function handleApi(req, res, url) {
     return json(res, 200, { dir, files: await findFiles(dir, url.searchParams.get('q') || '') });
   }
   if (url.pathname === '/api/chats' && req.method === 'GET') return json(res, 200, chat ? chat.list(url.searchParams.get('q') || '') : { chats: [] });
+  if (url.pathname === '/api/chat/projects' && req.method === 'GET') return json(res, 200, chat ? chat.projectList() : { projects: [] });
   if (url.pathname === '/api/employee' && req.method === 'GET') return json(res, 200, active ? employeeView(active, url.searchParams.get('id') || '') : { error: 'Set up a brain first.' });
   if (url.pathname === '/api/manager' && req.method === 'GET') return json(res, 200, active ? managerFor(active).snapshot() : { inbox: [], files: [], briefs: [], busy: false });
   if (url.pathname === '/api/update' && req.method === 'GET') return json(res, 200, updater.status());
@@ -988,6 +989,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/chat/tools') return json(res, 200, chat.setTools(body.tools || {}));
   if (url.pathname === '/api/chat/mode') return json(res, 200, chat.setMode(String(body.mode || '')));
   if (url.pathname === '/api/chat/folder') return json(res, 200, chat.setFolder(body.folder || null));
+  if (url.pathname === '/api/chat/project') return json(res, 200, chat.startProject(String(body.id || '')));
   if (url.pathname === '/api/chat/stop') { managerFor(active).stopChatSpecialists(chat.snapshot().id); chat.stop(); for (const h of handoffs.values()) h.stop(); return json(res, 200, { ok: true }); }
   if (url.pathname === '/api/handoff') return json(res, 200, await handoff(active, body, req));
   if (url.pathname === '/api/org') { const r = org.apply(active.id, body); if (r.ok && /^(assign|editDept|removeDept)$/.test(body.op)) organizeCabinets(active); refresh(); return json(res, 200, r); }

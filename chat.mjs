@@ -17,6 +17,7 @@ import { defaultEngine } from './agents.mjs';
 import os from 'node:os';
 import { MODEL_GUIDANCE } from './model-routing.mjs';
 import { TOOL_TIMEOUT_MS, LONG_TOOL_TIMEOUT_MS } from './tool-timeouts.mjs';
+import { readProjects, projectPrompt } from './game-projects.mjs';
 const MODEL_GUIDANCE_VERSION = 2;
 
 const MAX_MESSAGES = 300;
@@ -352,7 +353,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       state.messages = state.messages.slice(-MAX_MESSAGES);
       try { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(file, JSON.stringify(state)); } catch { /* keep going */ }
       const m = index.chats[id] || { created: state.messages[0]?.ts || Date.now() };
-      index.chats[id] = { ...m, ...(state.employee ? { employee: state.employee.id } : {}), title: m.renamed ? m.title : titleOf(state.messages), updated: state.messages.at(-1)?.ts || Date.now(), count: state.messages.length };
+      index.chats[id] = { ...m, ...(state.employee ? { employee: state.employee.id } : {}), ...(state.project ? { project: state.project } : {}), title: m.renamed ? m.title : titleOf(state.messages), updated: state.messages.at(-1)?.ts || Date.now(), count: state.messages.length };
       saveIndex();
     }
     function push(msg) {
@@ -407,6 +408,8 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       if (state.folder) extra.push(engine === 'claude'
         ? `This chat works in the project folder ${state.folder}. Its CLAUDE.md, settings and Claude Code memory (MEMORY.md) apply exactly as in Claude Desktop: keep knowledge about this project there, as that memory says. The brain (${cwd}) is added beside it; use the brain's shared memory for facts that matter across projects.`
         : `This chat works in the project folder ${state.folder}. Follow its AGENTS.md or CLAUDE.md if it has one. The brain (${cwd}) is added beside it; use the brain's shared memory (the memory MCP tools) for facts that matter across projects.`);
+      const proj = projectOf();
+      if (proj) extra.push(projectPrompt(proj, cwd));
       if (crew.length) extra.push(managerPrompt(crew, projects()));
       if (emp) extra.push(employeePrompt(emp));
       if (linked.length) {
@@ -453,6 +456,9 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       // a project chat works in that folder like Claude Desktop does (its CLAUDE.md, settings, .mcp.json
       // and Claude Code memory), with the brain added beside it for its skills and instructions
       if (state.folder) args.push('--add-dir', cwd);
+      // a project chat stays in the brain (its team and memory) with the project's own folder beside it
+      const proj = projectOf();
+      if (proj?.folder && proj.folder !== (state.folder || cwd)) args.push('--add-dir', proj.folder);
       if (tools.chrome) args.push('--chrome');
       for (const folder of new Set([state.folder || cwd, cwd, globalClaudeDir])) stripFoundations(folder);
       // the same text in every chat, so the prompt cache reuses it from one chat to the next
@@ -1082,7 +1088,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     }
 
     function snapshot() {
-      return { id, title: index.chats[id]?.title || 'New chat', messages: state.messages, busy: !!run, context: state.context, folder: state.folder,
+      return { id, title: index.chats[id]?.title || 'New chat', messages: state.messages, busy: !!run, context: state.context, folder: state.folder, project: state.project || null,
         tools: state.tools || {}, parent: state.parent || null, mode: state.mode || '', options: state.options || {}, todos: state.todos || null };
     }
     // an employee's own model and effort (the Manager's chats share the brain's, set with setOptions)
@@ -1153,9 +1159,20 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
       send1({ kind: 'folder', folder });
       return { ok: true, folder };
     }
+    // the brain project this chat works on (Projects/<Name>/PROJECT.md), picked before it starts like the folder
+    const projectOf = () => state.project ? readProjects(cwd).find(p => p.id === state.project) || null : null;
+    function setProject(pid) {
+      if (run) return { error: 'Claude is still answering. Wait for it, or press Stop.' };
+      if (state.sessionId) return { error: 'This chat has already started. Start it from the project button to get a new chat for that project.' };
+      state.project = pid || null;
+      cool();
+      if (state.messages.length) save();
+      send1({ kind: 'project', project: state.project });
+      return { ok: true, project: state.project };
+    }
     // the text a search looks through
     const text = () => state.messages.map(m => m.text).join('\n');
-    return { id, send, enqueueInline, stop, wrapUp, rewind, report, startWith, snapshot, text, setFolder, setTools, setMode, setupSession, harness, setEmployee, setOwnOptions, parentOf, warm, cool, file,
+    return { id, send, enqueueInline, stop, wrapUp, rewind, report, startWith, snapshot, text, setFolder, setProject, setTools, setMode, setupSession, harness, setEmployee, setOwnOptions, parentOf, warm, cool, file,
       folder: () => state.folder || cwd, tools: () => state.tools || {}, options,
       busy: () => !!run, empty: () => !state.messages.length, employee: () => state.employee,
       idleSince: () => (live && !run ? live.since : null) };
@@ -1176,6 +1193,25 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     if (current().empty()) return { ok: true }; // already on a fresh one
     const c = conv(newId());
     return open(c.id);
+  }
+  // the brain's projects, each with its latest chats, for the buttons beside the team
+  function projectList() {
+    const all = rows();
+    return { projects: readProjects(cwd).map(({ text, ...p }) => {
+      const chats = all.filter(r => r.project === p.id);
+      return { ...p, count: chats.length, busy: chats.some(r => r.busy), chats: chats.slice(0, 6).map(r => ({ id: r.id, title: r.title, updated: r.updated, busy: r.busy })) };
+    }) };
+  }
+  // jump into a project: the open chat if it's still empty, otherwise a fresh one, set to work on it
+  function startProject(pid) {
+    const p = readProjects(cwd).find(x => x.id === pid);
+    if (!p) return { error: 'That project is gone.' };
+    let c = managerChat();
+    if (!c.empty() || c.busy()) c = conv(newId());
+    const r = c.setProject(p.id);
+    if (r.error) { c = conv(newId()); const again = c.setProject(p.id); if (again.error) return again; }
+    open(c.id);
+    return { ok: true, chat: c.id, project: p.id };
   }
   function rename(id, title) {
     const m = index.chats[id];
@@ -1437,7 +1473,7 @@ export function createChat({ cwd, memoryFile, dir, legacyFile, activityFile, hel
     setFolder: f => current().setFolder(f), setTools: t => current().setTools(t), setMode: m => current().setMode(m), warm: () => current().warm(), upload, attachmentFile,
     runInline: ({ chat, ...task }) => (chat ? conv(chat) : managerChat()).enqueueInline(task),
     startSession, startScheduled, startBenchmark, stopBenchmark, benchmarkHarness, benchmarkSnapshot, messageSession, chatFolder, employeeChat, empChatId, view, owns: chatId => convs.has(chatId),
-    open, newChat, rename, remove, list, report, anyBusy, stopAll: () => { for (const c of convs.values()) { c.stop(); c.cool(); } },
+    open, newChat, projectList, startProject, rename, remove, list, report, anyBusy, stopAll: () => { for (const c of convs.values()) { c.stop(); c.cool(); } },
     // idle chats start a fresh Claude at their next message (new plugins, skills or settings load then)
     coolAll: () => { for (const c of convs.values()) c.cool(); },
     setOptions, requestApproval, requestCodexApproval, answerApproval, dropOthersApprovals, snapshot,
